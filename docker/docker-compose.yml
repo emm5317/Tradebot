@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tradebot
+      POSTGRES_USER: tradebot
+      POSTGRES_PASSWORD: tradebot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  rust-engine:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.rust
+    env_file: ../config/.env.example
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "3000:3000"
+
+  python-signals:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.python
+    env_file: ../config/.env.example
+    depends_on:
+      - redis
+
+volumes:
+  pgdata:

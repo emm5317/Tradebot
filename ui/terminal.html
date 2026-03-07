@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tradebot – Terminal</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0a; color: #00ff41; font-family: 'Courier New', monospace; padding: 1rem; }
+        h1 { font-size: 1.2rem; margin-bottom: 1rem; border-bottom: 1px solid #333; padding-bottom: 0.5rem; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        .panel { border: 1px solid #333; padding: 1rem; border-radius: 4px; }
+        .panel h2 { font-size: 0.9rem; color: #888; margin-bottom: 0.5rem; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th, td { text-align: left; padding: 0.25rem 0.5rem; }
+        th { color: #888; border-bottom: 1px solid #333; }
+        .positive { color: #00ff41; }
+        .negative { color: #ff4141; }
+        #kill-switch { background: #ff0000; color: #fff; border: none; padding: 0.5rem 1rem; cursor: pointer; font-weight: bold; margin-top: 1rem; }
+    </style>
+</head>
+<body>
+    <h1>TRADEBOT TERMINAL</h1>
+    <div class="grid">
+        <div class="panel">
+            <h2>POSITIONS</h2>
+            <table id="positions">
+                <thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>P&L</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <div class="panel">
+            <h2>OPEN ORDERS</h2>
+            <table id="orders">
+                <thead><tr><th>Ticker</th><th>Side</th><th>Price</th><th>Qty</th><th>Status</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <div class="panel">
+            <h2>SIGNALS</h2>
+            <table id="signals">
+                <thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Edge</th><th>Source</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <div class="panel">
+            <h2>DAILY P&L</h2>
+            <div id="pnl-display" style="font-size: 2rem; margin-top: 1rem;">$0.00</div>
+        </div>
+    </div>
+    <button id="kill-switch">KILL SWITCH</button>
+
+    <script>
+        // TODO: connect to /api/* endpoints, poll or use SSE for live updates
+        async function refresh() {
+            try {
+                const [pos, ord, pnl] = await Promise.all([
+                    fetch('/api/positions').then(r => r.json()),
+                    fetch('/api/orders').then(r => r.json()),
+                    fetch('/api/pnl').then(r => r.json()),
+                ]);
+                // TODO: render data into tables
+                document.getElementById('pnl-display').textContent =
+                    `$${pnl.daily_pnl?.toFixed(2) ?? '0.00'}`;
+            } catch (e) {
+                console.error('Refresh failed:', e);
+            }
+        }
+        setInterval(refresh, 2000);
+        refresh();
+
+        document.getElementById('kill-switch').addEventListener('click', async () => {
+            if (confirm('Activate kill switch? This will cancel all orders and flatten positions.')) {
+                await fetch('/api/kill-switch', { method: 'POST' });
+            }
+        });
+    </script>
+</body>
+</html>

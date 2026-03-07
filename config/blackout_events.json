@@ -1,0 +1,20 @@
+[
+    {
+        "name": "FOMC Meeting",
+        "description": "Federal Reserve interest rate decision – high volatility expected",
+        "recurrence": "scheduled",
+        "windows": []
+    },
+    {
+        "name": "CPI Release",
+        "description": "Consumer Price Index release – markets may gap",
+        "recurrence": "monthly",
+        "windows": []
+    },
+    {
+        "name": "Exchange Maintenance",
+        "description": "Kalshi scheduled maintenance window",
+        "recurrence": "as-announced",
+        "windows": []
+    }
+]
