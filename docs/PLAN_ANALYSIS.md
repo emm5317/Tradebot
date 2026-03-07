@@ -147,13 +147,15 @@ This is different from backtesting (BE-8) — backtesting is offline analysis. D
 
 If sticking with Redis for KV operations (even if NATS handles messaging), `fred` is meaningfully faster under concurrent access than raw `redis-rs`.
 
-### 2.2 Use `fastwebsockets` for Kalshi WS
+### 2.2 Use `tokio-tungstenite` for Kalshi WS (confirmed)
 
 **Current plan**: Implies `tokio-tungstenite` for WebSocket.
 
-**Recommendation**: Use [`fastwebsockets`](https://github.com/denoland/fastwebsockets) — significantly lower allocation overhead than tungstenite. It's the WebSocket library used in Deno and is benchmarked at 2-5x fewer allocations per message.
+**Recommendation**: Stick with [`tokio-tungstenite`](https://github.com/snapview/tokio-tungstenite) — the battle-tested choice. While `fastwebsockets` claims fewer allocations, benchmarks show `tokio-tungstenite` actually outperforms it in aggregate tests (7603ms vs 10141ms). More importantly, `fastwebsockets` has been flagged as **unsound and not thread-safe** with non-strict WebSocket spec compliance — a dealbreaker for production trading. Recent `tokio-tungstenite` versions (post-0.26.2) include significant performance improvements.
 
 For the Binance Python feed, use the [`websockets`](https://websockets.readthedocs.io/) library (not `aiohttp` WS) — it's purpose-built, handles ping/pong correctly, and has better backpressure handling.
+
+Consider [`papaya`](https://github.com/ibraheem-ca/papaya) over `dashmap` for the orderbook `OrderbookManager` — it's lock-free (no tail latency spikes from sharded locks), which matters for trading where worst-case latency kills edge.
 
 ### 2.3 Use `simd-json` for Signal Deserialization
 
@@ -395,14 +397,14 @@ This catches SQL typos, missing columns, and type mismatches at compile time —
 |----------|-------|-----------|
 | Async runtime | `tokio` | Industry standard, best ecosystem |
 | HTTP client | `reqwest` | HTTP/2, connection pooling, built on hyper |
-| WebSocket | `fastwebsockets` | Lower allocations than tungstenite |
+| WebSocket | `tokio-tungstenite` | Battle-tested, thread-safe, good perf |
 | Web framework | `axum` | Tokio-native, ergonomic, fast |
 | Database | `sqlx` | Compile-time checked queries, async |
 | Redis | `fred` | Connection pooling, pipeline batching |
 | Messaging | `async-nats` | JetStream, request/reply |
 | Serialization | `serde` + `simd-json` | simd-json on hot path |
 | Decimal | `rust_decimal` | No floating point in money path |
-| Crypto | `rsa` + `sha2` + `base64` | RSA-SHA256 signing |
+| Crypto | `openssl` or `aws-lc-rs` | Fastest RSA-SHA256 signing |
 | Observability | `tracing` + `tracing-subscriber` | Structured logging, spans |
 | Metrics | `metrics` + `metrics-exporter-prometheus` | Optional Prometheus export |
 | Concurrency | `dashmap` | Lock-free concurrent maps |

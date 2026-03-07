@@ -24,8 +24,7 @@ The Kalshi client is the most complex single integration. It handles authenticat
 - Stateless — no token caching, each request independently signed
 
 ### Crates
-- `rsa` — RSA key loading and signing
-- `sha2` — SHA-256 digest
+- `openssl` or `aws-lc-rs` — RSA key loading and signing (fastest options; pure-Rust `rsa` crate is significantly slower and matters since every request is signed)
 - `base64` — encoding
 - `chrono` — timestamp generation
 
@@ -100,7 +99,7 @@ impl KalshiClient {
 `rust/src/kalshi/websocket.rs`
 
 ### Specification
-- Uses `fastwebsockets` for lower allocation overhead
+- Uses `tokio-tungstenite` (battle-tested, thread-safe; `fastwebsockets` has soundness issues)
 - Persistent connection to `KALSHI_WS_URL`
 - Subscribes to `orderbook_delta` channel for tracked markets
 - Auto-reconnect: exponential backoff (1s, 2s, 4s, 8s, max 30s)
@@ -121,7 +120,7 @@ Messages parsed with `simd-json` for speed on the hot path.
 - On reconnect, re-subscribe to the full current set
 
 ### Improvement over original plan
-- **`fastwebsockets`** instead of `tokio-tungstenite` — 2-5x fewer allocations per message
+- **`tokio-tungstenite`** confirmed as best choice — thread-safe, well-benchmarked, actively maintained
 - **`simd-json`** parsing on the hot path
 - **Dynamic subscription management** — only subscribe to contracts near settlement, not all markets
 

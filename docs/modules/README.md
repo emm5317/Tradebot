@@ -58,4 +58,4 @@ BE-10 (Hardening) requires BE-9
 | Python packages | pip + dataclasses | **uv + pydantic v2** — faster installs, runtime validation |
 | Data analytics | pandas | **polars** — 10-100x faster for backtesting |
 | Redis client | redis-rs | **fred** — connection pooling, pipeline batching |
-| WebSocket | tokio-tungstenite | **fastwebsockets** — fewer allocations |
+| WebSocket | tokio-tungstenite | **tokio-tungstenite** confirmed — thread-safe, `fastwebsockets` has soundness issues |
