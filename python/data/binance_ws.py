@@ -30,6 +30,7 @@ class OHLCBar:
 class CryptoState:
     spot_price: float
     realized_vol_30m: float | None
+    ewma_vol_30m: float | None
     bars_count: int
     last_updated: datetime
 
@@ -47,7 +48,12 @@ class BinanceFeed:
     spot_price: float = 0.0
     bars_1m: deque[OHLCBar] = field(default_factory=lambda: deque(maxlen=60))
     realized_vol_30m: float | None = None
+    ewma_vol_30m: float | None = None
     last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # EWMA decay factor (0.94 = RiskMetrics standard for daily, adapted for 1-min)
+    _ewma_lambda: float = 0.94
+    _ewma_variance: float = 0.0
 
     _current_bar_minute: int = -1
     _current_open: float = 0.0
@@ -121,6 +127,7 @@ class BinanceFeed:
                 )
                 self.bars_1m.append(bar)
                 self._recompute_vol()
+                self._recompute_vol_ewma(bar)
 
             # Start new bar
             self._current_bar_minute = current_minute
@@ -160,11 +167,49 @@ class BinanceFeed:
         # Annualize: sqrt(minutes_per_year)
         self.realized_vol_30m = sigma_1min * math.sqrt(525_600)
 
+    def _recompute_vol_ewma(self, bar: OHLCBar) -> None:
+        """Update EWMA volatility with the latest bar's return.
+
+        Uses exponentially weighted moving average: more responsive to
+        recent volatility changes than equal-weighted realized vol.
+        Formula: variance_t = lambda * variance_{t-1} + (1-lambda) * r_t^2
+        """
+        if len(self.bars_1m) < 2:
+            return
+
+        bars = list(self.bars_1m)
+        prev_close = bars[-2].close
+        if prev_close <= 0:
+            return
+
+        log_return = math.log(bar.close / prev_close)
+
+        if self._ewma_variance == 0.0:
+            # Initialize with simple variance from available bars
+            if len(self.bars_1m) >= 10:
+                closes = [b.close for b in bars[-11:]]
+                returns = [
+                    math.log(closes[i] / closes[i - 1])
+                    for i in range(1, len(closes))
+                    if closes[i - 1] > 0
+                ]
+                if returns:
+                    self._ewma_variance = sum(r * r for r in returns) / len(returns)
+
+        self._ewma_variance = (
+            self._ewma_lambda * self._ewma_variance
+            + (1.0 - self._ewma_lambda) * log_return * log_return
+        )
+
+        sigma_1min = math.sqrt(self._ewma_variance)
+        self.ewma_vol_30m = sigma_1min * math.sqrt(525_600)
+
     def get_state(self) -> CryptoState:
         """Snapshot of current spot, vol, bar data."""
         return CryptoState(
             spot_price=self.spot_price,
             realized_vol_30m=self.realized_vol_30m,
+            ewma_vol_30m=self.ewma_vol_30m,
             bars_count=len(self.bars_1m),
             last_updated=self.last_updated,
         )

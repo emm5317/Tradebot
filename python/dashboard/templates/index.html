@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tradebot</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script src="https://unpkg.com/htmx-ext-sse@2.3.0/sse.js"></script>
+</head>
+<body>
+    <div class="header">
+        <h1>> TRADEBOT</h1>
+        <div class="status" id="system-status"
+             hx-get="/api/health" hx-trigger="load, every 10s"
+             hx-swap="innerHTML">
+            loading...
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Model State Panel -->
+        <div class="panel">
+            <div class="panel-title">Model State <span class="live-indicator"></span></div>
+            <div id="model-state"
+                 hx-get="/api/model-state" hx-trigger="load, every 5s"
+                 hx-swap="innerHTML">
+            </div>
+        </div>
+
+        <!-- Live Signals Panel -->
+        <div class="panel">
+            <div class="panel-title">Recent Signals</div>
+            <div id="signals-table"
+                 hx-get="/api/signals?limit=20" hx-trigger="load, every 5s"
+                 hx-swap="innerHTML">
+            </div>
+        </div>
+
+        <!-- Positions Panel -->
+        <div class="panel">
+            <div class="panel-title">Positions</div>
+            <div id="positions-table"
+                 hx-get="/api/positions" hx-trigger="load, every 10s"
+                 hx-swap="innerHTML">
+            </div>
+        </div>
+
+        <!-- Daily Summary Panel -->
+        <div class="panel">
+            <div class="panel-title">Daily Summary</div>
+            <div id="daily-summary"
+                 hx-get="/api/daily-summary" hx-trigger="load, every 30s"
+                 hx-swap="innerHTML">
+            </div>
+        </div>
+    </div>
+
+    <script>
+    // Format API responses into HTML tables
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+        const target = evt.detail.target;
+
+        if (target.id === 'system-status') {
+            formatHealth(target);
+        } else if (target.id === 'model-state') {
+            formatModelState(target);
+        } else if (target.id === 'signals-table') {
+            formatSignals(target);
+        } else if (target.id === 'positions-table') {
+            formatPositions(target);
+        } else if (target.id === 'daily-summary') {
+            formatSummary(target);
+        }
+    });
+
+    function formatHealth(el) {
+        try {
+            const data = JSON.parse(el.textContent);
+            const items = ['postgres', 'redis'].map(svc => {
+                const ok = data[svc] === 'connected';
+                return `<span class="status-dot ${ok ? 'ok' : 'error'}"></span>${svc}`;
+            }).join('&nbsp;&nbsp;');
+            el.innerHTML = items;
+        } catch(e) { /* leave raw */ }
+    }
+
+    function formatModelState(el) {
+        try {
+            const states = JSON.parse(el.textContent);
+            if (!states.length) { el.innerHTML = '<span class="rejected">no active contracts</span>'; return; }
+            el.innerHTML = states.map(s => {
+                const prob = (s.model_prob || 0);
+                const dir = s.direction || '?';
+                const dirClass = dir === 'yes' ? 'yes' : 'no';
+                const edge = s.edge ? (s.edge * 100).toFixed(1) + '%' : '-';
+                const mins = s.minutes_remaining ? s.minutes_remaining.toFixed(1) : '-';
+                const rej = s.rejection_reason ? `<span class="rejected">${s.rejection_reason}</span>` : '';
+                return `<div class="model-card">
+                    <div class="ticker">${s.ticker}</div>
+                    <div class="prob-bar"><div class="prob-fill ${dirClass}" style="width:${prob*100}%"></div></div>
+                    <div class="detail-row"><span>Model</span><span class="value">${(prob*100).toFixed(1)}%</span></div>
+                    <div class="detail-row"><span>Market</span><span class="value">${((s.market_price||0)*100).toFixed(1)}%</span></div>
+                    <div class="detail-row"><span>Edge</span><span class="value ${s.edge > 0.05 ? 'edge-high' : 'edge-low'}">${edge}</span></div>
+                    <div class="detail-row"><span>Minutes</span><span class="value">${mins}</span></div>
+                    ${rej ? '<div class="detail-row">' + rej + '</div>' : ''}
+                </div>`;
+            }).join('');
+        } catch(e) { /* leave raw */ }
+    }
+
+    function formatSignals(el) {
+        try {
+            const signals = JSON.parse(el.textContent);
+            if (!signals.length) { el.innerHTML = '<span class="rejected">no signals yet</span>'; return; }
+            let html = '<table><tr><th>Time</th><th>Ticker</th><th>Dir</th><th>Edge</th><th>Kelly</th><th>Status</th></tr>';
+            signals.forEach(s => {
+                const time = new Date(s.created_at).toLocaleTimeString();
+                const dir = s.acted_on ? `<span class="dir-${s.direction}">${s.direction}</span>` : '-';
+                const edge = s.edge ? (s.edge * 100).toFixed(1) + '%' : '-';
+                const kelly = s.kelly_fraction ? (s.kelly_fraction * 100).toFixed(1) + '%' : '-';
+                const status = s.acted_on ? '<span class="dir-yes">FIRED</span>'
+                    : `<span class="rejected">${s.rejection_reason || 'rejected'}</span>`;
+                html += `<tr><td>${time}</td><td>${s.ticker}</td><td>${dir}</td><td>${edge}</td><td>${kelly}</td><td>${status}</td></tr>`;
+            });
+            html += '</table>';
+            el.innerHTML = html;
+        } catch(e) { /* leave raw */ }
+    }
+
+    function formatPositions(el) {
+        try {
+            const positions = JSON.parse(el.textContent);
+            if (!positions.length) { el.innerHTML = '<span class="rejected">no open positions</span>'; return; }
+            let html = '<table><tr><th>Ticker</th><th>Dir</th><th>Size</th><th>Fill</th><th>Status</th><th>Latency</th></tr>';
+            positions.forEach(p => {
+                const size = '$' + (p.size_cents / 100).toFixed(2);
+                const fill = p.fill_price ? (p.fill_price * 100).toFixed(0) + 'c' : '-';
+                const lat = p.latency_ms ? p.latency_ms + 'ms' : '-';
+                html += `<tr><td>${p.ticker}</td><td class="dir-${p.direction}">${p.direction}</td><td>${size}</td><td>${fill}</td><td>${p.status}</td><td>${lat}</td></tr>`;
+            });
+            html += '</table>';
+            el.innerHTML = html;
+        } catch(e) { /* leave raw */ }
+    }
+
+    function formatSummary(el) {
+        try {
+            const days = JSON.parse(el.textContent);
+            if (!days.length) { el.innerHTML = '<span class="rejected">no trading data</span>'; return; }
+            let html = '<table><tr><th>Date</th><th>Signals</th><th>Orders</th><th>W/L</th><th>Net P&L</th></tr>';
+            days.forEach(d => {
+                const pnl = (d.net_pnl_cents || 0) / 100;
+                const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                html += `<tr><td>${d.date}</td><td>${d.total_signals||0}</td><td>${d.total_orders||0}</td><td>${d.wins||0}/${d.losses||0}</td><td class="${pnlClass}">$${pnl.toFixed(2)}</td></tr>`;
+            });
+            html += '</table>';
+            el.innerHTML = html;
+        } catch(e) { /* leave raw */ }
+    }
+    </script>
+</body>
+</html>

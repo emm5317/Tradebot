@@ -15,6 +15,21 @@ class Settings(BaseSettings):
     # Collection intervals
     collection_interval_seconds: int = 60
 
+    # Evaluation loop
+    evaluation_interval_seconds: int = 10
+    nats_url: str = "nats://localhost:4222"
+    redis_url: str = "redis://localhost:6379"
+
+    # Dashboard
+    dashboard_host: str = "0.0.0.0"
+    dashboard_port: int = 8050
+
+    # Notifications
+    discord_webhook_url: str = ""
+
+    # Concurrent snapshot fetching
+    max_concurrent_snapshots: int = 8
+
     model_config = {"env_prefix": "", "env_file": "../config/.env", "extra": "ignore"}
 
 

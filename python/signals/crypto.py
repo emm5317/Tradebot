@@ -25,6 +25,12 @@ from signals.types import (
     SignalAction,
     SignalSchema,
 )
+from signals.utils import (
+    compute_effective_edge,
+    compute_kelly,
+    determine_direction,
+    estimate_fill_price,
+)
 
 logger = structlog.get_logger()
 
@@ -180,23 +186,15 @@ class CryptoSignalEvaluator:
 
         # 8. Determine direction and raw edge
         market_price = orderbook.mid_price
-
-        if model_prob > market_price:
-            direction = "yes"
-            raw_edge = model_prob - market_price
-        else:
-            direction = "no"
-            raw_edge = market_price - model_prob
+        direction, raw_edge = determine_direction(model_prob, market_price)
 
         model_state.direction = direction
         model_state.edge = raw_edge
 
         # 9. Spread-adjusted edge
-        spread_cost = orderbook.spread / 2.0
-        effective_edge = raw_edge - spread_cost
-
-        if orderbook.spread > _WIDE_SPREAD_THRESHOLD:
-            effective_edge *= 0.85
+        effective_edge = compute_effective_edge(
+            raw_edge, orderbook.spread, _WIDE_SPREAD_THRESHOLD
+        )
 
         if effective_edge < _MIN_EDGE:
             rejection = RejectedSignal(
@@ -212,8 +210,8 @@ class CryptoSignalEvaluator:
             return None, rejection, model_state
 
         # 10. Kelly using fill price
-        fill_price = _estimate_fill_price(direction, orderbook)
-        kelly = _compute_kelly(model_prob, fill_price, direction)
+        fill_price = estimate_fill_price(direction, orderbook)
+        kelly = compute_kelly(model_prob, fill_price, direction)
 
         if kelly < _MIN_KELLY:
             rejection = RejectedSignal(
@@ -369,32 +367,3 @@ async def load_blackout_windows(pool) -> list[BlackoutWindow]:
         return []
 
 
-def _estimate_fill_price(direction: str, orderbook: OrderbookState) -> float:
-    if direction == "yes":
-        if orderbook.best_ask is not None:
-            return orderbook.best_ask
-        return orderbook.mid_price + orderbook.spread / 2.0
-    else:
-        if orderbook.best_bid is not None:
-            return orderbook.best_bid
-        return orderbook.mid_price - orderbook.spread / 2.0
-
-
-def _compute_kelly(
-    model_prob: float, fill_price: float, direction: str
-) -> float:
-    if direction == "yes":
-        win_prob = model_prob
-        win_payout = 1.0 - fill_price
-        lose_payout = fill_price
-    else:
-        win_prob = 1.0 - model_prob
-        win_payout = fill_price
-        lose_payout = 1.0 - fill_price
-
-    if win_payout <= 0:
-        return 0.0
-
-    lose_prob = 1.0 - win_prob
-    kelly = (win_prob * win_payout - lose_prob * lose_payout) / win_payout
-    return max(0.0, kelly)

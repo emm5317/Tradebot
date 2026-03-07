@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 from data.mesonet import ASOSObservation
 from signals.types import Contract, OrderbookState
-from signals.weather import WeatherSignalEvaluator, _compute_kelly, _estimate_fill_price
+from signals.utils import compute_kelly, estimate_fill_price
+from signals.weather import WeatherSignalEvaluator
 
 
 def _make_contract(minutes_ahead: float = 12.0, threshold: float = 70.0) -> Contract:
@@ -190,35 +191,35 @@ class TestWeatherEvaluator:
 class TestKellyComputation:
     def test_positive_edge_positive_kelly(self):
         # Model says 0.65, fill at 0.50
-        kelly = _compute_kelly(0.65, 0.50, "yes")
+        kelly = compute_kelly(0.65, 0.50, "yes")
         assert kelly > 0
 
     def test_no_edge_zero_kelly(self):
         # Model says 0.50, fill at 0.50
-        kelly = _compute_kelly(0.50, 0.50, "yes")
+        kelly = compute_kelly(0.50, 0.50, "yes")
         assert kelly == 0.0
 
     def test_negative_edge_zero_kelly(self):
         # Model says 0.40, fill at 0.50 → negative kelly clamped to 0
-        kelly = _compute_kelly(0.40, 0.50, "yes")
+        kelly = compute_kelly(0.40, 0.50, "yes")
         assert kelly == 0.0
 
     def test_direction_no(self):
         # Model says 0.30 (so P(no) = 0.70), fill_price = 0.40
-        kelly = _compute_kelly(0.30, 0.40, "no")
+        kelly = compute_kelly(0.30, 0.40, "no")
         assert kelly > 0
 
 
 class TestFillPriceEstimation:
     def test_yes_uses_ask(self):
         book = _make_orderbook(mid=0.50, spread=0.04)
-        assert _estimate_fill_price("yes", book) == 0.52
+        assert estimate_fill_price("yes", book) == 0.52
 
     def test_no_uses_bid(self):
         book = _make_orderbook(mid=0.50, spread=0.04)
-        assert _estimate_fill_price("no", book) == 0.48
+        assert estimate_fill_price("no", book) == 0.48
 
     def test_fallback_without_best_prices(self):
         book = OrderbookState(mid_price=0.50, spread=0.04)
-        assert _estimate_fill_price("yes", book) == 0.52
-        assert _estimate_fill_price("no", book) == 0.48
+        assert estimate_fill_price("yes", book) == 0.52
+        assert estimate_fill_price("no", book) == 0.48

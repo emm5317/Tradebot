@@ -1,4 +1,5 @@
 mod config;
+mod execution;
 mod kalshi;
 mod logging;
 
@@ -52,17 +53,42 @@ async fn main() -> Result<()> {
         .context("Redis PING failed")?;
     tracing::info!(response = %pong, "redis connected");
 
-    // Connect to NATS (held for use by subsystems)
-    let _nats = async_nats::connect(&config.nats_url)
+    // Connect to NATS
+    let nats = async_nats::connect(&config.nats_url)
         .await
         .context("Failed to connect to NATS")?;
     tracing::info!(server = %config.nats_url, "nats connected");
 
-    tracing::info!("all systems operational — tradebot ready");
+    // Initialize Kalshi client
+    let kalshi = kalshi::client::KalshiClient::new(
+        &config.kalshi_base_url,
+        &config.kalshi_api_key,
+        &config.kalshi_private_key_path,
+    )?;
 
-    // Keep running until interrupted
+    tracing::info!(
+        paper_mode = config.paper_mode,
+        max_trade_size = config.max_trade_size_cents,
+        max_daily_loss = config.max_daily_loss_cents,
+        "all systems operational — tradebot ready"
+    );
+
+    // Run execution engine with graceful shutdown
+    let execution_handle = tokio::spawn({
+        let config = config.clone();
+        let pool = pool.clone();
+        async move {
+            if let Err(e) = execution::run(&config, nats, pool, kalshi).await {
+                tracing::error!(error = %e, "execution engine failed");
+            }
+        }
+    });
+
+    // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutting down");
+
+    execution_handle.abort();
 
     // Graceful shutdown with 10s timeout
     let shutdown = async {

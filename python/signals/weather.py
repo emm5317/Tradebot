@@ -25,6 +25,12 @@ from signals.types import (
     SignalAction,
     SignalSchema,
 )
+from signals.utils import (
+    compute_effective_edge,
+    compute_kelly,
+    determine_direction,
+    estimate_fill_price,
+)
 
 if TYPE_CHECKING:
     from data.mesonet import ASOSObservation
@@ -169,23 +175,15 @@ class WeatherSignalEvaluator:
 
         # 6. Determine direction and raw edge
         market_price = orderbook.mid_price
-
-        if p_ensemble > market_price:
-            direction = "yes"
-            raw_edge = p_ensemble - market_price
-        else:
-            direction = "no"
-            raw_edge = market_price - p_ensemble
+        direction, raw_edge = determine_direction(p_ensemble, market_price)
 
         model_state.direction = direction
         model_state.edge = raw_edge
 
         # 7. Spread-adjusted edge
-        spread_cost = orderbook.spread / 2.0
-        effective_edge = raw_edge - spread_cost
-
-        if orderbook.spread > _WIDE_SPREAD_THRESHOLD:
-            effective_edge *= 0.85  # discount for wide spread uncertainty
+        effective_edge = compute_effective_edge(
+            raw_edge, orderbook.spread, _WIDE_SPREAD_THRESHOLD
+        )
 
         if effective_edge < _MIN_EDGE:
             rejection = RejectedSignal(
@@ -201,8 +199,8 @@ class WeatherSignalEvaluator:
             return None, rejection, model_state
 
         # 8. Kelly sizing using estimated fill price, not mid-price
-        fill_price = _estimate_fill_price(direction, orderbook)
-        kelly = _compute_kelly(p_ensemble, fill_price, direction)
+        fill_price = estimate_fill_price(direction, orderbook)
+        kelly = compute_kelly(p_ensemble, fill_price, direction)
 
         if kelly < _MIN_KELLY:
             rejection = RejectedSignal(
@@ -325,44 +323,3 @@ class WeatherSignalEvaluator:
         self._recent_signals.pop(ticker, None)
 
 
-def _estimate_fill_price(direction: str, orderbook: OrderbookState) -> float:
-    """Estimate the actual fill price from the orderbook.
-
-    Buying YES → pay the best ask.
-    Buying NO → pay (1 - best bid) effectively.
-    Falls back to mid + half spread.
-    """
-    if direction == "yes":
-        if orderbook.best_ask is not None:
-            return orderbook.best_ask
-        return orderbook.mid_price + orderbook.spread / 2.0
-    else:
-        if orderbook.best_bid is not None:
-            return orderbook.best_bid
-        return orderbook.mid_price - orderbook.spread / 2.0
-
-
-def _compute_kelly(
-    model_prob: float, fill_price: float, direction: str
-) -> float:
-    """Kelly criterion for binary outcome using estimated fill price.
-
-    For YES: pay fill_price, win (1 - fill_price) if correct.
-    For NO: pay (1 - fill_price), win fill_price if correct.
-    """
-    if direction == "yes":
-        win_prob = model_prob
-        win_payout = 1.0 - fill_price
-        lose_payout = fill_price
-    else:
-        win_prob = 1.0 - model_prob
-        win_payout = fill_price
-        lose_payout = 1.0 - fill_price
-
-    if win_payout <= 0:
-        return 0.0
-
-    lose_prob = 1.0 - win_prob
-    kelly = (win_prob * win_payout - lose_prob * lose_payout) / win_payout
-
-    return max(0.0, kelly)

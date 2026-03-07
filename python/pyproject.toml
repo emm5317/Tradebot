@@ -1,6 +1,6 @@
 [project]
 name = "tradebot-data"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
     "httpx[http2]>=0.27",
@@ -10,6 +10,11 @@ dependencies = [
     "pydantic-settings>=2",
     "structlog>=24",
     "nats-py>=2",
+    "redis[hiredis]>=5",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "jinja2>=3.1",
+    "sse-starlette>=2",
 ]
 
 [project.optional-dependencies]
@@ -20,7 +25,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["data*", "collector*", "models*", "signals*", "tests*"]
+include = ["data*", "collector*", "models*", "signals*", "evaluator*", "dashboard*", "backtester*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

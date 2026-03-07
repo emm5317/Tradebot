@@ -180,10 +180,12 @@ class CollectorDaemon:
             )
 
     async def _collect_market_snapshots(self, client: httpx.AsyncClient) -> None:
-        """Snapshot prices for contracts settling within 30 minutes."""
+        """Snapshot prices for contracts settling within 30 minutes.
+
+        Fetches concurrently with a semaphore to respect rate limits.
+        """
         assert self.pool is not None
 
-        # Query contracts settling within 30 minutes
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -198,47 +200,53 @@ class CollectorDaemon:
         if not rows:
             return
 
-        tickers = [r["ticker"] for r in rows]
         settlement_times = {r["ticker"]: r["settlement_time"] for r in rows}
+        tickers = list(settlement_times.keys())
+        sem = asyncio.Semaphore(self.settings.max_concurrent_snapshots)
 
-        # Fetch current prices from Kalshi REST API
-        snapshots = []
-        for ticker in tickers:
-            try:
-                resp = await client.get(
-                    f"{self.settings.kalshi_base_url}/trade-api/v2/markets/{ticker}",
-                )
-                if resp.status_code != 200:
-                    logger.warning(
-                        "market_snapshot_fetch_failed",
-                        ticker=ticker,
-                        status=resp.status_code,
+        async def _fetch_one(ticker: str) -> tuple | None:
+            async with sem:
+                try:
+                    resp = await client.get(
+                        f"{self.settings.kalshi_base_url}/trade-api/v2/markets/{ticker}",
                     )
-                    continue
+                    if resp.status_code != 200:
+                        logger.warning(
+                            "market_snapshot_fetch_failed",
+                            ticker=ticker,
+                            status=resp.status_code,
+                        )
+                        return None
 
-                market = resp.json().get("market", {})
-                now = datetime.now(timezone.utc)
-                settlement = settlement_times[ticker]
-                minutes_to_settlement = (
-                    settlement - now
-                ).total_seconds() / 60.0
+                    market = resp.json().get("market", {})
+                    now = datetime.now(timezone.utc)
+                    settlement = settlement_times[ticker]
+                    minutes_to_settlement = (
+                        settlement - now
+                    ).total_seconds() / 60.0
 
-                yes_price = float(market.get("yes_price", 0)) / 100.0
-                no_price = float(market.get("no_price", 0)) / 100.0
+                    yes_price = float(market.get("yes_price", 0)) / 100.0
+                    no_price = float(market.get("no_price", 0)) / 100.0
 
-                snapshots.append((
-                    ticker,
-                    yes_price,
-                    no_price,
-                    abs(yes_price - no_price),
-                    None,  # best_bid (from orderbook, not REST)
-                    None,  # best_ask
-                    None,  # bid_depth
-                    None,  # ask_depth
-                    minutes_to_settlement,
-                ))
-            except Exception:
-                logger.exception("market_snapshot_single_error", ticker=ticker)
+                    return (
+                        ticker,
+                        yes_price,
+                        no_price,
+                        abs(yes_price - no_price),
+                        None,  # best_bid (from orderbook via Redis)
+                        None,  # best_ask
+                        None,  # bid_depth
+                        None,  # ask_depth
+                        minutes_to_settlement,
+                    )
+                except Exception:
+                    logger.exception("market_snapshot_single_error", ticker=ticker)
+                    return None
+
+        results = await asyncio.gather(
+            *[_fetch_one(t) for t in tickers], return_exceptions=True
+        )
+        snapshots = [r for r in results if isinstance(r, tuple)]
 
         if snapshots:
             async with self.pool.acquire() as conn:

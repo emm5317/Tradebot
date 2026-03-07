@@ -47,6 +47,18 @@ clean:
 collector:
     cd python && python -m collector.daemon
 
+# Signal evaluation loop
+evaluator:
+    cd python && python -m evaluator.daemon
+
+# Terminal-style dashboard
+dashboard:
+    cd python && python -m dashboard.app
+
+# Backtesting
+backtest start end:
+    cd python && python -m backtester.engine --start {{start}} --end {{end}}
+
 # Diagnostics
 health:
-    curl -s localhost:3000/api/health | jq .
+    curl -s localhost:8050/api/health | jq .

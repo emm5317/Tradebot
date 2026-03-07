@@ -1,0 +1,205 @@
+/* Terminal-style dark theme for Tradebot Dashboard */
+
+:root {
+    --bg: #0a0e14;
+    --bg-card: #111820;
+    --bg-hover: #1a222d;
+    --border: #1e2a3a;
+    --text: #b0bec5;
+    --text-bright: #e0e6ed;
+    --green: #00e676;
+    --red: #ff5252;
+    --amber: #ffc107;
+    --cyan: #00bcd4;
+    --blue: #448aff;
+    --dim: #546e7a;
+    --font: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 100vh;
+}
+
+/* Header */
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-card);
+}
+
+.header h1 {
+    font-size: 16px;
+    color: var(--green);
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+
+.header .status {
+    display: flex;
+    gap: 16px;
+    font-size: 11px;
+}
+
+.status-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+}
+
+.status-dot.ok { background: var(--green); }
+.status-dot.error { background: var(--red); }
+.status-dot.warn { background: var(--amber); }
+
+/* Layout */
+.container {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    min-height: calc(100vh - 45px);
+}
+
+.panel {
+    background: var(--bg);
+    padding: 12px 16px;
+    overflow: auto;
+}
+
+.panel-full {
+    grid-column: 1 / -1;
+}
+
+.panel-title {
+    font-size: 11px;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+th {
+    text-align: left;
+    color: var(--dim);
+    font-weight: 500;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+td {
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+tr:hover td {
+    background: var(--bg-hover);
+}
+
+/* Signal direction colors */
+.dir-yes { color: var(--green); font-weight: 600; }
+.dir-no { color: var(--red); font-weight: 600; }
+
+/* Edge styling */
+.edge-high { color: var(--green); }
+.edge-low { color: var(--amber); }
+.edge-neg { color: var(--red); }
+
+/* Rejection reason */
+.rejected { color: var(--dim); font-style: italic; }
+
+/* Model state cards */
+.model-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+}
+
+.model-card .ticker {
+    color: var(--cyan);
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.model-card .prob-bar {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin: 6px 0;
+    overflow: hidden;
+}
+
+.model-card .prob-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+}
+
+.model-card .prob-fill.yes { background: var(--green); }
+.model-card .prob-fill.no { background: var(--red); }
+
+.model-card .detail-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--dim);
+    margin-top: 4px;
+}
+
+.model-card .detail-row .value {
+    color: var(--text-bright);
+}
+
+/* P&L summary */
+.pnl-positive { color: var(--green); font-weight: 700; }
+.pnl-negative { color: var(--red); font-weight: 700; }
+
+/* Blinking cursor for active elements */
+@keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}
+
+.live-indicator::after {
+    content: '\25CF';
+    color: var(--green);
+    animation: blink 1s infinite;
+    margin-left: 6px;
+    font-size: 8px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Responsive */
+@media (max-width: 900px) {
+    .container { grid-template-columns: 1fr; }
+}
