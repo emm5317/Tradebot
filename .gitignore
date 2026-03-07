@@ -2,6 +2,12 @@
 /rust/target/
 *.swp
 
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
 # Environment
 .env
 config/.env

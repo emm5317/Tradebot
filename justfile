@@ -24,6 +24,11 @@ build:
 test:
     cd rust && cargo test
 
+test-python:
+    cd python && python -m pytest tests/ -v
+
+test-all: test test-python
+
 # Code quality
 fmt:
     cd rust && cargo fmt
@@ -37,6 +42,10 @@ clippy:
 # Cleanup
 clean:
     cd rust && cargo clean
+
+# Data collector
+collector:
+    cd python && python -m collector.daemon
 
 # Diagnostics
 health:
