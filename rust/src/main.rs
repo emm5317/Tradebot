@@ -1,4 +1,5 @@
 mod config;
+mod kalshi;
 mod logging;
 
 use anyhow::{Context, Result};
