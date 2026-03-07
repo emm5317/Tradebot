@@ -1,0 +1,21 @@
+# Rust
+/rust/target/
+*.swp
+
+# Environment
+.env
+config/.env
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+pgdata/
+redisdata/
+natsdata/
