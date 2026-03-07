@@ -24,6 +24,20 @@ build:
 test:
     cd rust && cargo test
 
+# Code quality
+fmt:
+    cd rust && cargo fmt
+
+fmt-check:
+    cd rust && cargo fmt --check
+
+clippy:
+    cd rust && cargo clippy -- -D warnings
+
+# Cleanup
+clean:
+    cd rust && cargo clean
+
 # Diagnostics
 health:
     curl -s localhost:3000/api/health | jq .

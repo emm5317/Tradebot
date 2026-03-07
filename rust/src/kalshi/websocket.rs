@@ -6,8 +6,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, interval};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::kalshi::auth::KalshiAuth;
@@ -70,14 +71,16 @@ pub struct KalshiWsFeed {
     ws_url: String,
     auth: KalshiAuth,
     subscriptions: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    cancel: CancellationToken,
 }
 
 impl KalshiWsFeed {
-    pub fn new(ws_url: String, auth: KalshiAuth) -> Self {
+    pub fn new(ws_url: String, auth: KalshiAuth, cancel: CancellationToken) -> Self {
         Self {
             ws_url,
             auth,
             subscriptions: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            cancel,
         }
     }
 
@@ -98,12 +101,17 @@ impl KalshiWsFeed {
     }
 
     /// Run the WebSocket feed loop with auto-reconnect.
-    /// Sends parsed messages to `tx`. Runs until the channel is closed.
+    /// Returns when cancelled or the channel is closed.
     pub async fn run(&self, tx: mpsc::Sender<WsFeedMessage>) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
         loop {
+            if self.cancel.is_cancelled() {
+                info!("kalshi ws feed cancelled");
+                return;
+            }
+
             match self.connect_and_stream(&tx).await {
                 Ok(()) => {
                     info!("kalshi ws closed cleanly");
@@ -111,32 +119,46 @@ impl KalshiWsFeed {
                 }
                 Err(e) => {
                     error!(error = %e, "kalshi ws disconnected");
-                    let _ = tx.send(WsFeedMessage::Disconnected).await;
+                    if tx.send(WsFeedMessage::Disconnected).await.is_err() {
+                        warn!("ws feed receiver dropped, stopping");
+                        return;
+                    }
 
                     let delay = Duration::from_secs(backoff_secs);
                     warn!(?delay, "reconnecting to kalshi ws");
-                    tokio::time::sleep(delay).await;
+
+                    tokio::select! {
+                        () = tokio::time::sleep(delay) => {}
+                        () = self.cancel.cancelled() => {
+                            info!("kalshi ws feed cancelled during backoff");
+                            return;
+                        }
+                    }
                     backoff_secs = (backoff_secs * 2).min(max_backoff);
                 }
             }
         }
     }
 
-    /// Connect, authenticate, subscribe, and stream until error.
+    /// Connect, authenticate via headers, subscribe, and stream until error.
     async fn connect_and_stream(
         &self,
         tx: &mpsc::Sender<WsFeedMessage>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let auth_headers = self.auth.sign_request("GET", "/trade-api/ws/v2")?;
 
-        let url = format!(
-            "{}?api_key={}&signature={}&timestamp={}",
-            self.ws_url, auth_headers.api_key, auth_headers.signature, auth_headers.timestamp
-        );
+        // Auth via headers instead of query params to avoid leaking secrets in logs
+        let mut request = self.ws_url.as_str().into_client_request()?;
+        let headers = request.headers_mut();
+        headers.insert("KALSHI-ACCESS-KEY", auth_headers.api_key.parse()?);
+        headers.insert("KALSHI-ACCESS-SIGNATURE", auth_headers.signature.parse()?);
+        headers.insert("KALSHI-ACCESS-TIMESTAMP", auth_headers.timestamp.parse()?);
 
-        let (ws_stream, _resp) = connect_async(&url).await?;
+        let (ws_stream, _resp) = tokio_tungstenite::connect_async(request).await?;
         info!("kalshi ws connected");
-        let _ = tx.send(WsFeedMessage::Reconnected).await;
+        if tx.send(WsFeedMessage::Reconnected).await.is_err() {
+            return Ok(());
+        }
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -161,6 +183,11 @@ impl KalshiWsFeed {
 
         loop {
             tokio::select! {
+                () = self.cancel.cancelled() => {
+                    info!("kalshi ws feed cancelled, closing connection");
+                    let _ = write.send(Message::Close(None)).await;
+                    return Ok(());
+                }
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
@@ -185,7 +212,6 @@ impl KalshiWsFeed {
                     }
                 }
                 _ = ping_interval.tick() => {
-                    // Check pong timeout
                     if last_pong.elapsed() > Duration::from_secs(35) {
                         return Err("pong timeout".into());
                     }
@@ -203,15 +229,7 @@ impl KalshiWsFeed {
         text: &str,
         tx: &mpsc::Sender<WsFeedMessage>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Use simd-json for hot-path parsing
-        let mut bytes = text.as_bytes().to_vec();
-        let raw: WsRawMessage = match simd_json::from_slice(&mut bytes) {
-            Ok(v) => v,
-            Err(_) => {
-                // Fallback to serde_json for non-standard messages
-                serde_json::from_str(text)?
-            }
-        };
+        let raw: WsRawMessage = serde_json::from_str(text)?;
 
         let Some(channel) = &raw.channel else {
             return Ok(()); // heartbeat or ack
@@ -226,7 +244,6 @@ impl KalshiWsFeed {
                 if let Some(ticker) = msg.get("market_ticker").and_then(|v| v.as_str()) {
                     // Determine if this is a snapshot or delta based on message shape
                     if let Some(yes) = msg.get("yes") {
-                        // Parse bids/asks arrays from the message
                         let bids = parse_price_levels(yes.get("bids"));
                         let asks = parse_price_levels(yes.get("asks"));
 

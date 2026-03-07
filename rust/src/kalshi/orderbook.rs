@@ -142,24 +142,35 @@ impl OrderbookManager {
     }
 
     /// Estimated fill price for a given order size, walking the book.
+    /// Iterates levels directly without collecting into a Vec.
     pub fn estimated_fill_price(&self, ticker: &str, side: Side, size: i64) -> Option<Decimal> {
         let book = self.books.get(ticker)?;
-        let levels: Vec<(Decimal, i64)> = match side {
-            // Buying: walk asks from lowest to highest
-            Side::Bid => book.asks.iter().map(|(p, s)| (*p, *s)).collect(),
-            // Selling: walk bids from highest to lowest
-            Side::Ask => book.bids.iter().rev().map(|(p, s)| (*p, *s)).collect(),
-        };
 
         let mut remaining = size;
         let mut total_cost = Decimal::ZERO;
 
-        for (price, level_size) in &levels {
-            let fill = remaining.min(*level_size);
-            total_cost += *price * Decimal::from(fill);
-            remaining -= fill;
-            if remaining <= 0 {
-                break;
+        match side {
+            // Buying: walk asks from lowest to highest
+            Side::Bid => {
+                for (price, level_size) in book.asks.iter() {
+                    let fill = remaining.min(*level_size);
+                    total_cost += *price * Decimal::from(fill);
+                    remaining -= fill;
+                    if remaining <= 0 {
+                        break;
+                    }
+                }
+            }
+            // Selling: walk bids from highest to lowest
+            Side::Ask => {
+                for (price, level_size) in book.bids.iter().rev() {
+                    let fill = remaining.min(*level_size);
+                    total_cost += *price * Decimal::from(fill);
+                    remaining -= fill;
+                    if remaining <= 0 {
+                        break;
+                    }
+                }
             }
         }
 

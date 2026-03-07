@@ -67,7 +67,8 @@ impl KalshiClient {
                         return resp.json::<T>().await.map_err(KalshiError::NetworkError);
                     }
 
-                    let err = parse_error_response(status.as_u16(), &resp.text().await.unwrap_or_default());
+                    let body = resp.text().await.unwrap_or_else(|e| format!("<read error: {e}>"));
+                    let err = parse_error_response(status.as_u16(), &body);
                     if status.is_server_error() && attempt < 2 {
                         let delay = Duration::from_secs(1 << attempt);
                         warn!(attempt, ?delay, "kalshi 5xx, retrying");
@@ -116,7 +117,8 @@ impl KalshiClient {
                         return resp.json::<T>().await.map_err(KalshiError::NetworkError);
                     }
 
-                    let err = parse_error_response(status.as_u16(), &resp.text().await.unwrap_or_default());
+                    let body = resp.text().await.unwrap_or_else(|e| format!("<read error: {e}>"));
+                    let err = parse_error_response(status.as_u16(), &body);
                     if status.is_server_error() && attempt < 2 {
                         let delay = Duration::from_secs(1 << attempt);
                         warn!(attempt, ?delay, "kalshi 5xx, retrying");
@@ -159,7 +161,8 @@ impl KalshiClient {
             return resp.json::<T>().await.map_err(KalshiError::NetworkError);
         }
 
-        Err(parse_error_response(status.as_u16(), &resp.text().await.unwrap_or_default()))
+        let body = resp.text().await.unwrap_or_else(|e| format!("<read error: {e}>"));
+        Err(parse_error_response(status.as_u16(), &body))
     }
 
     // --- Public API methods ---
@@ -170,9 +173,12 @@ impl KalshiClient {
         status: &str,
         category: Option<&str>,
     ) -> Result<Vec<Market>, KalshiError> {
-        let mut path = format!("/trade-api/v2/markets?status={status}");
+        let mut path = format!(
+            "/trade-api/v2/markets?status={}",
+            urlencoding::encode(status)
+        );
         if let Some(cat) = category {
-            path.push_str(&format!("&category={cat}"));
+            path.push_str(&format!("&category={}", urlencoding::encode(cat)));
         }
         let resp: MarketsResponse = self.get(&path).await?;
         Ok(resp.markets)
@@ -180,7 +186,10 @@ impl KalshiClient {
 
     /// Fetch a single market by ticker.
     pub async fn get_market(&self, ticker: &str) -> Result<Market, KalshiError> {
-        let path = format!("/trade-api/v2/markets/{ticker}");
+        let path = format!(
+            "/trade-api/v2/markets/{}",
+            urlencoding::encode(ticker)
+        );
         let resp: MarketResponse = self.get(&path).await?;
         Ok(resp.market)
     }
@@ -200,7 +209,10 @@ impl KalshiClient {
 
     /// Cancel an order by ID.
     pub async fn cancel_order(&self, order_id: &str) -> Result<CancelResponse, KalshiError> {
-        let path = format!("/trade-api/v2/portfolio/orders/{order_id}");
+        let path = format!(
+            "/trade-api/v2/portfolio/orders/{}",
+            urlencoding::encode(order_id)
+        );
         self.delete(&path).await
     }
 
@@ -215,10 +227,10 @@ impl KalshiClient {
     pub async fn get_orders(&self, params: OrderQueryParams) -> Result<Vec<Order>, KalshiError> {
         let mut path = "/trade-api/v2/portfolio/orders?".to_string();
         if let Some(ticker) = &params.ticker {
-            path.push_str(&format!("ticker={ticker}&"));
+            path.push_str(&format!("ticker={}&", urlencoding::encode(ticker)));
         }
         if let Some(status) = &params.status {
-            path.push_str(&format!("status={status}&"));
+            path.push_str(&format!("status={}&", urlencoding::encode(status)));
         }
         let resp: OrdersResponse = self.get(&path).await?;
         Ok(resp.orders)

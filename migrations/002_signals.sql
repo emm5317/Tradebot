@@ -1,8 +1,8 @@
 CREATE TABLE signals (
     id                BIGSERIAL PRIMARY KEY,
     ticker            TEXT NOT NULL REFERENCES contracts(ticker),
-    signal_type       TEXT NOT NULL,
-    direction         TEXT NOT NULL,
+    signal_type       TEXT NOT NULL CHECK (signal_type IN ('weather', 'crypto')),
+    direction         TEXT NOT NULL CHECK (direction IN ('yes', 'no')),
     model_prob        REAL NOT NULL,
     market_price      REAL NOT NULL,
     edge              REAL NOT NULL,
