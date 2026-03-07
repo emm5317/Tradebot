@@ -9,6 +9,7 @@ dependencies = [
     "pydantic>=2",
     "pydantic-settings>=2",
     "structlog>=24",
+    "nats-py>=2",
 ]
 
 [project.optional-dependencies]
@@ -19,7 +20,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["data*", "collector*", "tests*"]
+include = ["data*", "collector*", "models*", "signals*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
