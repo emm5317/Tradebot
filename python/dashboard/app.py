@@ -13,11 +13,12 @@ from datetime import datetime, timezone
 
 import asyncpg
 import nats
+import orjson
 import redis.asyncio as aioredis
 import structlog
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, ORJSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
@@ -48,7 +49,7 @@ async def lifespan(app: FastAPI):
         await redis_client.close()
 
 
-app = FastAPI(title="Tradebot Dashboard", lifespan=lifespan)
+app = FastAPI(title="Tradebot Dashboard", lifespan=lifespan, default_response_class=ORJSONResponse)
 app.mount("/static", StaticFiles(directory="dashboard/static"), name="static")
 templates = Jinja2Templates(directory="dashboard/templates")
 
@@ -193,7 +194,7 @@ async def event_stream(request: Request):
                 states = await model_state()
                 yield {
                     "event": "model_state",
-                    "data": json.dumps(states),
+                    "data": orjson.dumps(states).decode(),
                 }
                 await asyncio.sleep(2)
         finally:
@@ -209,4 +210,5 @@ if __name__ == "__main__":
         host=settings.dashboard_host,
         port=settings.dashboard_port,
         reload=False,
+        loop="uvloop",
     )

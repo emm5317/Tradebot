@@ -18,6 +18,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING
 
+import orjson
 import structlog
 
 from signals.types import ModelState, RejectedSignal, SignalSchema
@@ -65,7 +66,7 @@ class SignalPublisher:
         2. DB persist (async, non-blocking)
         3. Redis model state update (async, non-blocking)
         """
-        payload = signal.model_dump_json().encode()
+        payload = orjson.dumps(signal.model_dump())
 
         # 1. NATS — latency-critical, awaited
         if self.nats is not None:
@@ -92,7 +93,7 @@ class SignalPublisher:
 
         Published to the live NATS subject (UI-only) and persisted to DB.
         """
-        payload = rejection.model_dump_json().encode()
+        payload = orjson.dumps(rejection.model_dump())
 
         # NATS live stream (UI only)
         if self.nats is not None:
@@ -114,7 +115,7 @@ class SignalPublisher:
         try:
             await self.redis.set(
                 key,
-                state.model_dump_json(),
+                orjson.dumps(state.model_dump()),
                 ex=_REDIS_MODEL_STATE_TTL,
             )
         except Exception:
