@@ -1,3 +1,4 @@
+# DEPRECATED: Crypto evaluation moved to Rust crypto_evaluator.rs (Phase 3/4.4)
 """BE-4.4: Crypto Signal Evaluator.
 
 Evaluates BTC binary option contracts using Black-Scholes pricing

@@ -11,6 +11,7 @@ If strike is 45°F, settlement outcome is ambiguous.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -23,6 +24,10 @@ class RoundingResult:
     reported_f: float     # nominal F conversion (round(C * 9/5 + 32))
     is_ambiguous: bool    # True if strike falls within [min_f, max_f]
     ambiguity_band: float # max_f - min_f (always 1.8°F for whole-degree C)
+    floor_f: int = 0                   # floor(reported_f)
+    ceil_f: int = 0                    # ceil(reported_f)
+    safe_zone: bool = False            # True if strike is >0.7F from nearest ambiguity boundary
+    boundary_probability: float = 0.5  # P(actual >= strike) given uniform on [min_f, max_f]
 
 
 def compute_rounding_uncertainty(
@@ -60,12 +65,29 @@ def compute_rounding_uncertainty(
     # Ambiguous if the threshold falls within the possible range
     is_ambiguous = min_f <= threshold_f <= max_f
 
+    # Boundary probability: fraction of [min_f, max_f] that is >= strike
+    if threshold_f <= min_f:
+        boundary_probability = 1.0
+    elif threshold_f >= max_f:
+        boundary_probability = 0.0
+    else:
+        boundary_probability = (max_f - threshold_f) / (max_f - min_f)
+
+    # Safe zone: reported_f is far enough from strike that rounding can't flip outcome
+    floor_f = math.floor(reported_f)
+    ceil_f = math.ceil(reported_f)
+    safe_zone = not is_ambiguous and abs(reported_f - threshold_f) > 0.7
+
     return RoundingResult(
         min_f=min_f,
         max_f=max_f,
         reported_f=float(reported_f),
         is_ambiguous=is_ambiguous,
         ambiguity_band=max_f - min_f,
+        floor_f=floor_f,
+        ceil_f=ceil_f,
+        safe_zone=safe_zone,
+        boundary_probability=boundary_probability,
     )
 
 

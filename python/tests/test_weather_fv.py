@@ -1,5 +1,6 @@
 """Tests for weather fair-value engine, rounding model, and METAR parsing."""
 
+from models.physics import StationCalibration
 from models.rounding import (
     RoundingResult,
     celsius_to_cli_fahrenheit,
@@ -7,9 +8,11 @@ from models.rounding import (
     fahrenheit_to_threshold_celsius,
 )
 from models.weather_fv import (
+    SourceConflict,
     WeatherFairValue,
     WeatherState,
     compute_weather_fair_value,
+    detect_source_conflict,
 )
 
 
@@ -380,3 +383,261 @@ class TestMETARParsing:
         assert abs(max_t - (-10.0)) < 0.01
         assert min_t is not None
         assert abs(min_t - (-20.0)) < 0.01
+
+
+# ─── Phase 4.5: Station-Specific Calibration Tests ──────────────────
+
+
+class TestStationCalibration:
+    def test_station_cal_overrides_sigma(self):
+        """Station calibration sigma should override default."""
+        cal = StationCalibration(sigma_10min=0.5)
+        fv = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=15.0,
+            sigma_per_10min=0.3,  # default
+            station_cal=cal,
+        )
+        # With higher sigma, there's more uncertainty
+        fv_default = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=15.0,
+            sigma_per_10min=0.3,
+        )
+        # Higher sigma should produce different probability
+        assert abs(fv.probability - fv_default.probability) > 0.01
+
+    def test_hrrr_bias_correction(self):
+        """HRRR bias correction should shift forecast temps."""
+        cal = StationCalibration(hrrr_bias_f=2.0, hrrr_skill=0.5)
+        fv = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=15.0,
+            hrrr_forecast_temps_f=[51.0, 52.0, 53.0],
+            station_cal=cal,
+        )
+        # Bias of 2.0 means forecasts shifted down by 2
+        # Effective forecasts: [49, 50, 51] instead of [51, 52, 53]
+        assert "hrrr" in fv.components
+
+    def test_low_hrrr_skill_reduces_weight(self):
+        """Low HRRR skill should reduce HRRR weight in blend."""
+        cal_high = StationCalibration(hrrr_skill=0.9)
+        cal_low = StationCalibration(hrrr_skill=0.1)
+
+        fv_high = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=15.0,
+            hrrr_forecast_temps_f=[55.0, 56.0],
+            station_cal=cal_high,
+        )
+        fv_low = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=15.0,
+            hrrr_forecast_temps_f=[55.0, 56.0],
+            station_cal=cal_low,
+        )
+        # With low HRRR skill, HRRR is less influential
+        # HRRR says high → high skill = more bullish
+        assert fv_high.probability != fv_low.probability
+
+    def test_station_cal_none_preserves_default(self):
+        """station_cal=None should produce identical results to no cal."""
+        kwargs = dict(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=15.0,
+            sigma_per_10min=0.3,
+        )
+        fv_none = compute_weather_fair_value(**kwargs, station_cal=None)
+        fv_omit = compute_weather_fair_value(**kwargs)
+        assert abs(fv_none.probability - fv_omit.probability) < 0.001
+
+
+# ─── Phase 4.6: Source Conflict & Outage Tests ──────────────────────
+
+
+class TestSourceConflict:
+    def test_metar_hrrr_conflict(self):
+        """METAR 7C (44.6F), HRRR max 49F → conflict, sigma * 1.5."""
+        conflict = detect_source_conflict(
+            current_temp_f=44.6,
+            hrrr_forecast_temps_f=[49.0, 50.0, 51.0],
+            metar_temp_c=7,
+        )
+        assert conflict.metar_hrrr_conflict
+        assert abs(conflict.sigma_multiplier - 1.5) < 0.01
+
+    def test_hrrr_unavailable(self):
+        """HRRR unavailable → no conflict, normal sigma."""
+        conflict = detect_source_conflict(
+            current_temp_f=44.6,
+            hrrr_forecast_temps_f=None,
+            metar_temp_c=7,
+        )
+        assert conflict.hrrr_missing
+        assert not conflict.metar_hrrr_conflict
+        assert abs(conflict.sigma_multiplier - 1.0) < 0.01
+
+    def test_metar_unavailable(self):
+        """METAR unavailable → sigma * 1.25."""
+        conflict = detect_source_conflict(
+            current_temp_f=44.6,
+            hrrr_forecast_temps_f=[45.0, 46.0],
+            metar_temp_c=None,
+        )
+        assert conflict.metar_missing
+        assert abs(conflict.sigma_multiplier - 1.25) < 0.01
+
+    def test_both_unavailable(self):
+        """Both sources unavailable."""
+        conflict = detect_source_conflict(
+            current_temp_f=None,
+            hrrr_forecast_temps_f=None,
+            metar_temp_c=None,
+        )
+        assert conflict.metar_missing
+        assert conflict.hrrr_missing
+
+    def test_normal_agreement(self):
+        """METAR and HRRR agree within 3F → no conflict."""
+        conflict = detect_source_conflict(
+            current_temp_f=44.6,
+            hrrr_forecast_temps_f=[45.0, 46.0, 44.0],
+            metar_temp_c=7,
+        )
+        assert not conflict.metar_hrrr_conflict
+        assert abs(conflict.sigma_multiplier - 1.0) < 0.01
+
+
+class TestSourceConflictIntegration:
+    def test_both_missing_low_confidence(self):
+        """Both METAR and HRRR missing → still computes but low confidence."""
+        fv = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=15.0,
+            metar_temp_c=None,
+            hrrr_forecast_temps_f=None,
+        )
+        # Should still compute probability from physics model
+        assert 0.01 <= fv.probability <= 0.99
+        # But lower confidence (no HRRR, no rounding info)
+        assert fv.confidence <= 0.8
+
+    def test_conflict_inflates_sigma(self):
+        """METAR-HRRR conflict should produce different prob via inflated sigma."""
+        # No conflict
+        fv_normal = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=15.0,
+            metar_temp_c=9,  # ~48.2F
+            hrrr_forecast_temps_f=[49.0, 50.0],  # within 3F
+        )
+        # Conflict
+        fv_conflict = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=44.6,
+            minutes_remaining=15.0,
+            metar_temp_c=7,  # ~44.6F
+            hrrr_forecast_temps_f=[49.0, 50.0, 51.0],  # >3F away
+        )
+        # Conflict should change probability due to sigma inflation
+        assert fv_normal.probability != fv_conflict.probability
+
+
+# ─── Phase 4.7: Rounding Ambiguity Hardening Tests ──────────────────
+
+
+class TestRoundingBoundaryProbability:
+    def test_boundary_prob_ambiguous_near_max(self):
+        """metar_temp_c=7, strike=45: boundary_prob = (45.3 - 45) / 1.8 ≈ 0.167."""
+        result = compute_rounding_uncertainty(7, 45.0)
+        assert result.is_ambiguous
+        expected = (result.max_f - 45.0) / (result.max_f - result.min_f)
+        assert abs(result.boundary_probability - expected) < 0.01
+
+    def test_boundary_prob_ambiguous_near_min(self):
+        """metar_temp_c=7, strike=44: boundary_prob = (45.3 - 44) / 1.8 ≈ 0.722."""
+        result = compute_rounding_uncertainty(7, 44.0)
+        assert result.is_ambiguous
+        expected = (result.max_f - 44.0) / (result.max_f - result.min_f)
+        assert abs(result.boundary_probability - expected) < 0.01
+
+    def test_safe_zone_well_above(self):
+        """metar_temp_c=10 (50F), strike=45: not ambiguous, safe_zone=True."""
+        result = compute_rounding_uncertainty(10, 45.0)
+        assert not result.is_ambiguous
+        assert result.safe_zone
+
+    def test_safe_zone_well_below(self):
+        """metar_temp_c=7 (45F), strike=47: not ambiguous, safe_zone=True."""
+        result = compute_rounding_uncertainty(7, 47.0)
+        assert not result.is_ambiguous
+        assert result.safe_zone
+
+    def test_not_safe_zone_when_close(self):
+        """Close to boundary but not ambiguous → not safe_zone if < 0.7F."""
+        # 7C → reported 45F, range [43.7, 45.5]
+        # Strike 45.8 → not ambiguous (45.8 > 45.5), but |45 - 45.8| = 0.8 > 0.7 → safe
+        result = compute_rounding_uncertainty(7, 45.8)
+        assert not result.is_ambiguous
+        assert result.safe_zone  # 0.8 > 0.7
+
+    def test_boundary_prob_below_min(self):
+        """Strike below min_f → probability = 1.0."""
+        result = compute_rounding_uncertainty(10, 40.0)  # 10C → range [49.1, 50.9]
+        assert abs(result.boundary_probability - 1.0) < 0.01
+
+    def test_boundary_prob_above_max(self):
+        """Strike above max_f → probability = 0.0."""
+        result = compute_rounding_uncertainty(10, 55.0)  # 10C → range [49.1, 50.9]
+        assert abs(result.boundary_probability - 0.0) < 0.01
+
+    def test_non_ambiguous_unchanged(self):
+        """Non-ambiguous cases should preserve existing behavior."""
+        result = compute_rounding_uncertainty(20, 50.0)  # 20C → 68F, strike 50
+        assert not result.is_ambiguous
+        assert result.safe_zone
+        assert abs(result.boundary_probability - 1.0) < 0.01  # 50 < min_f
+
+
+class TestRoundingIntegration:
+    def test_safe_zone_confidence_bonus(self):
+        """Safe zone should add +0.05 confidence."""
+        fv = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=45.0,
+            current_temp_f=50.0,
+            minutes_remaining=15.0,
+            metar_temp_c=10,  # 50F, well away from 45 strike
+        )
+        # Confidence should include safe zone bonus
+        assert fv.confidence >= 0.75  # base 0.7 + safe zone 0.05
+
+    def test_ambiguous_blends_boundary_prob(self):
+        """Ambiguous rounding should blend boundary probability into ensemble."""
+        fv = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=45.0,
+            current_temp_f=44.6,
+            minutes_remaining=15.0,
+            metar_temp_c=7,  # range [43.7, 45.5], ambiguous at 45
+        )
+        assert fv.rounding_ambiguous
+        assert "rounding" in fv.components

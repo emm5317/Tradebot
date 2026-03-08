@@ -3,8 +3,9 @@
 //! Subscribes to the `level2` channel (public, no auth) to maintain
 //! best bid/ask/mid. Flushes to Redis every 500ms for Python model consumption.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fred::clients::Client as RedisClient;
 use fred::interfaces::KeysInterface;
@@ -16,12 +17,19 @@ use tracing::{error, info, warn};
 
 use crate::crypto_state::CryptoState;
 
+/// 5-minute rolling window for trade volume accumulation.
+const VOLUME_WINDOW: Duration = Duration::from_secs(300);
+
 /// Coinbase feed state written to Redis.
 #[derive(Debug, Clone)]
 struct CoinbaseState {
     spot: f64,
     best_bid: f64,
     best_ask: f64,
+    /// Trade-by-trade volume accumulation for 5-min rolling window.
+    trade_volumes: VecDeque<(Instant, f64)>,
+    /// Cached 5-minute rolling trade volume (BTC).
+    trade_volume_5m: f64,
 }
 
 impl Default for CoinbaseState {
@@ -30,7 +38,20 @@ impl Default for CoinbaseState {
             spot: 0.0,
             best_bid: 0.0,
             best_ask: 0.0,
+            trade_volumes: VecDeque::new(),
+            trade_volume_5m: 0.0,
         }
+    }
+}
+
+impl CoinbaseState {
+    /// Recompute 5-minute rolling trade volume, evicting stale entries.
+    fn recompute_volume_5m(&mut self) {
+        let cutoff = Instant::now() - VOLUME_WINDOW;
+        while self.trade_volumes.front().map_or(false, |(t, _)| *t < cutoff) {
+            self.trade_volumes.pop_front();
+        }
+        self.trade_volume_5m = self.trade_volumes.iter().map(|(_, v)| v).sum();
     }
 }
 
@@ -87,14 +108,23 @@ impl CoinbaseFeed {
 
         let (mut write, mut read) = ws_stream.split();
 
-        // Subscribe to level2 channel for BTC-USD (public, no auth needed)
-        let subscribe_msg = serde_json::json!({
+        // Subscribe to level2 + market_trades channels for BTC-USD (public, no auth needed)
+        let subscribe_l2 = serde_json::json!({
             "type": "subscribe",
             "product_ids": ["BTC-USD"],
             "channel": "level2"
         });
         write
-            .send(Message::Text(subscribe_msg.to_string().into()))
+            .send(Message::Text(subscribe_l2.to_string().into()))
+            .await?;
+
+        let subscribe_trades = serde_json::json!({
+            "type": "subscribe",
+            "product_ids": ["BTC-USD"],
+            "channel": "market_trades"
+        });
+        write
+            .send(Message::Text(subscribe_trades.to_string().into()))
             .await?;
 
         let mut state = CoinbaseState::default();
@@ -119,7 +149,13 @@ impl CoinbaseFeed {
                 }
                 _ = flush_interval.tick() => {
                     if state.spot > 0.0 {
-                        crypto_state.update_coinbase(state.spot, state.best_bid, state.best_ask);
+                        state.recompute_volume_5m();
+                        crypto_state.update_coinbase(
+                            state.spot,
+                            state.best_bid,
+                            state.best_ask,
+                            state.trade_volume_5m,
+                        );
                         flush_coinbase_state(&state, redis).await;
                     }
                 }
@@ -175,6 +211,25 @@ fn parse_coinbase_message(text: &str, state: &mut CoinbaseState) {
                 // Update spot as mid of bid/ask
                 if state.best_bid > 0.0 && state.best_ask > 0.0 {
                     state.spot = (state.best_bid + state.best_ask) / 2.0;
+                }
+            }
+        }
+        "market_trades" => {
+            // Extract trade sizes for volume tracking
+            if let Some(events) = msg.get("events").and_then(|v| v.as_array()) {
+                for event in events {
+                    if let Some(trades) = event.get("trades").and_then(|v| v.as_array()) {
+                        for trade in trades {
+                            let size: f64 = trade
+                                .get("size")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0.0);
+                            if size > 0.0 {
+                                state.trade_volumes.push_back((Instant::now(), size));
+                            }
+                        }
+                    }
                 }
             }
         }

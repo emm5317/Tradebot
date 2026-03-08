@@ -66,10 +66,12 @@ class WeatherSignalEvaluator:
         sigma_table: dict[tuple[str, int, int], float] | None = None,
         climo_table: dict[tuple[str, int, int], tuple[float, float]] | None = None,
         ensemble_weights: tuple[float, float, float] | None = None,
+        station_calibration: dict | None = None,
     ) -> None:
         self.sigma_table = sigma_table
         self.climo_table = climo_table
         self.ensemble_weights = ensemble_weights
+        self.station_calibration = station_calibration or {}
         self._recent_signals: dict[str, datetime] = {}
 
     def evaluate(

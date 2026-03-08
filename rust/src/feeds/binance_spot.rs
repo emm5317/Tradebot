@@ -86,6 +86,19 @@ impl Default for BinanceSpotState {
 }
 
 impl BinanceSpotState {
+    /// Compute rolling 5-minute trade volume from recent closed bars + current bar.
+    fn volume_5m(&self) -> f64 {
+        // Sum volume from last 5 closed bars + current (in-progress) bar
+        let closed_vol: f64 = self
+            .bars_1m
+            .iter()
+            .rev()
+            .take(5)
+            .map(|b| b.volume)
+            .sum();
+        closed_vol + self.current_volume
+    }
+
     /// Handle a trade message: update spot, accumulate OHLC bars, compute vol.
     fn handle_trade(&mut self, price: f64, qty: f64, trade_time_ms: i64) {
         self.spot_price = price;
@@ -276,6 +289,7 @@ impl BinanceSpotFeed {
                             state.realized_vol_30m,
                             state.ewma_vol_30m,
                             state.bars_1m.len(),
+                            state.volume_5m(),
                         );
                         flush_binance_spot_state(&state, redis).await;
                     }

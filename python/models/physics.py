@@ -8,6 +8,7 @@ uses hand-rolled least squares for n < 100 data points.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
 
 import structlog
 
@@ -287,3 +288,125 @@ async def build_climo_table(
 
     logger.info("climo_table_built", entries=len(table))
     return table
+
+
+@dataclass
+class StationCalibration:
+    """Per-(station, month, hour) calibration parameters."""
+
+    sigma_10min: float = 0.3
+    hrrr_bias_f: float = 0.0
+    hrrr_skill: float = 0.5
+    rounding_bias: float = 0.0
+    weights: tuple[float, float, float, float] = (0.45, 0.25, 0.20, 0.10)
+    # weights order: (physics, hrrr, trend, climo)
+
+
+async def build_station_calibration(
+    pool,
+) -> dict[tuple[str, int, int], StationCalibration]:
+    """Load calibration from station_calibration table."""
+    query = """
+        SELECT station, month, hour,
+               sigma_10min, hrrr_bias_f, hrrr_skill, rounding_bias,
+               weight_physics, weight_hrrr, weight_trend, weight_climo
+        FROM station_calibration
+        WHERE sample_size >= 10
+    """
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query)
+    except Exception:
+        logger.warning("station_calibration_load_failed", exc_info=True)
+        return {}
+
+    table: dict[tuple[str, int, int], StationCalibration] = {}
+    for row in rows:
+        station = row["station"]
+        month = row["month"]
+        hour = row["hour"]
+        if not station:
+            continue
+
+        cal = StationCalibration(
+            sigma_10min=float(row["sigma_10min"]) if row["sigma_10min"] else 0.3,
+            hrrr_bias_f=float(row["hrrr_bias_f"] or 0.0),
+            hrrr_skill=float(row["hrrr_skill"] or 0.5),
+            rounding_bias=float(row["rounding_bias"] or 0.0),
+            weights=(
+                float(row["weight_physics"] or 0.45),
+                float(row["weight_hrrr"] or 0.25),
+                float(row["weight_trend"] or 0.20),
+                float(row["weight_climo"] or 0.10),
+            ),
+        )
+        table[(station, month, hour)] = cal
+
+    logger.info("station_calibration_loaded", entries=len(table))
+    return table
+
+
+async def compute_hrrr_skill_scores(pool) -> None:
+    """Compare stored HRRR forecasts against nearest-in-time METAR actuals.
+
+    Upserts hrrr_bias_f, hrrr_rmse_f, hrrr_skill into station_calibration.
+    HRRR skill = 1 - RMSE / climo_std per station.
+    """
+    query = """
+        WITH paired AS (
+            SELECT
+                h.station,
+                EXTRACT(MONTH FROM h.forecast_time)::int AS month,
+                EXTRACT(HOUR FROM h.forecast_time)::int AS hour,
+                h.temperature_f AS hrrr_temp,
+                o.temperature_f AS actual_temp
+            FROM hrrr_forecasts h
+            JOIN LATERAL (
+                SELECT temperature_f, observed_at
+                FROM observations
+                WHERE station = h.station
+                  AND source = 'asos'
+                  AND temperature_f IS NOT NULL
+                  AND observed_at BETWEEN h.forecast_time - interval '30 minutes'
+                                      AND h.forecast_time + interval '30 minutes'
+                ORDER BY ABS(EXTRACT(EPOCH FROM (observed_at - h.forecast_time)))
+                LIMIT 1
+            ) o ON true
+            WHERE h.forecast_time > now() - interval '90 days'
+        ),
+        stats AS (
+            SELECT
+                station, month, hour,
+                AVG(hrrr_temp - actual_temp) AS bias,
+                SQRT(AVG(POWER(hrrr_temp - actual_temp, 2))) AS rmse,
+                STDDEV(actual_temp) AS climo_std,
+                COUNT(*) AS n
+            FROM paired
+            GROUP BY station, month, hour
+            HAVING COUNT(*) >= 10
+        )
+        INSERT INTO station_calibration (station, month, hour, hrrr_bias_f, hrrr_rmse_f, hrrr_skill, sample_size, updated_at)
+        SELECT
+            station, month, hour,
+            bias,
+            rmse,
+            CASE WHEN climo_std > 0 THEN GREATEST(0.0, 1.0 - rmse / climo_std) ELSE 0.5 END,
+            n,
+            now()
+        FROM stats
+        ON CONFLICT (station, month, hour)
+        DO UPDATE SET
+            hrrr_bias_f = EXCLUDED.hrrr_bias_f,
+            hrrr_rmse_f = EXCLUDED.hrrr_rmse_f,
+            hrrr_skill = EXCLUDED.hrrr_skill,
+            sample_size = EXCLUDED.sample_size,
+            updated_at = now()
+    """
+
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(query)
+        logger.info("hrrr_skill_scores_computed", result=result)
+    except Exception:
+        logger.warning("hrrr_skill_computation_failed", exc_info=True)

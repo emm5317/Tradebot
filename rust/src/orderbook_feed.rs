@@ -5,7 +5,7 @@
 //! use real-time data instead of stale DB snapshots.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use fred::clients::Client as RedisClient;
@@ -17,6 +17,13 @@ use tracing::{info, warn};
 use crate::kalshi::orderbook::{OrderbookManager, Side};
 use crate::kalshi::trade_tape::{TradeTape, TradeRecord};
 use crate::kalshi::websocket::WsFeedMessage;
+
+/// Snapshot of trade tape metrics extracted before async flush.
+struct TapeSnapshot {
+    aggr_30s: f64,
+    volume_60s: f64,
+    last_trades: HashMap<String, Option<TradeRecord>>,
+}
 
 /// Per-ticker state from the ticker channel.
 #[derive(Debug, Default, Clone)]
@@ -35,13 +42,13 @@ struct TickerState {
 pub async fn run(
     mut rx: mpsc::Receiver<WsFeedMessage>,
     orderbooks: Arc<OrderbookManager>,
+    trade_tape: Arc<RwLock<TradeTape>>,
     redis: RedisClient,
     cancel: CancellationToken,
 ) {
     let mut flush_interval = tokio::time::interval(Duration::from_millis(500));
     let mut stale_check_interval = tokio::time::interval(Duration::from_secs(5));
     let mut dirty_tickers: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut trade_tape = TradeTape::new(10_000);
     let mut ticker_states: HashMap<String, TickerState> = HashMap::new();
 
     loop {
@@ -66,13 +73,16 @@ pub async fn run(
                         dirty_tickers.insert(ticker);
                     }
                     WsFeedMessage::Trade { ticker, price_cents, count, taker_side } => {
-                        trade_tape.record(TradeRecord {
-                            ticker: ticker.clone(),
-                            price_cents,
-                            count,
-                            taker_side,
-                            timestamp: Instant::now(),
-                        });
+                        {
+                            let mut tape = trade_tape.write().unwrap();
+                            tape.record(TradeRecord {
+                                ticker: ticker.clone(),
+                                price_cents,
+                                count,
+                                taker_side,
+                                timestamp: Instant::now(),
+                            });
+                        }
                         dirty_tickers.insert(ticker);
                     }
                     WsFeedMessage::TickerUpdate {
@@ -109,7 +119,15 @@ pub async fn run(
                 if dirty_tickers.is_empty() {
                     continue;
                 }
-                flush_to_redis(&orderbooks, &trade_tape, &ticker_states, &redis, &dirty_tickers).await;
+                let tape_metrics = {
+                    let tape = trade_tape.read().unwrap();
+                    TapeSnapshot {
+                        aggr_30s: tape.aggressiveness(Duration::from_secs(30)),
+                        volume_60s: tape.recent_volume(Duration::from_secs(60)) as f64,
+                        last_trades: dirty_tickers.iter().map(|t| (t.clone(), tape.last_trade(t).cloned())).collect(),
+                    }
+                };
+                flush_to_redis(&orderbooks, &tape_metrics, &ticker_states, &redis, &dirty_tickers).await;
                 dirty_tickers.clear();
             }
             _ = stale_check_interval.tick() => {
@@ -124,7 +142,7 @@ pub async fn run(
 /// Enhanced to include trade tape metrics and ticker channel data.
 async fn flush_to_redis(
     orderbooks: &OrderbookManager,
-    trade_tape: &TradeTape,
+    tape: &TapeSnapshot,
     ticker_states: &HashMap<String, TickerState>,
     redis: &RedisClient,
     tickers: &std::collections::HashSet<String>,
@@ -138,10 +156,10 @@ async fn flush_to_redis(
         let bid_depth: i64 = orderbooks.best_bid(ticker).map(|(_, s)| s).unwrap_or(0);
         let ask_depth: i64 = orderbooks.best_ask(ticker).map(|(_, s)| s).unwrap_or(0);
 
-        // Trade tape metrics
-        let trade_aggr_30s = trade_tape.aggressiveness(Duration::from_secs(30));
-        let recent_volume_60s = trade_tape.recent_volume(Duration::from_secs(60));
-        let last_trade = trade_tape.last_trade(ticker);
+        // Trade tape metrics (pre-extracted from tape snapshot)
+        let trade_aggr_30s = tape.aggr_30s;
+        let recent_volume_60s = tape.volume_60s;
+        let last_trade = tape.last_trades.get(ticker).cloned().flatten();
 
         // Ticker channel state
         let ts = ticker_states.get(ticker.as_str());

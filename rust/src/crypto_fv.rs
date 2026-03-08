@@ -98,7 +98,11 @@ pub fn compute_crypto_fair_value(
     if state.perp_price > 0.0 {
         confidence += 0.1;
     }
-    confidence = confidence.min(1.0);
+    // Phase 4.2: reduce confidence when RTI uses fewer than min_venues
+    if !state.rti_reliable {
+        confidence -= 0.15;
+    }
+    confidence = confidence.clamp(0.0, 1.0);
 
     CryptoFairValue {
         probability: p_final,
@@ -316,8 +320,8 @@ mod tests {
     #[test]
     fn test_fair_value_at_the_money() {
         let cs = CryptoState::new();
-        cs.update_coinbase(95000.0, 0.0, 0.0);
-        cs.update_binance_spot(95000.0, None, Some(0.50), 30);
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
 
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
@@ -333,8 +337,8 @@ mod tests {
     #[test]
     fn test_fair_value_deep_itm() {
         let cs = CryptoState::new();
-        cs.update_coinbase(100000.0, 0.0, 0.0);
-        cs.update_binance_spot(100000.0, None, Some(0.50), 30);
+        cs.update_coinbase(100000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(100000.0, None, Some(0.50), 30, 10.0);
 
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 90000.0, 5.0);
@@ -350,8 +354,8 @@ mod tests {
     #[test]
     fn test_fair_value_deep_otm() {
         let cs = CryptoState::new();
-        cs.update_coinbase(90000.0, 0.0, 0.0);
-        cs.update_binance_spot(90000.0, None, Some(0.50), 30);
+        cs.update_coinbase(90000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(90000.0, None, Some(0.50), 30, 10.0);
 
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 100000.0, 5.0);
@@ -367,7 +371,7 @@ mod tests {
     #[test]
     fn test_fair_value_zero_time() {
         let cs = CryptoState::new();
-        cs.update_coinbase(95000.0, 0.0, 0.0);
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
 
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 94000.0, 0.0);
@@ -380,8 +384,8 @@ mod tests {
     #[test]
     fn test_basis_signal_contango() {
         let cs = CryptoState::new();
-        cs.update_coinbase(95000.0, 0.0, 0.0);
-        cs.update_binance_spot(95000.0, None, Some(0.50), 30);
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
         cs.update_binance_futures(95500.0, 95200.0, 0.0, 0.5); // +500 basis
 
         let snap = cs.snapshot();
@@ -394,7 +398,7 @@ mod tests {
     #[test]
     fn test_funding_signal() {
         let cs = CryptoState::new();
-        cs.update_coinbase(95000.0, 0.0, 0.0);
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
         cs.update_binance_futures(0.0, 0.0, 0.001, 0.5); // positive funding
 
         let snap = cs.snapshot();
@@ -408,16 +412,17 @@ mod tests {
         let cs = CryptoState::new();
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
-        assert!((fv.confidence - 0.5).abs() < 0.01, "No data = 0.5 confidence");
+        // No data = base 0.5 - 0.15 unreliable = 0.35
+        assert!((fv.confidence - 0.35).abs() < 0.01, "No data = 0.35 confidence, got {}", fv.confidence);
 
-        cs.update_coinbase(95000.0, 0.0, 0.0);
-        cs.update_binance_spot(95000.0, None, None, 0);
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95000.0, None, None, 0, 10.0);
         cs.update_binance_futures(95300.0, 0.0, 0.0, 0.5);
         cs.update_deribit(50.0);
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
         assert!(
-            fv.confidence > 0.9,
+            fv.confidence > 0.8,
             "All feeds = high confidence, got {}",
             fv.confidence
         );
@@ -466,8 +471,8 @@ mod tests {
     fn test_levy_averaging_reduces_extremes_near_expiry() {
         let cs = CryptoState::new();
         // Use a spot slightly above strike so probability is in a sensitive range
-        cs.update_coinbase(95200.0, 0.0, 0.0);
-        cs.update_binance_spot(95200.0, None, Some(0.50), 30);
+        cs.update_coinbase(95200.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95200.0, None, Some(0.50), 30, 10.0);
 
         let snap = cs.snapshot();
         let strike = 95000.0;

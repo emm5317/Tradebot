@@ -120,17 +120,28 @@ async fn main() -> Result<()> {
         ws_feed.run(ws_tx).await;
     });
 
+    // Shared trade tape for orderbook feed + crypto evaluator (Phase 4.3)
+    let trade_tape = Arc::new(std::sync::RwLock::new(
+        kalshi::trade_tape::TradeTape::new(10_000),
+    ));
+
     let orderbook_handle = tokio::spawn({
         let orderbooks = Arc::clone(&orderbooks);
+        let trade_tape = Arc::clone(&trade_tape);
         let redis = redis.clone();
         let cancel = cancel.clone();
         async move {
-            orderbook_feed::run(ws_rx, orderbooks, redis.clone(), cancel).await;
+            orderbook_feed::run(ws_rx, orderbooks, trade_tape, redis.clone(), cancel).await;
         }
     });
 
     // Canonical crypto state — shared across all feeds and execution
-    let crypto_state = Arc::new(crypto_state::CryptoState::new());
+    let rti_config = crypto_state::RtiConfig {
+        stale_threshold_secs: config.rti_stale_threshold_secs,
+        outlier_threshold_pct: config.rti_outlier_threshold_pct,
+        min_venues: config.rti_min_venues,
+    };
+    let crypto_state = Arc::new(crypto_state::CryptoState::with_config(rti_config));
 
     // Spawn crypto exchange feeds (gated by config)
     if config.enable_coinbase {
@@ -207,12 +218,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Phase 3: Spawn event-driven crypto evaluator
+    // Phase 3: Spawn event-driven crypto evaluator (with Phase 4.3 trade tape)
     let crypto_eval_handle = tokio::spawn({
         let config = Arc::new(config.clone());
         let cs = Arc::clone(&crypto_state);
         let cd = Arc::clone(&contract_discovery);
         let ob = Arc::clone(&orderbooks);
+        let tt = Arc::clone(&trade_tape);
         let om = Arc::clone(&order_mgr);
         let k = Arc::clone(&kalshi);
         let ks = Arc::clone(&kill_switch);
@@ -222,7 +234,7 @@ async fn main() -> Result<()> {
         let nats = nats.clone();
         let cancel = cancel.clone();
         async move {
-            crypto_evaluator::run(config, cs, cd, ob, om, k, ks, fh, pool, redis, nats, cancel)
+            crypto_evaluator::run(config, cs, cd, ob, tt, om, k, ks, fh, pool, redis, nats, cancel)
                 .await;
         }
     });

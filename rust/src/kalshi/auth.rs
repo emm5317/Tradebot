@@ -1,8 +1,9 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use openssl::hash::MessageDigest;
-use openssl::pkey::PKey;
-use openssl::sign::Signer;
+use rsa::pss::{BlindedSigningKey, Signature};
+use rsa::signature::{RandomizedSigner, SignatureEncoding};
+use rsa::RsaPrivateKey;
+use sha2::Sha256;
 use std::sync::Arc;
 
 use crate::kalshi::error::KalshiError;
@@ -11,17 +12,20 @@ use crate::kalshi::error::KalshiError;
 #[derive(Clone)]
 pub struct KalshiAuth {
     api_key: String,
-    private_key: Arc<PKey<openssl::pkey::Private>>,
+    private_key: Arc<RsaPrivateKey>,
 }
 
 impl KalshiAuth {
     /// Load auth credentials from API key and PEM file path.
     pub fn new(api_key: String, private_key_path: &str) -> Result<Self, KalshiError> {
-        let pem_bytes = std::fs::read(private_key_path).map_err(|e| {
-            KalshiError::SigningError(format!("failed to read private key at {private_key_path}: {e}"))
+        let pem_bytes = std::fs::read_to_string(private_key_path).map_err(|e| {
+            KalshiError::SigningError(format!(
+                "failed to read private key at {private_key_path}: {e}"
+            ))
         })?;
 
-        let private_key = PKey::private_key_from_pem(&pem_bytes).map_err(|e| {
+        use rsa::pkcs8::DecodePrivateKey;
+        let private_key = RsaPrivateKey::from_pkcs8_pem(&pem_bytes).map_err(|e| {
             KalshiError::SigningError(format!("failed to parse PEM private key: {e}"))
         })?;
 
@@ -47,25 +51,10 @@ impl KalshiAuth {
         let timestamp_ms = chrono::Utc::now().timestamp_millis();
         let message = format!("{timestamp_ms}{method}{path}");
 
-        let mut signer = Signer::new(MessageDigest::sha256(), &self.private_key)
-            .map_err(|e| KalshiError::SigningError(e.to_string()))?;
-
-        signer
-            .set_rsa_padding(openssl::rsa::Padding::PKCS1_PSS)
-            .map_err(|e| KalshiError::SigningError(e.to_string()))?;
-        signer
-            .set_rsa_pss_saltlen(openssl::sign::RsaPssSaltlen::DIGEST_LENGTH)
-            .map_err(|e| KalshiError::SigningError(e.to_string()))?;
-
-        signer
-            .update(message.as_bytes())
-            .map_err(|e| KalshiError::SigningError(e.to_string()))?;
-
-        let signature = signer
-            .sign_to_vec()
-            .map_err(|e| KalshiError::SigningError(e.to_string()))?;
-
-        let encoded_signature = BASE64.encode(&signature);
+        let signing_key = BlindedSigningKey::<Sha256>::new((*self.private_key).clone());
+        let mut rng = rsa::rand_core::OsRng;
+        let signature: Signature = signing_key.sign_with_rng(&mut rng, message.as_bytes());
+        let encoded_signature = BASE64.encode(signature.to_bytes());
 
         Ok(AuthHeaders {
             api_key: self.api_key.clone(),

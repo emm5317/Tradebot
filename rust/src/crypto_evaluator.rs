@@ -8,8 +8,8 @@
 //! targeting sub-500ms signal generation from price update to order submission.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use rust_decimal::prelude::ToPrimitive;
@@ -23,6 +23,7 @@ use crate::crypto_state::CryptoState;
 use crate::feed_health::FeedHealth;
 use crate::kalshi::client::KalshiClient;
 use crate::kalshi::orderbook::OrderbookManager;
+use crate::kalshi::trade_tape::TradeTape;
 use crate::kill_switch::KillSwitchState;
 use crate::order_manager::OrderManager;
 use crate::types::{Signal, SignalPriority};
@@ -41,6 +42,55 @@ const EXIT_EDGE_THRESHOLD: f64 = -0.03;
 
 /// Per-ticker debounce interval to avoid evaluating the same ticker too rapidly.
 const DEBOUNCE_MS: u128 = 500;
+
+/// Phase 4.3: Microstructure adjustment from trade tape and orderbook.
+#[derive(Debug)]
+struct MicrostructureAdj {
+    /// Trade tape aggressiveness * scaling factor.
+    trade_imbalance: f64,
+    /// Spread regime bonus/penalty.
+    spread_regime: f64,
+    /// Order book depth imbalance aligned with direction.
+    depth_imbalance: f64,
+    /// Sum of components, clamped to [-0.04, +0.04].
+    total: f64,
+}
+
+/// Compute microstructure adjustment from trade tape and orderbook state.
+fn compute_microstructure_adj(
+    _ticker: &str,
+    direction: &str,
+    order_imbalance: f64,
+    spread: f64,
+    tape: &TradeTape,
+) -> MicrostructureAdj {
+    // Trade tape aggressiveness over last 30 seconds
+    let aggr = tape.aggressiveness(Duration::from_secs(30));
+    let dir_sign = if direction == "yes" { 1.0 } else { -1.0 };
+    let trade_imbalance = aggr * dir_sign * 0.02;
+
+    // Spread regime
+    let spread_regime = if spread < 0.04 {
+        0.01 // tight spread bonus
+    } else if spread > 0.10 {
+        -0.02 // wide spread penalty
+    } else {
+        0.0
+    };
+
+    // Depth imbalance: order_imbalance is bid_depth/(bid_depth+ask_depth), ~0.5 balanced
+    // Align with trade direction
+    let depth_imbalance = (order_imbalance - 0.5) * dir_sign * 0.02;
+
+    let total = (trade_imbalance + spread_regime + depth_imbalance).clamp(-0.04, 0.04);
+
+    MicrostructureAdj {
+        trade_imbalance,
+        spread_regime,
+        depth_imbalance,
+        total,
+    }
+}
 
 /// Contract lifecycle phase.
 enum ContractPhase {
@@ -71,6 +121,7 @@ pub async fn run(
     crypto_state: Arc<CryptoState>,
     contract_discovery: Arc<ContractDiscovery>,
     orderbooks: Arc<OrderbookManager>,
+    trade_tape: Arc<RwLock<TradeTape>>,
     order_mgr: Arc<tokio::sync::Mutex<OrderManager>>,
     kalshi: Arc<KalshiClient>,
     kill_switch: Arc<KillSwitchState>,
@@ -135,6 +186,7 @@ pub async fn run(
                                 contract,
                                 minutes_remaining,
                                 &orderbooks,
+                                &trade_tape,
                                 &order_mgr,
                                 &kalshi,
                                 &kill_switch,
@@ -189,6 +241,7 @@ async fn evaluate_entry(
     contract: &crate::contract_discovery::CryptoContract,
     minutes_remaining: f64,
     orderbooks: &OrderbookManager,
+    trade_tape: &Arc<RwLock<TradeTape>>,
     order_mgr: &Arc<tokio::sync::Mutex<OrderManager>>,
     kalshi: &Arc<KalshiClient>,
     kill_switch: &KillSwitchState,
@@ -225,8 +278,15 @@ async fn evaluate_entry(
     // 5. Effective edge (spread-adjusted)
     let effective_edge = crypto_fv::compute_effective_edge(raw_edge, spread);
 
-    // 6. Check minimum edge
-    if effective_edge < MIN_EDGE {
+    // 5b. Phase 4.3: Microstructure adjustment
+    let micro = {
+        let tape = trade_tape.read().unwrap();
+        compute_microstructure_adj(&contract.ticker, direction, order_imbalance, spread, &tape)
+    };
+    let adjusted_edge = effective_edge + micro.total;
+
+    // 6. Check minimum edge (using microstructure-adjusted edge)
+    if adjusted_edge < MIN_EDGE {
         return;
     }
 
@@ -249,7 +309,7 @@ async fn evaluate_entry(
         direction: direction.to_string(),
         model_prob: fv.probability,
         market_price: mid_price,
-        edge: effective_edge,
+        edge: adjusted_edge,
         kelly_fraction: kelly,
         minutes_remaining,
         spread,
@@ -266,6 +326,10 @@ async fn evaluate_entry(
         confidence = %format!("{:.2}", fv.confidence),
         shadow_rti = %format!("{:.0}", snap.shadow_rti),
         strike = %format!("{:.0}", contract.strike),
+        micro_total = %format!("{:.4}", micro.total),
+        micro_trade = %format!("{:.4}", micro.trade_imbalance),
+        micro_spread = %format!("{:.4}", micro.spread_regime),
+        micro_depth = %format!("{:.4}", micro.depth_imbalance),
         "crypto eval: entry signal"
     );
 

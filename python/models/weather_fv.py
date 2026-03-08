@@ -17,10 +17,49 @@ from typing import Literal
 
 import structlog
 
-from models.physics import fast_norm_cdf
+from models.physics import StationCalibration, fast_norm_cdf
 from models.rounding import compute_rounding_uncertainty
 
 logger = structlog.get_logger()
+
+
+@dataclass
+class SourceConflict:
+    """Detected conflict or outage between METAR and HRRR sources."""
+
+    metar_hrrr_conflict: bool = False   # |METAR - nearest HRRR| > 3F
+    metar_missing: bool = False
+    hrrr_missing: bool = False
+    sigma_multiplier: float = 1.0       # 1.0 normal, 1.5 conflict, 1.25 METAR outage
+
+
+def detect_source_conflict(
+    current_temp_f: float | None,
+    hrrr_forecast_temps_f: list[float] | None,
+    metar_temp_c: int | None,
+) -> SourceConflict:
+    """Detect conflicts between METAR observations and HRRR forecasts."""
+    hrrr_missing = hrrr_forecast_temps_f is None or len(hrrr_forecast_temps_f) == 0
+    metar_missing = metar_temp_c is None
+
+    conflict = SourceConflict(
+        hrrr_missing=hrrr_missing,
+        metar_missing=metar_missing,
+    )
+
+    if not metar_missing and not hrrr_missing and current_temp_f is not None:
+        # Find nearest HRRR forecast to current temp
+        nearest_hrrr = min(hrrr_forecast_temps_f, key=lambda t: abs(t - current_temp_f))
+        if abs(current_temp_f - nearest_hrrr) > 3.0:
+            conflict.metar_hrrr_conflict = True
+
+    # Set sigma multiplier
+    if conflict.metar_hrrr_conflict:
+        conflict.sigma_multiplier = 1.5
+    elif conflict.metar_missing:
+        conflict.sigma_multiplier = 1.25
+
+    return conflict
 
 
 @dataclass
@@ -67,6 +106,7 @@ def compute_weather_fair_value(
     min_temp_6hr_f: float | None = None,
     recent_temps: list[float] | None = None,
     climo_prob: float | None = None,
+    station_cal: StationCalibration | None = None,
 ) -> WeatherFairValue:
     """Compute settlement-aware probability for a weather contract.
 
@@ -88,6 +128,21 @@ def compute_weather_fair_value(
         climo_prob: Climatological probability (from existing climo table)
     """
     components: dict[str, float] = {}
+
+    # --- Step 0: Source conflict/outage detection (Phase 4.6) ---
+    conflict = detect_source_conflict(current_temp_f, hrrr_forecast_temps_f, metar_temp_c)
+
+    if conflict.metar_hrrr_conflict:
+        logger.warning(
+            "metar_hrrr_conflict",
+            current_temp_f=current_temp_f,
+            contract_type=contract_type,
+        )
+        # Inflate sigma for conflict
+        sigma_per_10min = sigma_per_10min * conflict.sigma_multiplier
+    elif conflict.metar_missing and not conflict.hrrr_missing:
+        # METAR outage with HRRR available — moderate sigma inflation
+        sigma_per_10min = sigma_per_10min * conflict.sigma_multiplier
 
     # --- Step 1: Update running max/min state ---
     if state is not None:
@@ -137,14 +192,19 @@ def compute_weather_fair_value(
             components={"locked": 1.0},
         )
 
-    # --- Step 3: Rounding ambiguity check ---
+    # --- Step 3: Rounding ambiguity check (Phase 4.7: boundary probability) ---
     rounding_ambiguous = False
+    rounding_result = None
     if metar_temp_c is not None:
-        rounding = compute_rounding_uncertainty(metar_temp_c, strike_f)
-        rounding_ambiguous = rounding.is_ambiguous
+        rounding_result = compute_rounding_uncertainty(metar_temp_c, strike_f)
+        rounding_ambiguous = rounding_result.is_ambiguous
         if state is not None:
             state.rounding_ambiguous = rounding_ambiguous
             state.last_metar_c = metar_temp_c
+
+    # --- Step 3b: Apply station-specific sigma if available ---
+    if station_cal is not None:
+        sigma_per_10min = station_cal.sigma_10min
 
     # --- Step 4: Physics model (Gaussian diffusion) ---
     if contract_type == "weather_max":
@@ -171,6 +231,12 @@ def compute_weather_fair_value(
     components["physics"] = p_physics
 
     # --- Step 5: HRRR forecast excursion probability ---
+    # Apply HRRR bias correction if station calibration available
+    if station_cal is not None and hrrr_forecast_temps_f:
+        hrrr_forecast_temps_f = [
+            t - station_cal.hrrr_bias_f for t in hrrr_forecast_temps_f
+        ]
+
     p_hrrr: float | None = None
     if hrrr_forecast_temps_f and len(hrrr_forecast_temps_f) > 0:
         if contract_type == "weather_max":
@@ -214,24 +280,61 @@ def compute_weather_fair_value(
     components["trend"] = p_trend
 
     # --- Step 7: Blend components ---
-    # Weights: physics 0.40, trend 0.20, climo 0.15, hrrr 0.25 (if available)
-    if p_hrrr is not None:
-        p_climo = climo_prob if climo_prob is not None else 0.5
+    p_climo = climo_prob if climo_prob is not None else 0.5
+    components["climo"] = p_climo
+
+    if station_cal is not None:
+        # Use station-specific weights
+        w_phys, w_hrrr, w_trend, w_climo = station_cal.weights
+
+        # Scale HRRR weight by skill (low skill → redistribute to others)
+        if p_hrrr is not None:
+            effective_hrrr_w = w_hrrr * station_cal.hrrr_skill
+            redistrib = w_hrrr - effective_hrrr_w
+            total_other = w_phys + w_trend + w_climo
+            if total_other > 0:
+                scale = 1.0 + redistrib / total_other
+            else:
+                scale = 1.0
+            probability = (
+                w_phys * scale * p_physics
+                + effective_hrrr_w * p_hrrr
+                + w_trend * scale * p_trend
+                + w_climo * scale * p_climo
+            )
+        else:
+            # No HRRR: redistribute HRRR weight proportionally
+            total_other = w_phys + w_trend + w_climo
+            if total_other > 0:
+                scale = (w_phys + w_hrrr + w_trend + w_climo) / total_other
+            else:
+                scale = 1.0
+            probability = (
+                w_phys * scale * p_physics
+                + w_trend * scale * p_trend
+                + w_climo * scale * p_climo
+            )
+    elif p_hrrr is not None:
         probability = (
             0.35 * p_physics
             + 0.25 * p_hrrr
             + 0.20 * p_trend
             + 0.20 * p_climo
         )
-        components["climo"] = p_climo
     else:
-        p_climo = climo_prob if climo_prob is not None else 0.5
         probability = (
             0.45 * p_physics
             + 0.25 * p_trend
             + 0.30 * p_climo
         )
-        components["climo"] = p_climo
+
+    # --- Step 7b: Rounding component blending (Phase 4.7) ---
+    if rounding_ambiguous and rounding_result is not None:
+        # Blend boundary probability into ensemble with 10% weight
+        p_rounding = rounding_result.boundary_probability
+        components["rounding"] = p_rounding
+        # Reduce physics weight by 10%, add rounding at 10%
+        probability = probability * 0.90 + p_rounding * 0.10
 
     probability = max(0.01, min(0.99, probability))
 
@@ -247,6 +350,9 @@ def compute_weather_fair_value(
         confidence += 0.1
     if rounding_ambiguous:
         confidence -= 0.2
+    # Phase 4.7: safe zone bonus
+    if rounding_result is not None and rounding_result.safe_zone:
+        confidence += 0.05
     confidence = max(0.1, min(1.0, confidence))
 
     # Uncertainty band

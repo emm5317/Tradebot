@@ -47,6 +47,14 @@ pub struct Config {
     pub discord_webhook_url: Option<String>,
     pub http_port: u16,
 
+    // RTI venue weighting (Phase 4.2)
+    #[serde(default = "default_rti_stale_threshold_secs")]
+    pub rti_stale_threshold_secs: u64,
+    #[serde(default = "default_rti_outlier_threshold_pct")]
+    pub rti_outlier_threshold_pct: f64,
+    #[serde(default = "default_rti_min_venues")]
+    pub rti_min_venues: usize,
+
     // Kill switches (default: false = trading enabled)
     #[serde(default)]
     pub kill_switch_all: bool,
@@ -74,6 +82,18 @@ fn default_binance_spot_ws_url() -> String {
 
 fn default_deribit_ws_url() -> String {
     "wss://www.deribit.com/ws/api/v2".to_string()
+}
+
+fn default_rti_stale_threshold_secs() -> u64 {
+    5
+}
+
+fn default_rti_outlier_threshold_pct() -> f64 {
+    0.5
+}
+
+fn default_rti_min_venues() -> usize {
+    2
 }
 
 impl Config {

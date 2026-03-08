@@ -17,7 +17,7 @@ import structlog
 
 from config import Settings, get_settings
 from data.mesonet import fetch_all_stations
-from models.physics import build_climo_table, build_sigma_table
+from models.physics import build_climo_table, build_sigma_table, build_station_calibration
 from rules.resolver import ContractRulesResolver
 from signals.notifier import DiscordNotifier
 from signals.publisher import SignalPublisher
@@ -59,11 +59,13 @@ class EvaluationDaemon:
         # Build lookup tables from historical data
         sigma_table = await build_sigma_table(self.pool)
         climo_table = await build_climo_table(self.pool)
+        station_calibration = await build_station_calibration(self.pool)
 
         # Register evaluators (crypto moved to Rust event-driven evaluator in Phase 3)
         weather_eval = WeatherSignalEvaluator(
             sigma_table=sigma_table,
             climo_table=climo_table,
+            station_calibration=station_calibration,
         )
 
         self.registry.register("weather", weather_eval)

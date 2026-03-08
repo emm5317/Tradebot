@@ -1,3 +1,4 @@
+# DEPRECATED: Crypto FV ported to Rust crypto_fv.rs (Phase 4.4)
 """Settlement-aware crypto fair-value engine.
 
 Replaces generic Black-Scholes N(d2) with a model that understands:
