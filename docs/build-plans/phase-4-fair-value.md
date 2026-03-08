@@ -145,7 +145,7 @@ METAR reports in °C (integer). Conversion to °F introduces rounding ambiguity 
 
 ## Verification Checklist
 
-- [ ] RTI averaging model improves Brier score on historical data
+- [x] RTI averaging model improves Brier score on historical data
 - [ ] Dynamic venue weights handle single-venue outage gracefully
 - [ ] Microstructure signals measurably improve edge quality
 - [ ] Rust crypto model matches Python output within 0.1% for all test cases

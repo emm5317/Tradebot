@@ -74,15 +74,16 @@ def compute_crypto_fair_value(inputs: CryptoInputs) -> CryptoFairValue:
     # vol_period = vol_annual * sqrt(minutes / (365.25 * 24 * 60))
     vol_period = vol * math.sqrt(minutes / (365.25 * 24.0 * 60.0))
 
-    # --- Step 4: Core probability via Gaussian model ---
-    # P(RTI > strike) = N(d2) where d2 = ln(RTI/strike) / vol_period
+    # --- Step 4: Core probability via settlement-aware model ---
+    # Uses Levy approximation for RTI averaging window near expiry,
+    # standard N(d2) far from settlement, smooth blend in between.
+    seconds_remaining = max(minutes * 60.0, 0.01)
     if shadow_rti <= 0 or inputs.strike <= 0:
         p_core = 0.5
-    elif vol_period <= 0:
-        p_core = 1.0 if shadow_rti >= inputs.strike else 0.0
     else:
-        d2 = math.log(shadow_rti / inputs.strike) / vol_period
-        p_core = _norm_cdf(d2)
+        p_core = _compute_settlement_probability(
+            shadow_rti, inputs.strike, seconds_remaining, vol
+        )
 
     components["p_core"] = p_core
 
@@ -90,9 +91,7 @@ def compute_crypto_fair_value(inputs: CryptoInputs) -> CryptoFairValue:
     basis = inputs.perp_price - shadow_rti if inputs.perp_price > 0 else 0.0
     basis_signal = 0.0
     if shadow_rti > 0 and abs(basis) > 0:
-        # Positive basis (contango) suggests market expects higher prices
         basis_pct = basis / shadow_rti
-        # Dampen: ±0.5% basis → ±0.02 probability adjustment
         basis_signal = max(-0.05, min(0.05, basis_pct * 4.0))
 
     components["basis_signal"] = basis_signal
@@ -100,30 +99,13 @@ def compute_crypto_fair_value(inputs: CryptoInputs) -> CryptoFairValue:
     # --- Step 6: Funding rate signal ---
     funding_signal = 0.0
     if inputs.funding_rate != 0:
-        # Positive funding = longs pay shorts = bullish sentiment
-        # Scale: 0.01% funding → ~0.01 probability adjustment
         funding_signal = max(-0.03, min(0.03, inputs.funding_rate * 300.0))
 
     components["funding_signal"] = funding_signal
 
-    # --- Step 7: RTI averaging window effect ---
-    # RTI uses 60-second average, which reduces tail risk near expiry
-    # The averaging smooths out spikes, making extreme outcomes less likely
-    averaging_dampening = 1.0
-    if minutes < 5.0:
-        # Within 5 minutes of expiry, the 60s averaging window matters more
-        # It pulls extreme probabilities toward 0.5
-        averaging_dampening = 0.85 + 0.15 * (minutes / 5.0)
-
-    # --- Step 8: Combine ---
-    # Adjust core probability with signals
+    # --- Step 7: Combine ---
     p_adjusted = p_core + basis_signal + funding_signal
-
-    # Apply averaging dampening (pulls toward 0.5)
-    p_final = 0.5 + (p_adjusted - 0.5) * averaging_dampening
-
-    # Clamp
-    p_final = max(0.01, min(0.99, p_final))
+    p_final = max(0.01, min(0.99, p_adjusted))
 
     # --- Step 9: Confidence ---
     confidence = 0.5
@@ -195,6 +177,78 @@ def _estimate_volatility(inputs: CryptoInputs) -> float:
 
     # Default: ~50% annualized (typical BTC)
     return 0.50
+
+
+_RTI_WINDOW_SECS = 60.0
+_TRANSITION_SECS = 240.0
+_SECONDS_PER_YEAR = 525_600.0 * 60.0
+_RISK_FREE_RATE = 0.05
+
+
+def _compute_settlement_probability(
+    spot: float, strike: float, seconds_remaining: float, vol: float
+) -> float:
+    """Settlement-aware probability using Levy averaging near expiry."""
+    if seconds_remaining <= 0.01:
+        return 1.0 if spot >= strike else 0.0
+
+    p_standard = _standard_binary_prob(spot, strike, seconds_remaining, vol)
+
+    if seconds_remaining > _RTI_WINDOW_SECS + _TRANSITION_SECS:
+        return p_standard
+
+    p_averaging = _levy_averaging_prob(spot, strike, seconds_remaining, vol)
+
+    if seconds_remaining <= _RTI_WINDOW_SECS:
+        return p_averaging
+
+    # Transition zone: smoothstep blend
+    alpha = 1.0 - (seconds_remaining - _RTI_WINDOW_SECS) / _TRANSITION_SECS
+    blend = alpha * alpha * (3.0 - 2.0 * alpha)
+    return p_standard * (1.0 - blend) + p_averaging * blend
+
+
+def _standard_binary_prob(
+    spot: float, strike: float, seconds_remaining: float, vol: float
+) -> float:
+    """Standard Black-Scholes binary: N(d2)."""
+    t = seconds_remaining / _SECONDS_PER_YEAR
+    vol_period = vol * math.sqrt(t)
+    if vol_period <= 0:
+        return 1.0 if spot >= strike else 0.0
+    d2 = (math.log(spot / strike) + (_RISK_FREE_RATE - 0.5 * vol * vol) * t) / (
+        vol * math.sqrt(t)
+    )
+    return _norm_cdf(d2)
+
+
+def _levy_averaging_prob(
+    spot: float, strike: float, seconds_remaining: float, vol: float
+) -> float:
+    """Levy approximation for binary option on arithmetic average (TWAP).
+
+    Var(TWAP over τ) ≈ S²·σ²·τ/3, so effective vol = σ·√(τ/3).
+    When partially inside the window, observed prices shift the effective strike.
+    """
+    elapsed = max(_RTI_WINDOW_SECS - seconds_remaining, 0.0)
+    alpha = elapsed / _RTI_WINDOW_SECS
+    remaining_frac = 1.0 - alpha
+
+    if remaining_frac < 0.01:
+        return 1.0 if spot >= strike else 0.0
+
+    k_eff = (strike - alpha * spot) / remaining_frac
+    if k_eff <= 0.0:
+        return 0.99
+
+    tau = seconds_remaining / _SECONDS_PER_YEAR
+    vol_avg = vol * math.sqrt(tau / 3.0)
+
+    if vol_avg <= 1e-12:
+        return 1.0 if spot >= k_eff else 0.0
+
+    d2 = (math.log(spot / k_eff) + (_RISK_FREE_RATE - vol * vol / 6.0) * tau) / vol_avg
+    return _norm_cdf(d2)
 
 
 def _norm_cdf(x: float) -> float:
