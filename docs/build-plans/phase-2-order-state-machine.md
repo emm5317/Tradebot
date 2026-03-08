@@ -4,6 +4,12 @@
 **Risk:** HIGH
 **Goal:** Replace fire-and-forget order submission with a robust state machine that handles partial fills, cancellations, and restart recovery
 
+**Dependencies from earlier phases:**
+- Phase 0.2: Kill switch (`Arc<KillSwitchState>`) — state machine must cancel pending orders on kill
+- Phase 0.4: Feed health (`Arc<FeedHealth>`) — use for stale-book prevention (2.6) instead of reimplementing
+- Phase 1.1: `CryptoState` snapshot at order time — capture for post-trade attribution (feeds into 5.3)
+- Phase 1.2: `CryptoFairValue` — log with order for model evaluation tracking
+
 ---
 
 ## 2.1 Order State Machine Enum
@@ -58,14 +64,21 @@ struct ManagedOrder {
     client_order_id: String,
     kalshi_order_id: Option<String>,
     ticker: String,
+    signal_type: String,           // "crypto" or "weather"
     direction: String,
     requested_qty: i64,
     filled_qty: i64,
     state: OrderState,
     created_at: Instant,
     transitions: Vec<(OrderState, Instant)>,
+    // Phase 1 integration: capture model state at order time for attribution
+    crypto_snapshot: Option<CryptoStateInner>,   // snapshot when order created
+    model_prob: f64,                              // model probability at order time
+    market_price: f64,                            // market price at order time
 }
 ```
+
+> **Enhancement (from Phase 1):** Capturing `CryptoStateInner` snapshot at order creation enables post-trade attribution (Phase 5.3) without replaying state. The snapshot is cheap — it's a `Clone` of ~200 bytes.
 
 ---
 
@@ -138,23 +151,41 @@ Various edge cases can cause bad order submission: stale orderbook, rate limitin
 
 ### Implementation
 
-**Stale-book prevention:**
-- Check orderbook `updated_at` timestamp before order submission
+**Stale-book prevention (leverage Phase 0.4 FeedHealth):**
+- Use `feed_health.required_feeds_healthy(&signal.signal_type)` (already exists) as first gate
+- Additionally check orderbook `updated_at` timestamp before order submission
 - If orderbook data >5s old, reject signal with reason
+- Do NOT reimplement staleness — FeedHealth already tracks per-feed thresholds
 
 **Rate-limit backoff:**
 - Track Kalshi API rate limit headers (X-RateLimit-Remaining, X-RateLimit-Reset)
 - When remaining < 10: exponential backoff
 - When remaining = 0: pause all order submission until reset
 
-**Duplicate signal suppression:**
+**Duplicate signal suppression (signal-type-aware, aligns with Phase 3.5):**
 - Per-ticker cooldown (already exists at 300s in Python)
-- Add Rust-side dedup: reject if same ticker+direction signal received within 30s
+- Add Rust-side dedup with signal-type-aware cooldowns:
+  - Crypto: 30s per ticker (contracts settle every 60s)
+  - Weather: 120s per ticker
+- This prepares for Phase 3.5's full cooldown overhaul
 
 **Max order frequency:**
 - Global: max 10 orders per minute
 - Per-ticker: max 2 orders per 5 minutes
 - Configurable via env vars
+
+---
+
+## 2.7 Kill Switch Integration (Enhancement)
+
+### Problem
+Phase 0.2 kill switch blocks new signal processing, but has no effect on in-flight orders. When a kill switch activates, pending/acknowledged orders should be cancelled.
+
+### Implementation
+- On kill switch state change: iterate all ManagedOrders in `Acknowledged` or `PartialFill` state
+- Transition each to `CancelPending`, send cancel to Kalshi
+- Log all forced cancellations at WARN level
+- This requires the state machine from 2.1 — cannot be done with current fire-and-forget model
 
 ---
 
@@ -166,4 +197,6 @@ Various edge cases can cause bad order submission: stale orderbook, rate limitin
 - [ ] Startup reconciliation correctly rebuilds position tracker
 - [ ] Partial fills tracked accurately
 - [ ] Rate limit backoff prevents 429 errors
-- [ ] Stale orderbook detection blocks orders
+- [ ] Stale orderbook detection uses FeedHealth (not reimplemented)
+- [ ] Kill switch activation cancels in-flight orders
+- [ ] Signal-type-aware cooldowns (crypto 30s, weather 120s)

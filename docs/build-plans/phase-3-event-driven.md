@@ -4,6 +4,12 @@
 **Risk:** MEDIUM
 **Goal:** Replace timer-based polling with event-driven evaluation. Crypto evaluates on every price update; weather evaluates on data arrival.
 
+**Foundation from Phase 1 (already implemented):**
+- `CryptoState` (RwLock) — canonical state, updated by all 4 feeds at 2Hz each
+- `crypto_fv::compute_crypto_fair_value()` — full N(d2) + basis + funding + Kelly
+- Python crypto signals already advisory (`tradebot.advisory.crypto`)
+- Feeds dual-write to CryptoState + Redis
+
 ---
 
 ## 3.1 Split Weather/Crypto Evaluators
@@ -18,9 +24,10 @@ Both weather and crypto share the same 10s evaluation loop in Python. Crypto nee
 - Weather: event-triggered in Python (Phase 3.3), retain 10s minimum cycle
 
 **Python evaluator daemon changes:**
-- Remove crypto evaluator registration
+- Remove crypto evaluator registration (already advisory-only since Phase 1.3)
 - Rename to `WeatherEvaluationDaemon`
 - Keep 10s cycle but add event triggers
+- Crypto evaluator can be fully removed once Phase 3.2 is validated
 
 ---
 
@@ -31,23 +38,27 @@ The 10s polling cycle means crypto signals are always 0–10s stale. For a marke
 
 ### Implementation
 
+> **Phase 1 foundation:** `CryptoState::snapshot()` and `crypto_fv::compute_crypto_fair_value()` already exist. This phase adds the event-driven trigger and contract discovery — the computation pipeline is ready.
+
 **Trigger:** Evaluate on CryptoState update (any feed price change)
 
 **Debounce:** Minimum 500ms between evaluations per ticker to prevent flooding
 
 **Flow:**
-1. Feed updates CryptoState
-2. CryptoState fires `on_update` notification (via `tokio::sync::watch`)
-3. Evaluation task receives notification
+1. Feed updates CryptoState (already implemented — 4 feeds write at 2Hz)
+2. Add `tokio::sync::watch` channel to CryptoState — sender notifies on every write
+3. Evaluation task receives notification, calls `crypto_state.snapshot()`
 4. For each active crypto contract near settlement:
-   - Compute fair value from CryptoState
-   - Compare to last-known orderbook mid
-   - If edge > threshold → generate signal
-5. Publish signal to NATS
+   - Call `crypto_fv::compute_crypto_fair_value(&snapshot, strike, minutes_remaining)`
+   - Compare to last-known orderbook mid (from `OrderbookManager`)
+   - If edge > threshold → generate signal directly (bypassing NATS for crypto)
+5. Submit to order state machine (Phase 2) directly
 
 **Contract discovery:**
 - Periodically (every 60s) refresh active crypto contracts from DB
 - Cache in-memory with expiry
+
+**Key architectural note:** Crypto signals in this phase are generated and executed entirely within Rust — no NATS round-trip. The advisory comparison from Phase 1.3 continues to validate Rust vs Python agreement.
 
 ---
 
