@@ -78,4 +78,4 @@ just dashboard      # Start dashboard on :8050
 
 ## Implementation Phases
 
-Phases 0-4.7 are complete. Phase 5 (calibration dashboard, P&L attribution, production hardening) is planned. See `docs/build-plans/` for detailed specs.
+Phases 0-5.8 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). See `docs/build-plans/` for detailed specs.

@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 
 import asyncpg
 import nats
 import redis.asyncio as aioredis
 import structlog
 
+from analytics.aggregator import aggregate_daily_performance
 from config import Settings, get_settings
 from data.mesonet import fetch_all_stations
 from models.physics import build_climo_table, build_sigma_table, build_station_calibration
@@ -92,6 +93,7 @@ class EvaluationDaemon:
     async def _evaluation_loop(self) -> None:
         """Main loop: every N seconds, evaluate all near-settlement contracts."""
         interval = self.settings.evaluation_interval_seconds
+        self._last_aggregation_date = None
 
         # Wait for Rust feeds to establish and write to Redis
         await self._sleep_or_shutdown(5)
@@ -101,6 +103,9 @@ class EvaluationDaemon:
                 await self._evaluate_all()
             except Exception:
                 logger.exception("evaluation_cycle_error")
+
+            # Daily aggregation at midnight UTC
+            await self._maybe_run_daily_aggregation()
 
             await self._sleep_or_shutdown(interval)
 
@@ -274,6 +279,28 @@ class EvaluationDaemon:
             except Exception:
                 pass
         return result
+
+    async def _maybe_run_daily_aggregation(self) -> None:
+        """Run daily strategy aggregation once per day after midnight UTC."""
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        # Only run once per day, after midnight UTC
+        if self._last_aggregation_date == today:
+            return
+        if now.time() < time(0, 1):
+            # Wait until at least 00:01 to let final signals settle
+            return
+
+        if self.pool is not None:
+            try:
+                from datetime import timedelta
+
+                yesterday = today - timedelta(days=1)
+                await aggregate_daily_performance(self.pool, yesterday)
+                self._last_aggregation_date = today
+            except Exception:
+                logger.exception("daily_aggregation_error")
 
     async def _sleep_or_shutdown(self, seconds: float) -> None:
         try:

@@ -194,8 +194,8 @@ class SignalPublisher:
                     INSERT INTO signals (
                         ticker, signal_type, direction, model_prob, market_price,
                         edge, kelly_fraction, minutes_remaining,
-                        observation_data, acted_on
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        observation_data, acted_on, model_components
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     """,
                     signal.ticker,
                     signal.signal_type,
@@ -211,6 +211,7 @@ class SignalPublisher:
                         "action": signal.action.value,
                     }),
                     True,  # acted_on
+                    json.dumps(signal.model_components) if signal.model_components else None,
                 )
         except Exception:
             logger.exception("signal_persist_failed", ticker=signal.ticker)

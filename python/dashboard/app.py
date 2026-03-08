@@ -157,6 +157,102 @@ async def daily_summary():
     return [dict(r) for r in rows]
 
 
+@app.get("/api/strategy-performance")
+async def strategy_performance(strategy: str | None = None, days: int = 30):
+    """Fetch per-strategy performance metrics."""
+    assert pool is not None
+
+    query = """
+        SELECT strategy, date, signals_generated, signals_executed,
+               win_count, loss_count, realized_pnl_cents,
+               avg_edge, avg_kelly, brier_score
+        FROM strategy_performance
+        WHERE ($1::text IS NULL OR strategy = $1)
+          AND date >= CURRENT_DATE - $2::int
+        ORDER BY date DESC
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, strategy, days)
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/calibration", response_class=HTMLResponse)
+async def calibration_page(request: Request):
+    return templates.TemplateResponse("calibration.html", {"request": request})
+
+
+@app.get("/api/calibration/brier")
+async def calibration_brier(strategy: str | None = None, days: int = 30):
+    """Brier score trend over time, per-strategy."""
+    assert pool is not None
+
+    query = """
+        SELECT strategy, date, brier_score, signals_executed, win_count, loss_count
+        FROM strategy_performance
+        WHERE ($1::text IS NULL OR strategy = $1)
+          AND date >= CURRENT_DATE - $2::int
+          AND brier_score IS NOT NULL
+        ORDER BY date ASC
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, strategy, days)
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/calibration/station/{station}")
+async def calibration_station(station: str):
+    """Station-specific calibration parameters."""
+    assert pool is not None
+
+    query = """
+        SELECT station, month, hour, sigma_10min, hrrr_bias_f, hrrr_skill,
+               weight_physics, weight_hrrr, weight_trend, weight_climo,
+               sample_size, updated_at
+        FROM station_calibration
+        WHERE station = $1
+        ORDER BY month, hour
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, station)
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/performance")
+async def performance_metrics(days: int = 30):
+    """P&L curve, cumulative returns, drawdown."""
+    assert pool is not None
+
+    query = """
+        SELECT strategy, date, realized_pnl_cents, win_count, loss_count,
+               signals_executed, avg_edge, brier_score
+        FROM strategy_performance
+        WHERE date >= CURRENT_DATE - $1::int
+        ORDER BY date ASC
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, days)
+
+    # Compute cumulative P&L and drawdown
+    results = []
+    cumulative = {"weather": 0, "crypto": 0}
+    peak = {"weather": 0, "crypto": 0}
+    for r in rows:
+        d = dict(r)
+        strat = d["strategy"]
+        cumulative[strat] += d["realized_pnl_cents"]
+        d["cumulative_pnl_cents"] = cumulative[strat]
+        peak[strat] = max(peak[strat], cumulative[strat])
+        d["drawdown_cents"] = peak[strat] - cumulative[strat]
+        total = d["win_count"] + d["loss_count"]
+        d["win_rate"] = d["win_count"] / total if total > 0 else None
+        results.append(d)
+
+    return results
+
+
 @app.get("/api/events")
 async def event_stream(request: Request):
     """SSE endpoint for live updates via NATS subscription.

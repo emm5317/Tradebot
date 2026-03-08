@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::crypto_fv;
 use crate::crypto_state::CryptoState;
+use crate::dead_letter::{self, DeadLetterReason};
 use crate::feed_health::FeedHealth;
 use crate::kalshi::client::KalshiClient;
 use crate::kill_switch::KillSwitchState;
@@ -78,9 +79,10 @@ pub async fn run(
         }
     });
 
-    // Periodic GC and kill switch check interval
+    // Periodic GC, kill switch check, and reconciliation intervals
     let mut gc_interval = tokio::time::interval(std::time::Duration::from_secs(300));
     let mut kill_check_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    let mut reconciliation_interval = tokio::time::interval(std::time::Duration::from_secs(300)); // 5 min
 
     loop {
         tokio::select! {
@@ -91,6 +93,13 @@ pub async fn run(
                     Ok(s) => s,
                     Err(e) => {
                         warn!(error = %e, "failed to deserialize signal");
+                        dead_letter::send_dead_letter(
+                            &nats,
+                            &pool,
+                            DeadLetterReason::DeserializationFailure(e.to_string()),
+                            Some(&msg.payload),
+                            "execution",
+                        ).await;
                         continue;
                     }
                 };
@@ -158,6 +167,14 @@ pub async fn run(
             _ = gc_interval.tick() => {
                 let mut mgr = order_mgr.lock().await;
                 mgr.gc_old_orders();
+            }
+
+            // Phase 5.4: Periodic reconciliation against exchange
+            _ = reconciliation_interval.tick() => {
+                let mut mgr = order_mgr.lock().await;
+                if let Err(e) = mgr.reconcile_positions(&kalshi, &pool).await {
+                    warn!(error = %e, "periodic reconciliation failed");
+                }
             }
 
             else => break,

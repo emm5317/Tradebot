@@ -232,6 +232,13 @@ class WeatherSignalEvaluator:
             minutes_remaining=minutes,
             spread=orderbook.spread,
             order_imbalance=orderbook.imbalance,
+            model_components={
+                "physics": round(p_physics, 4),
+                "climo": round(p_climo, 4),
+                "trend": round(p_trend, 4),
+                "ensemble": round(p_ensemble, 4),
+                "station": station,
+            },
         )
 
         logger.info(

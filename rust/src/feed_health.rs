@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use serde::Serialize;
 use tracing::warn;
 
 /// Per-feed staleness thresholds.
@@ -22,11 +23,22 @@ const THRESHOLDS: &[(&str, u64)] = &[
 const CRYPTO_REQUIRED: &[&str] = &["binance_spot"];
 const WEATHER_REQUIRED: &[&str] = &["kalshi_ws"];
 
-/// Thread-safe feed health tracker.
+/// Thread-safe feed health tracker with granular scoring.
 pub struct FeedHealth {
-    last_update: DashMap<String, Instant>,
+    pub last_update: DashMap<String, Instant>,
     thresholds: HashMap<String, Duration>,
+    /// P50 latency thresholds per feed (Phase 5.8)
+    p50_thresholds: HashMap<String, Duration>,
 }
+
+/// P50 latency thresholds per feed (in seconds).
+const P50_THRESHOLDS: &[(&str, u64)] = &[
+    ("kalshi_ws", 2),
+    ("coinbase", 1),
+    ("binance_spot", 1),
+    ("binance_futures", 1),
+    ("deribit", 5),
+];
 
 impl FeedHealth {
     pub fn new() -> Self {
@@ -35,9 +47,15 @@ impl FeedHealth {
             .map(|(name, secs)| (name.to_string(), Duration::from_secs(*secs)))
             .collect();
 
+        let p50_thresholds = P50_THRESHOLDS
+            .iter()
+            .map(|(name, secs)| (name.to_string(), Duration::from_secs(*secs)))
+            .collect();
+
         Self {
             last_update: DashMap::new(),
             thresholds,
+            p50_thresholds,
         }
     }
 
@@ -58,6 +76,81 @@ impl FeedHealth {
             Some(last) => last.elapsed() < threshold,
             None => false, // No update ever recorded — stale
         }
+    }
+
+    /// Phase 5.8: Compute a health score (0.0-1.0) for a specific feed.
+    ///
+    /// - 1.0: receiving data, latency < P50 threshold
+    /// - 0.75: receiving data, latency > P50 but < staleness threshold
+    /// - 0.50: receiving data, but within staleness threshold (intermittent)
+    /// - 0.25: last update > threshold but < 2x threshold
+    /// - 0.0: last update > 2x threshold or never updated
+    pub fn health_score(&self, feed_name: &str) -> f64 {
+        let threshold = match self.thresholds.get(feed_name) {
+            Some(t) => *t,
+            None => return 1.0, // Unknown feed — don't block
+        };
+
+        let p50 = self.p50_thresholds.get(feed_name)
+            .copied()
+            .unwrap_or(threshold / 2);
+
+        match self.last_update.get(feed_name) {
+            Some(last) => {
+                let elapsed = last.elapsed();
+                if elapsed < p50 {
+                    1.0
+                } else if elapsed < threshold {
+                    0.75
+                } else if elapsed < threshold * 2 {
+                    0.25
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0, // Never updated
+        }
+    }
+
+    /// Phase 5.8: Compute aggregate health for a strategy.
+    pub fn strategy_health(&self, signal_type: &str) -> f64 {
+        let required = match signal_type {
+            "crypto" => CRYPTO_REQUIRED,
+            "weather" => WEATHER_REQUIRED,
+            _ => return 1.0,
+        };
+
+        required
+            .iter()
+            .map(|name| self.health_score(name))
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Phase 5.8: Get detailed health for all feeds.
+    pub fn health_detail(&self) -> Vec<FeedHealthDetail> {
+        THRESHOLDS
+            .iter()
+            .map(|(name, _)| {
+                let score = self.health_score(name);
+                let age_ms = self
+                    .last_update
+                    .get(*name)
+                    .map(|t| t.elapsed().as_millis() as u64);
+                FeedHealthDetail {
+                    feed: name.to_string(),
+                    score,
+                    age_ms,
+                    healthy: self.is_healthy(name),
+                }
+            })
+            .collect()
+    }
+
+    /// Phase 5.8: System-wide health (minimum across all strategies).
+    pub fn system_health(&self) -> f64 {
+        let crypto = self.strategy_health("crypto");
+        let weather = self.strategy_health("weather");
+        crypto.min(weather)
     }
 
     /// Check if all required feeds for a signal type are healthy.
@@ -86,6 +179,15 @@ impl FeedHealth {
             Err(stale)
         }
     }
+}
+
+/// Detailed health info for a single feed.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedHealthDetail {
+    pub feed: String,
+    pub score: f64,
+    pub age_ms: Option<u64>,
+    pub healthy: bool,
 }
 
 #[cfg(test)]
@@ -156,5 +258,86 @@ mod tests {
     fn test_unknown_signal_type_always_ok() {
         let health = FeedHealth::new();
         assert!(health.required_feeds_healthy("unknown").is_ok());
+    }
+
+    // Phase 5.8 tests
+    #[test]
+    fn test_health_score_fresh() {
+        let health = FeedHealth::new();
+        health.record_update("binance_spot");
+        // Just updated — should be 1.0
+        assert_eq!(health.health_score("binance_spot"), 1.0);
+    }
+
+    #[test]
+    fn test_health_score_never_updated() {
+        let health = FeedHealth::new();
+        assert_eq!(health.health_score("binance_spot"), 0.0);
+    }
+
+    #[test]
+    fn test_health_score_stale() {
+        let health = FeedHealth::new();
+        // Insert timestamp beyond 2x threshold (binance_spot threshold = 2s)
+        health
+            .last_update
+            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(10));
+        assert_eq!(health.health_score("binance_spot"), 0.0);
+    }
+
+    #[test]
+    fn test_health_score_degraded() {
+        let health = FeedHealth::new();
+        // Between threshold and 2x threshold (threshold=2s, so 3s is > 2s but < 4s)
+        health
+            .last_update
+            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(3));
+        assert_eq!(health.health_score("binance_spot"), 0.25);
+    }
+
+    #[test]
+    fn test_health_score_unknown_feed() {
+        let health = FeedHealth::new();
+        assert_eq!(health.health_score("unknown_feed"), 1.0);
+    }
+
+    #[test]
+    fn test_strategy_health() {
+        let health = FeedHealth::new();
+        // No updates — crypto health should be 0
+        assert_eq!(health.strategy_health("crypto"), 0.0);
+
+        // Update binance_spot — crypto health should be 1.0
+        health.record_update("binance_spot");
+        assert_eq!(health.strategy_health("crypto"), 1.0);
+    }
+
+    #[test]
+    fn test_system_health() {
+        let health = FeedHealth::new();
+        // No updates — system health is 0
+        assert_eq!(health.system_health(), 0.0);
+
+        // Update all required feeds
+        health.record_update("binance_spot");
+        health.record_update("kalshi_ws");
+        assert_eq!(health.system_health(), 1.0);
+    }
+
+    #[test]
+    fn test_health_detail() {
+        let health = FeedHealth::new();
+        health.record_update("binance_spot");
+        let detail = health.health_detail();
+        assert!(!detail.is_empty());
+
+        let bs = detail.iter().find(|d| d.feed == "binance_spot").unwrap();
+        assert!(bs.healthy);
+        assert_eq!(bs.score, 1.0);
+        assert!(bs.age_ms.is_some());
+
+        let cb = detail.iter().find(|d| d.feed == "coinbase").unwrap();
+        assert!(!cb.healthy);
+        assert_eq!(cb.score, 0.0);
     }
 }

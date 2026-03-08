@@ -1,11 +1,15 @@
+mod clock;
 mod config;
 mod contract_discovery;
 mod crypto_evaluator;
 mod crypto_fv;
 mod crypto_state;
 mod dashboard;
+mod dead_letter;
 mod execution;
 mod feed_health;
+#[cfg(test)]
+mod integration_tests;
 mod feeds;
 mod kalshi;
 mod kill_switch;
@@ -38,6 +42,17 @@ async fn main() -> Result<()> {
 
     logging::init(&config.log_level, &config.log_format);
     config.log_startup();
+
+    // Phase 5.5: Clock discipline — check system clock before startup
+    match clock::enforce_clock_discipline(config.paper_mode).await {
+        Ok(offset_ms) => {
+            tracing::info!(offset_ms = offset_ms, "clock discipline check passed");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "clock discipline check failed");
+            return Err(e);
+        }
+    }
 
     // Paper mode startup guard (Phase 0.3)
     if !config.paper_mode {

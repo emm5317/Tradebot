@@ -36,6 +36,7 @@ pub fn routes(state: DashboardState) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/signals", get(api_signals))
         .route("/api/orders", get(api_orders))
+        .route("/health/detail", get(api_health_detail))
         .with_state(state)
 }
 
@@ -225,6 +226,26 @@ async fn api_state(State(st): State<DashboardState>) -> Json<ApiState> {
     })
 }
 
+// ── /health/detail ──────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct HealthDetail {
+    feeds: Vec<crate::feed_health::FeedHealthDetail>,
+    crypto_health: f64,
+    weather_health: f64,
+    system_health: f64,
+}
+
+async fn api_health_detail(State(st): State<DashboardState>) -> Json<HealthDetail> {
+    let feeds = st.feed_health.health_detail();
+    Json(HealthDetail {
+        feeds,
+        crypto_health: st.feed_health.strategy_health("crypto"),
+        weather_health: st.feed_health.strategy_health("weather"),
+        system_health: st.feed_health.system_health(),
+    })
+}
+
 // ── /api/signals ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -233,26 +254,25 @@ struct SignalRow {
     created_at: String,
     ticker: String,
     signal_type: String,
-    action: String,
     direction: String,
     model_prob: f32,
     market_price: f32,
     edge: f32,
     kelly_fraction: f32,
     minutes_remaining: f32,
-    spread: f32,
-    source: Option<String>,
+    acted_on: bool,
+    rejection_reason: Option<String>,
 }
 
 async fn api_signals(State(st): State<DashboardState>) -> Json<Vec<SignalRow>> {
     let rows = sqlx::query_as::<_, (
-        i64, chrono::DateTime<chrono::Utc>, String, String, String, String,
-        f32, f32, f32, f32, f32, f32, Option<String>,
+        i64, chrono::DateTime<chrono::Utc>, String, String, String,
+        f32, f32, f32, f32, f32, bool, Option<String>,
     )>(
         r#"
-        SELECT id, created_at, ticker, signal_type, action, direction,
+        SELECT id, created_at, ticker, signal_type, direction,
                model_prob, market_price, edge, kelly_fraction,
-               minutes_remaining, spread, source
+               minutes_remaining, acted_on, rejection_reason
         FROM signals
         ORDER BY created_at DESC
         LIMIT 50
@@ -269,15 +289,14 @@ async fn api_signals(State(st): State<DashboardState>) -> Json<Vec<SignalRow>> {
                 created_at: r.1.to_rfc3339(),
                 ticker: r.2,
                 signal_type: r.3,
-                action: r.4,
-                direction: r.5,
-                model_prob: r.6,
-                market_price: r.7,
-                edge: r.8,
-                kelly_fraction: r.9,
-                minutes_remaining: r.10,
-                spread: r.11,
-                source: r.12,
+                direction: r.4,
+                model_prob: r.5,
+                market_price: r.6,
+                edge: r.7,
+                kelly_fraction: r.8,
+                minutes_remaining: r.9,
+                acted_on: r.10,
+                rejection_reason: r.11,
             })
             .collect(),
     )

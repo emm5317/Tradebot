@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tradebot — Calibration</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+    <div class="header">
+        <div class="header-left">
+            <h1>&gt; CALIBRATION</h1>
+            <span class="keyboard-hint">
+                <a href="/" style="color: var(--text-dim)">&larr; Dashboard</a>
+            </span>
+        </div>
+        <div class="status" id="system-status"></div>
+    </div>
+
+    <div class="container" id="main-grid">
+        <div class="panel" id="panel-brier">
+            <div class="panel-header">
+                <div class="panel-title">Brier Score Trend</div>
+                <div class="panel-meta" id="meta-brier"></div>
+            </div>
+            <div class="panel-body" id="brier-panel"></div>
+        </div>
+        <div class="panel" id="panel-perf">
+            <div class="panel-header">
+                <div class="panel-title">P&L Curve</div>
+                <div class="panel-meta" id="meta-perf"></div>
+            </div>
+            <div class="panel-body" id="perf-panel"></div>
+        </div>
+        <div class="panel" id="panel-strategy">
+            <div class="panel-header">
+                <div class="panel-title">Strategy Performance</div>
+                <div class="panel-meta" id="meta-strategy"></div>
+            </div>
+            <div class="panel-body" id="strategy-panel"></div>
+        </div>
+        <div class="panel" id="panel-station">
+            <div class="panel-header">
+                <div class="panel-title">Station Calibration</div>
+                <div class="panel-meta" id="meta-station"></div>
+            </div>
+            <div class="panel-body" id="station-panel"></div>
+        </div>
+    </div>
+
+    <script>
+    function fetchJSON(url) {
+        return fetch(url).then(function(r) { return r.json(); }).catch(function() { return null; });
+    }
+
+    function renderBrier() {
+        fetchJSON('/api/calibration/brier?days=30').then(function(data) {
+            var el = document.getElementById('brier-panel');
+            if (!data || !data.length) {
+                el.innerHTML = '<span class="rejected rej-generic">no calibration data yet</span>';
+                return;
+            }
+
+            var html = '<table><thead><tr><th>Date</th><th>Strategy</th><th>Brier</th><th>Executed</th><th>W/L</th></tr></thead><tbody>';
+            data.forEach(function(d) {
+                var brierCls = d.brier_score < 0.2 ? 'dir-yes' : d.brier_score < 0.3 ? 'edge-low' : 'dir-no';
+                html += '<tr>' +
+                    '<td>' + d.date + '</td>' +
+                    '<td>' + d.strategy + '</td>' +
+                    '<td class="' + brierCls + '">' + (d.brier_score ? d.brier_score.toFixed(4) : '-') + '</td>' +
+                    '<td>' + (d.signals_executed || 0) + '</td>' +
+                    '<td>' + (d.win_count || 0) + ' / ' + (d.loss_count || 0) + '</td>' +
+                '</tr>';
+            });
+            html += '</tbody></table>';
+            el.innerHTML = html;
+        });
+    }
+
+    function renderPerformance() {
+        fetchJSON('/api/performance?days=30').then(function(data) {
+            var el = document.getElementById('perf-panel');
+            if (!data || !data.length) {
+                el.innerHTML = '<span class="rejected rej-generic">no performance data yet</span>';
+                return;
+            }
+
+            var html = '<table><thead><tr><th>Date</th><th>Strategy</th><th>Day P&L</th><th>Cumulative</th><th>Drawdown</th><th>Win Rate</th></tr></thead><tbody>';
+            data.forEach(function(d) {
+                var pnl = d.realized_pnl_cents / 100;
+                var cum = d.cumulative_pnl_cents / 100;
+                var dd = d.drawdown_cents / 100;
+                var pnlCls = pnl > 0 ? 'pnl-positive' : pnl < 0 ? 'pnl-negative' : 'pnl-zero';
+                var cumCls = cum > 0 ? 'pnl-positive' : cum < 0 ? 'pnl-negative' : 'pnl-zero';
+                html += '<tr>' +
+                    '<td>' + d.date + '</td>' +
+                    '<td>' + d.strategy + '</td>' +
+                    '<td class="' + pnlCls + '">' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + '</td>' +
+                    '<td class="' + cumCls + '">' + (cum >= 0 ? '+' : '') + '$' + cum.toFixed(2) + '</td>' +
+                    '<td class="pnl-negative">' + (dd > 0 ? '-$' + dd.toFixed(2) : '-') + '</td>' +
+                    '<td>' + (d.win_rate !== null ? (d.win_rate * 100).toFixed(0) + '%' : '-') + '</td>' +
+                '</tr>';
+            });
+            html += '</tbody></table>';
+            el.innerHTML = html;
+        });
+    }
+
+    function renderStrategy() {
+        fetchJSON('/api/strategy-performance?days=14').then(function(data) {
+            var el = document.getElementById('strategy-panel');
+            if (!data || !data.length) {
+                el.innerHTML = '<span class="rejected rej-generic">no strategy data yet</span>';
+                return;
+            }
+
+            var html = '<table><thead><tr><th>Date</th><th>Strategy</th><th>Signals</th><th>Executed</th><th>Edge</th><th>Kelly</th><th>P&L</th></tr></thead><tbody>';
+            data.forEach(function(d) {
+                var pnl = (d.realized_pnl_cents || 0) / 100;
+                var pnlCls = pnl > 0 ? 'pnl-positive' : pnl < 0 ? 'pnl-negative' : 'pnl-zero';
+                html += '<tr>' +
+                    '<td>' + d.date + '</td>' +
+                    '<td>' + d.strategy + '</td>' +
+                    '<td>' + (d.signals_generated || 0) + '</td>' +
+                    '<td>' + (d.signals_executed || 0) + '</td>' +
+                    '<td>' + (d.avg_edge ? (d.avg_edge * 100).toFixed(1) + '%' : '-') + '</td>' +
+                    '<td>' + (d.avg_kelly ? (d.avg_kelly * 100).toFixed(1) + '%' : '-') + '</td>' +
+                    '<td class="' + pnlCls + '">' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + '</td>' +
+                '</tr>';
+            });
+            html += '</tbody></table>';
+            el.innerHTML = html;
+        });
+    }
+
+    function renderStation() {
+        var stations = ['KORD', 'KJFK', 'KDEN', 'KLAX', 'KIAH'];
+        var el = document.getElementById('station-panel');
+        var html = '<div style="margin-bottom:8px">';
+        stations.forEach(function(s) {
+            html += '<button class="station-btn" onclick="loadStation(\'' + s + '\')" style="background:var(--bg-panel);color:var(--text);border:1px solid var(--border);padding:2px 8px;margin:2px;cursor:pointer;font-family:inherit;font-size:inherit">' + s + '</button> ';
+        });
+        html += '</div><div id="station-data"><span class="rejected rej-generic">select a station</span></div>';
+        el.innerHTML = html;
+    }
+
+    window.loadStation = function(station) {
+        fetchJSON('/api/calibration/station/' + station).then(function(data) {
+            var el = document.getElementById('station-data');
+            if (!data || !data.length) {
+                el.innerHTML = '<span class="rejected rej-generic">no calibration data for ' + station + '</span>';
+                return;
+            }
+            var html = '<table><thead><tr><th>Month</th><th>Hour</th><th>Sigma</th><th>HRRR Bias</th><th>HRRR Skill</th><th>Samples</th></tr></thead><tbody>';
+            data.forEach(function(d) {
+                html += '<tr>' +
+                    '<td>' + d.month + '</td>' +
+                    '<td>' + d.hour + ':00</td>' +
+                    '<td>' + (d.sigma_10min ? d.sigma_10min.toFixed(3) : '-') + '</td>' +
+                    '<td>' + (d.hrrr_bias_f ? d.hrrr_bias_f.toFixed(2) + 'F' : '-') + '</td>' +
+                    '<td>' + (d.hrrr_skill ? d.hrrr_skill.toFixed(2) : '-') + '</td>' +
+                    '<td>' + (d.sample_size || 0) + '</td>' +
+                '</tr>';
+            });
+            html += '</tbody></table>';
+            el.innerHTML = html;
+        });
+    };
+
+    renderBrier();
+    renderPerformance();
+    renderStrategy();
+    renderStation();
+    </script>
+</body>
+</html>

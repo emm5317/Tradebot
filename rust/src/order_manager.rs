@@ -320,6 +320,12 @@ impl OrderManager {
         self.signal_cooldowns.insert(ticker.to_string(), Instant::now());
     }
 
+    /// Public wrapper for tests to record cooldowns.
+    #[cfg(test)]
+    pub fn record_signal_cooldown_pub(&mut self, ticker: &str) {
+        self.record_signal_cooldown(ticker);
+    }
+
     /// Check global order rate limit (max 10 orders/min).
     fn check_global_rate_limit(&self) -> bool {
         let one_minute_ago = Instant::now() - std::time::Duration::from_secs(60);
@@ -974,6 +980,100 @@ impl OrderManager {
             !o.state.is_terminal() || o.created_at.elapsed() < one_hour
         });
     }
+
+    /// Phase 5.4: Periodic reconciliation against exchange positions.
+    /// Compares in-memory position tracker with Kalshi REST API positions.
+    /// Returns list of discrepancies for audit logging.
+    pub async fn reconcile_positions(
+        &mut self,
+        kalshi: &KalshiClient,
+        pool: &sqlx::PgPool,
+    ) -> Result<Vec<ReconciliationEntry>> {
+        let exchange_positions = kalshi.get_positions().await
+            .context("Failed to fetch positions for reconciliation")?;
+
+        let mut discrepancies = Vec::new();
+
+        // Build map of exchange positions
+        let exchange_map: HashMap<String, i64> = exchange_positions
+            .iter()
+            .filter(|p| p.market_exposure.unwrap_or(0) != 0)
+            .map(|p| (p.ticker.clone(), p.market_exposure.unwrap_or(0)))
+            .collect();
+
+        // Check: position on exchange but not in local tracker
+        for (ticker, &qty) in &exchange_map {
+            if !self.positions.contains_key(ticker) {
+                warn!(
+                    ticker = %ticker,
+                    exchange_qty = qty,
+                    "reconciliation: position on exchange but not in tracker"
+                );
+                discrepancies.push(ReconciliationEntry {
+                    discrepancy: "missing_local".into(),
+                    ticker: ticker.clone(),
+                    exchange_qty: Some(qty as i32),
+                    local_qty: None,
+                    action_taken: "added_to_tracker".into(),
+                });
+            }
+        }
+
+        // Check: position in tracker but not on exchange
+        let local_tickers: Vec<String> = self.positions.keys().cloned().collect();
+        for ticker in &local_tickers {
+            if !exchange_map.contains_key(ticker) {
+                warn!(
+                    ticker = %ticker,
+                    "reconciliation: position in tracker but not on exchange"
+                );
+                self.positions.remove(ticker);
+                discrepancies.push(ReconciliationEntry {
+                    discrepancy: "missing_exchange".into(),
+                    ticker: ticker.clone(),
+                    exchange_qty: None,
+                    local_qty: Some(1),
+                    action_taken: "removed_from_tracker".into(),
+                });
+            }
+        }
+
+        // Persist discrepancies to DB
+        for entry in &discrepancies {
+            let _ = sqlx::query(
+                "INSERT INTO reconciliation_log (discrepancy, ticker, exchange_qty, local_qty, action_taken) \
+                 VALUES ($1, $2, $3, $4, $5)"
+            )
+            .bind(&entry.discrepancy)
+            .bind(&entry.ticker)
+            .bind(entry.exchange_qty)
+            .bind(entry.local_qty)
+            .bind(&entry.action_taken)
+            .execute(pool)
+            .await;
+        }
+
+        if discrepancies.is_empty() {
+            info!("reconciliation: no discrepancies found");
+        } else {
+            warn!(
+                count = discrepancies.len(),
+                "reconciliation: found discrepancies"
+            );
+        }
+
+        Ok(discrepancies)
+    }
+}
+
+/// Reconciliation discrepancy record for audit logging.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReconciliationEntry {
+    pub discrepancy: String,
+    pub ticker: String,
+    pub exchange_qty: Option<i32>,
+    pub local_qty: Option<i32>,
+    pub action_taken: String,
 }
 
 // ---------------------------------------------------------------------------
