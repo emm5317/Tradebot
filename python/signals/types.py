@@ -82,6 +82,15 @@ class OrderbookState(BaseModel):
     best_ask: float | None = None
     bid_depth: int = 0
     ask_depth: int = 0
+    best_bid_size: int | None = None
+    best_ask_size: int | None = None
+    last_trade_price: float | None = None
+    last_trade_count: int | None = None
+    trade_aggr_30s: float = 0.0
+    recent_volume_60s: int = 0
+    market_status: str | None = None
+    volume: int | None = None
+    open_interest: int | None = None
 
     @property
     def imbalance(self) -> float:

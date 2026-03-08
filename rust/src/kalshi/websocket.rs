@@ -36,6 +36,19 @@ pub enum WsFeedMessage {
         count: i64,
         taker_side: String,
     },
+    /// Ticker channel update (top-of-book, market status).
+    TickerUpdate {
+        ticker: String,
+        yes_bid: Option<i64>,
+        yes_ask: Option<i64>,
+        yes_bid_size: Option<i64>,
+        yes_ask_size: Option<i64>,
+        last_price: Option<i64>,
+        last_trade_count: Option<i64>,
+        volume: Option<i64>,
+        open_interest: Option<i64>,
+        market_status: Option<String>,
+    },
     /// Feed disconnected (reconnecting).
     Disconnected,
     /// Feed reconnected.
@@ -169,7 +182,7 @@ impl KalshiWsFeed {
                 id: 1,
                 cmd: "subscribe".into(),
                 params: SubscribeParams {
-                    channels: vec!["orderbook_delta".into(), "trade".into()],
+                    channels: vec!["orderbook_delta".into(), "trade".into(), "ticker".into()],
                     market_tickers: subs,
                 },
             };
@@ -297,6 +310,24 @@ impl KalshiWsFeed {
                             price_cents: price,
                             count,
                             taker_side,
+                        })
+                        .await;
+                }
+            }
+            "ticker" => {
+                if let Some(ticker) = msg.get("market_ticker").and_then(|v| v.as_str()) {
+                    let _ = tx
+                        .send(WsFeedMessage::TickerUpdate {
+                            ticker: ticker.to_string(),
+                            yes_bid: msg.get("yes_bid").and_then(|v| v.as_i64()),
+                            yes_ask: msg.get("yes_ask").and_then(|v| v.as_i64()),
+                            yes_bid_size: msg.get("yes_bid_size").and_then(|v| v.as_i64()),
+                            yes_ask_size: msg.get("yes_ask_size").and_then(|v| v.as_i64()),
+                            last_price: msg.get("last_price").and_then(|v| v.as_i64()),
+                            last_trade_count: msg.get("last_trade_count").and_then(|v| v.as_i64()),
+                            volume: msg.get("volume").and_then(|v| v.as_i64()),
+                            open_interest: msg.get("open_interest").and_then(|v| v.as_i64()),
+                            market_status: msg.get("market_status").and_then(|v| v.as_str()).map(|s| s.to_string()),
                         })
                         .await;
                 }
