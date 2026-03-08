@@ -19,7 +19,6 @@ from config import Settings, get_settings
 from data.mesonet import fetch_all_stations
 from models.physics import build_climo_table, build_sigma_table
 from rules.resolver import ContractRulesResolver
-from signals.crypto import CryptoSignalEvaluator, load_blackout_windows
 from signals.notifier import DiscordNotifier
 from signals.publisher import SignalPublisher
 from signals.registry import EvaluatorRegistry
@@ -61,17 +60,13 @@ class EvaluationDaemon:
         sigma_table = await build_sigma_table(self.pool)
         climo_table = await build_climo_table(self.pool)
 
-        # Register evaluators
+        # Register evaluators (crypto moved to Rust event-driven evaluator in Phase 3)
         weather_eval = WeatherSignalEvaluator(
             sigma_table=sigma_table,
             climo_table=climo_table,
         )
-        crypto_eval = CryptoSignalEvaluator()
-        blackout_windows = await load_blackout_windows(self.pool)
-        crypto_eval.set_blackout_windows(blackout_windows)
 
         self.registry.register("weather", weather_eval)
-        self.registry.register("crypto", crypto_eval)
 
         # Load contract rules
         try:
@@ -133,7 +128,6 @@ class EvaluationDaemon:
             self.settings.asos_stations,
             mesonet_base_url=self.settings.mesonet_base_url,
         )
-        btc_state = await self._fetch_btc_state_from_redis()
 
         # Fetch latest market snapshots for orderbook state
         async with self.pool.acquire() as conn:
@@ -201,21 +195,8 @@ class EvaluationDaemon:
                         observation=obs,
                         orderbook=orderbook,
                     )
-                elif signal_type == "crypto":
-                    if btc_state is None:
-                        continue
-                    vol = btc_state.get("ewma_vol_30m") or btc_state.get("realized_vol_30m")
-                    btc_updated = btc_state.get("updated_at")
-                    if btc_updated:
-                        btc_updated = datetime.fromisoformat(btc_updated)
-                    sig, rej, state = evaluator.evaluate(
-                        contract=contract,
-                        spot_price=btc_state.get("spot_price", 0.0),
-                        realized_vol=vol,
-                        btc_last_updated=btc_updated or datetime.now(timezone.utc),
-                        orderbook=orderbook,
-                    )
                 else:
+                    # Crypto evaluation moved to Rust (Phase 3)
                     continue
 
                 # Publish results
@@ -273,20 +254,6 @@ class EvaluationDaemon:
                 ask_depth=int(snap["ask_depth"] or 0),
             )
 
-        return None
-
-    async def _fetch_btc_state_from_redis(self) -> dict | None:
-        """Fetch BTC spot price and volatility from Redis (written by Rust feed)."""
-        if self.redis is None:
-            return None
-        try:
-            import json
-
-            raw = await self.redis.get("crypto:binance_spot")
-            if raw:
-                return json.loads(raw)
-        except Exception:
-            logger.warning("btc_state_redis_fetch_failed", exc_info=True)
         return None
 
     async def _fetch_redis_orderbooks(self, tickers: list[str]) -> dict:

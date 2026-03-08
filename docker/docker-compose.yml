@@ -8,6 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tradebot_dev}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tradebot"]
       interval: 5s
@@ -35,6 +36,56 @@ services:
       test: ["CMD", "nats-server", "--help"]
       interval: 5s
       retries: 5
+
+  tradebot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports: ["3030:3030"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://tradebot:${POSTGRES_PASSWORD:-tradebot_dev}@postgres:5432/tradebot
+      DATABASE_POOL_SIZE: 10
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+
+      KALSHI_API_KEY: ${KALSHI_API_KEY:-dev-placeholder}
+      KALSHI_PRIVATE_KEY_PATH: /etc/tradebot/kalshi_dev.pem
+      KALSHI_BASE_URL: https://demo-api.kalshi.co
+      KALSHI_WS_URL: wss://demo-api.kalshi.co/trade-api/ws/v2
+
+      BINANCE_WS_URL: wss://stream.binance.com:9443/ws/btcusdt@trade
+      BINANCE_SPOT_WS_URL: wss://stream.binance.com:9443/ws/btcusdt@trade
+      ENABLE_BINANCE_SPOT: "true"
+      ENABLE_COINBASE: "true"
+      ENABLE_BINANCE_FUTURES: "true"
+      ENABLE_DERIBIT: "true"
+
+      MESONET_BASE_URL: https://mesonet.agron.iastate.edu
+
+      PAPER_MODE: "true"
+      MAX_TRADE_SIZE_CENTS: 2500
+      MAX_DAILY_LOSS_CENTS: 10000
+      MAX_POSITIONS: 5
+      MAX_EXPOSURE_CENTS: 15000
+      KELLY_FRACTION_MULTIPLIER: 0.25
+
+      LOG_LEVEL: info
+      LOG_FORMAT: pretty
+      DISCORD_WEBHOOK_URL: ""
+
+      KILL_SWITCH_ALL: "false"
+      KILL_SWITCH_CRYPTO: "false"
+      KILL_SWITCH_WEATHER: "false"
+
+      HTTP_PORT: 3030
+    restart: unless-stopped
 
 volumes:
   pgdata:

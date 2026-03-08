@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TRADEBOT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:       #06090e;
+  --bg2:      #0c1117;
+  --bg3:      #111921;
+  --surface:  #161f2b;
+  --border:   #1c2736;
+  --border-hi:#2a3f58;
+  --text:     #8899aa;
+  --text-hi:  #c5d3e0;
+  --white:    #e8eff6;
+  --green:    #00dc82;
+  --green-dim:#009e5c;
+  --red:      #ff4757;
+  --red-dim:  #c0303c;
+  --amber:    #ffb347;
+  --amber-dim:#c08020;
+  --cyan:     #22d3ee;
+  --blue:     #4c8dff;
+  --purple:   #a78bfa;
+  --font:     'JetBrains Mono', monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:12px;line-height:1.5;min-height:100vh}
+body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(255,255,255,0.008) 2px,rgba(255,255,255,0.008) 4px);pointer-events:none;z-index:9999}
+
+/* ── HEADER ── */
+.hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;border-bottom:1px solid var(--border);background:var(--bg2);position:sticky;top:0;z-index:100}
+.hdr-left{display:flex;align-items:center;gap:20px}
+.hdr h1{font-size:14px;font-weight:700;letter-spacing:3px;color:var(--green);text-shadow:0 0 20px rgba(0,220,130,0.25)}
+.hdr h1 .sep{color:var(--border-hi);margin:0 2px}
+.hdr-mode{font-size:9px;letter-spacing:2px;padding:2px 8px;border:1px solid var(--amber-dim);color:var(--amber);border-radius:2px}
+.hdr-mode.live{border-color:var(--red-dim);color:var(--red);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.hdr-right{display:flex;align-items:center;gap:14px}
+.clock{font-size:11px;letter-spacing:1px;color:var(--text)}
+.clock b{color:var(--white)}
+.feeds{display:flex;gap:8px}
+.feed-pill{display:flex;align-items:center;gap:4px;font-size:9px;letter-spacing:1px;color:var(--text)}
+.dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+.dot.off{background:var(--red);box-shadow:0 0 4px var(--red)}
+.dot.stale{background:var(--amber)}
+.kill-btn{background:none;border:1px solid var(--red-dim);color:var(--red);font-family:var(--font);font-size:9px;letter-spacing:2px;padding:3px 10px;cursor:pointer;transition:.15s}
+.kill-btn:hover{background:var(--red);color:#000;box-shadow:0 0 16px var(--red)}
+.kill-btn.active{background:var(--red);color:#000;box-shadow:0 0 20px var(--red);animation:pulse .5s infinite alternate}
+
+/* ── GRID ── */
+.grid{display:grid;grid-template-columns:1fr 1fr 1fr;grid-template-rows:auto auto auto;gap:1px;background:var(--border);min-height:calc(100vh - 40px)}
+.panel{background:var(--bg);display:flex;flex-direction:column;overflow:hidden}
+.panel-hd{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;border-bottom:1px solid var(--border);background:var(--bg2);flex-shrink:0}
+.panel-title{font-size:9px;letter-spacing:2.5px;color:var(--text);font-weight:600}
+.panel-badge{font-size:8px;letter-spacing:1px;color:var(--text);opacity:.5}
+.panel-body{padding:10px 12px;flex:1;overflow-y:auto}
+.panel-body::-webkit-scrollbar{width:3px}
+.panel-body::-webkit-scrollbar-thumb{background:var(--border-hi);border-radius:2px}
+
+/* ── BTC PRICE (panel 1) ── */
+.price-hero{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}
+.price-big{font-size:28px;font-weight:700;color:var(--white);letter-spacing:-1px}
+.price-delta{font-size:12px;font-weight:600}
+.price-delta.up{color:var(--green)}
+.price-delta.dn{color:var(--red)}
+.price-sub{font-size:10px;color:var(--text);margin-bottom:12px}
+.price-sub b{color:var(--text-hi)}
+.venues{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+.venue{padding:6px 8px;border:1px solid var(--border);border-radius:3px}
+.venue-label{font-size:8px;color:var(--text);letter-spacing:1.5px;margin-bottom:2px}
+.venue-price{font-size:13px;font-weight:600;color:var(--text-hi)}
+.venue-price.zero{color:var(--text);opacity:.3}
+.metrics{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)}
+.metric{text-align:center}
+.metric-label{font-size:8px;color:var(--text);letter-spacing:1.5px}
+.metric-val{font-size:14px;font-weight:600;color:var(--white)}
+.metric-val.positive{color:var(--green)}
+.metric-val.negative{color:var(--red)}
+.metric-val.neutral{color:var(--amber)}
+
+/* ── RISK (panel 2) ── */
+.risk-bar{margin-bottom:10px}
+.risk-label{display:flex;justify-content:space-between;font-size:9px;margin-bottom:3px}
+.risk-label .rl{color:var(--text);letter-spacing:1px}
+.risk-label .rv{color:var(--text-hi)}
+.bar-track{height:4px;background:var(--surface);border-radius:2px;overflow:hidden}
+.bar-fill{height:100%;border-radius:2px;transition:width .6s ease}
+.bar-fill.safe{background:var(--green)}
+.bar-fill.warn{background:var(--amber)}
+.bar-fill.danger{background:var(--red)}
+.risk-cards{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+.rcard{border:1px solid var(--border);border-radius:3px;padding:6px 8px}
+.rcard-label{font-size:8px;letter-spacing:1.5px;color:var(--text)}
+.rcard-val{font-size:16px;font-weight:700}
+.rcard-val.green{color:var(--green)}
+.rcard-val.red{color:var(--red)}
+.rcard-val.amber{color:var(--amber)}
+.rcard-val.white{color:var(--white)}
+
+/* ── CONTRACTS (panel 3) ── */
+.contract-row{border:1px solid var(--border);border-radius:3px;padding:6px 8px;margin-bottom:5px;position:relative;overflow:hidden}
+.contract-row::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;border-radius:2px 0 0 2px}
+.contract-row.inwindow::before{background:var(--green)}
+.contract-row.exitonly::before{background:var(--amber)}
+.contract-row.eligible::before{background:var(--border-hi)}
+.cr-top{display:flex;justify-content:space-between;align-items:baseline}
+.cr-ticker{font-size:11px;font-weight:600;color:var(--cyan);letter-spacing:.5px}
+.cr-time{font-size:10px;font-weight:700}
+.cr-time.urgent{color:var(--red);text-shadow:0 0 6px rgba(255,71,87,.4)}
+.cr-time.warn{color:var(--amber)}
+.cr-time.safe{color:var(--text)}
+.cr-meta{font-size:9px;color:var(--text);margin-top:2px}
+.cr-meta b{color:var(--text-hi)}
+.empty-state{color:var(--text);opacity:.4;font-size:10px;text-align:center;padding:20px 0;letter-spacing:1px}
+
+/* ── SIGNALS TABLE (panel 4, spans 2 cols) ── */
+.span2{grid-column:span 2}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{text-align:left;color:var(--text);font-weight:500;font-size:9px;letter-spacing:1px;padding:4px 6px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:2}
+td{padding:4px 6px;border-bottom:1px solid rgba(28,39,54,.5);white-space:nowrap}
+tr:hover td{background:var(--bg3)}
+.dir-yes{color:var(--green);font-weight:600}
+.dir-no{color:var(--red);font-weight:600}
+.edge-good{color:var(--green)}
+.edge-ok{color:var(--amber)}
+.edge-low{color:var(--text)}
+.source-rust{color:var(--cyan);font-size:9px;letter-spacing:1px}
+.source-python{color:var(--purple);font-size:9px;letter-spacing:1px}
+.age{font-size:10px}.age-fresh{color:var(--green)}.age-recent{color:var(--text-hi)}.age-old{color:var(--text);opacity:.5}
+
+/* ── POSITIONS (panel 5) ── */
+.pos-row{border:1px solid var(--border);border-radius:3px;padding:6px 8px;margin-bottom:5px;border-left:2px solid var(--green)}
+.pos-row.no-side{border-left-color:var(--red)}
+.pos-top{display:flex;justify-content:space-between;align-items:baseline}
+.pos-ticker{font-size:11px;font-weight:600;color:var(--white);letter-spacing:.5px}
+.pos-state{font-size:9px;letter-spacing:1px}
+.pos-state.filled{color:var(--green)}
+.pos-state.pending{color:var(--amber)}
+.pos-state.acked{color:var(--cyan)}
+.pos-detail{display:flex;gap:12px;font-size:9px;color:var(--text);margin-top:3px}
+.pos-detail b{color:var(--text-hi)}
+
+/* ── ORDERS TABLE (panel 6, if present) ── */
+.pnl-pos{color:var(--green);font-weight:600}
+.pnl-neg{color:var(--red);font-weight:600}
+.pnl-zero{color:var(--text)}
+.status-filled{color:var(--green)}
+.status-cancelled{color:var(--text);opacity:.5}
+.status-rejected{color:var(--red)}
+.status-pending{color:var(--amber)}
+
+/* ── Log (bottom row, full width) ── */
+.span3{grid-column:span 3}
+.log-body{font-size:10px;max-height:160px;overflow-y:auto}
+.log-line{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid rgba(28,39,54,.3)}
+.log-time{color:var(--text);opacity:.5;width:55px;flex-shrink:0}
+.log-level{width:44px;flex-shrink:0;font-weight:600}
+.log-level.info{color:var(--green-dim)}
+.log-level.warn{color:var(--amber)}
+.log-level.error{color:var(--red)}
+.log-level.trade{color:var(--cyan)}
+.log-msg{color:var(--text-hi);flex:1}
+@keyframes slideIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+.log-line{animation:slideIn .2s ease}
+
+@media(max-width:1000px){.grid{grid-template-columns:1fr}.span2,.span3{grid-column:span 1}}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="hdr">
+  <div class="hdr-left">
+    <h1>TRADEBOT<span class="sep">//</span>TERMINAL</h1>
+    <div class="hdr-mode" id="modeTag">PAPER</div>
+  </div>
+  <div class="hdr-right">
+    <div class="feeds" id="feedPills"></div>
+    <div class="clock"><span style="opacity:.4">UTC </span><b id="utcClock">--:--:--</b></div>
+    <button class="kill-btn" id="killBtn" onclick="toggleKill()">KILL</button>
+  </div>
+</div>
+
+<!-- GRID -->
+<div class="grid">
+  <!-- 1: BTC Price -->
+  <div class="panel" id="p-price">
+    <div class="panel-hd">
+      <div class="panel-title">BTC SHADOW RTI</div>
+      <div class="panel-badge" id="priceBadge">--</div>
+    </div>
+    <div class="panel-body" id="priceBody"></div>
+  </div>
+
+  <!-- 2: Risk Monitor -->
+  <div class="panel" id="p-risk">
+    <div class="panel-hd">
+      <div class="panel-title">RISK MONITOR</div>
+      <div class="panel-badge" id="riskBadge">NOMINAL</div>
+    </div>
+    <div class="panel-body" id="riskBody"></div>
+  </div>
+
+  <!-- 3: Active Contracts -->
+  <div class="panel" id="p-contracts">
+    <div class="panel-hd">
+      <div class="panel-title">ACTIVE CONTRACTS</div>
+      <div class="panel-badge" id="contractBadge">0</div>
+    </div>
+    <div class="panel-body" id="contractsBody"></div>
+  </div>
+
+  <!-- 4: Signals (2 cols) -->
+  <div class="panel span2" id="p-signals">
+    <div class="panel-hd">
+      <div class="panel-title">RECENT SIGNALS</div>
+      <div class="panel-badge" id="signalBadge">--</div>
+    </div>
+    <div class="panel-body" id="signalsBody"></div>
+  </div>
+
+  <!-- 5: Positions -->
+  <div class="panel" id="p-positions">
+    <div class="panel-hd">
+      <div class="panel-title">POSITIONS &amp; ORDERS</div>
+      <div class="panel-badge" id="posBadge">0</div>
+    </div>
+    <div class="panel-body" id="positionsBody"></div>
+  </div>
+
+  <!-- 6: Event Log (full width) -->
+  <div class="panel span3" id="p-log">
+    <div class="panel-hd">
+      <div class="panel-title">EVENT LOG</div>
+      <div class="panel-badge" id="logBadge" style="opacity:1;color:var(--green)">&#9679;</div>
+    </div>
+    <div class="panel-body log-body" id="logBody"></div>
+  </div>
+</div>
+
+<script>
+// ── State ───────────────────────────────────────────────
+let prevPrice = 0;
+let logLines = [];
+let killActive = false;
+const MAX_LOG = 60;
+
+// ── Clock ───────────────────────────────────────────────
+function tickClock() {
+  const d = new Date();
+  document.getElementById('utcClock').textContent =
+    d.toISOString().slice(11, 19);
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+// ── Helpers ─────────────────────────────────────────────
+function fmt(n, d=0) {
+  if (n == null || isNaN(n)) return '--';
+  return n.toLocaleString('en-US', {minimumFractionDigits:d, maximumFractionDigits:d});
+}
+function fmtUsd(cents) {
+  if (cents == null) return '--';
+  const v = cents / 100;
+  return (v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2);
+}
+function age(iso) {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 60) return {text: Math.floor(s) + 's', cls: 'age-fresh'};
+  if (s < 300) return {text: Math.floor(s/60) + 'm', cls: 'age-recent'};
+  return {text: Math.floor(s/60) + 'm', cls: 'age-old'};
+}
+function barClass(pct) { return pct < 50 ? 'safe' : pct < 80 ? 'warn' : 'danger'; }
+function addLog(level, msg) {
+  const t = new Date().toISOString().slice(11, 19);
+  logLines.unshift({time: t, level, msg});
+  if (logLines.length > MAX_LOG) logLines.length = MAX_LOG;
+  renderLog();
+}
+
+// ── Kill Switch ─────────────────────────────────────────
+async function toggleKill() {
+  killActive = !killActive;
+  const btn = document.getElementById('killBtn');
+  try {
+    await fetch('/kill-switch', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({switch: 'all', active: killActive})
+    });
+    btn.className = killActive ? 'kill-btn active' : 'kill-btn';
+    btn.textContent = killActive ? 'KILLED' : 'KILL';
+    addLog(killActive ? 'error' : 'info',
+      killActive ? 'KILL SWITCH ACTIVATED' : 'Kill switch deactivated');
+  } catch(e) { addLog('error', 'Kill switch toggle failed: ' + e.message); }
+}
+
+// ── Feed Pills ──────────────────────────────────────────
+function renderFeeds(feeds) {
+  const names = ['coinbase','binance_spot','binance_futures','deribit','kalshi_ws'];
+  const labels = ['CB','BN','FUT','DRB','KAL'];
+  const el = document.getElementById('feedPills');
+  el.innerHTML = names.map((n, i) => {
+    const f = feeds[n] || {};
+    const cls = f.connected ? 'on' : 'off';
+    return `<div class="feed-pill"><div class="dot ${cls}"></div>${labels[i]}</div>`;
+  }).join('');
+}
+
+// ── Price Panel ─────────────────────────────────────────
+function renderPrice(st) {
+  const p = st.shadow_rti || st.btc_price;
+  const delta = p - prevPrice;
+  const deltaStr = prevPrice > 0 ? ((delta >= 0 ? '+' : '') + '$' + Math.abs(delta).toFixed(0)) : '--';
+  const deltaCls = delta >= 0 ? 'up' : 'dn';
+  prevPrice = p;
+
+  document.getElementById('priceBadge').textContent = p > 0 ? 'LIVE' : 'NO DATA';
+
+  document.getElementById('priceBody').innerHTML = `
+    <div class="price-hero">
+      <div class="price-big">$${fmt(p, 0)}</div>
+      ${prevPrice > 0 ? `<div class="price-delta ${deltaCls}">${deltaStr}</div>` : ''}
+    </div>
+    <div class="price-sub">Shadow RTI (CB 60% + BN 40%)</div>
+
+    <div class="venues">
+      <div class="venue">
+        <div class="venue-label">COINBASE</div>
+        <div class="venue-price ${st.coinbase_spot > 0 ? '' : 'zero'}">$${fmt(st.coinbase_spot, 2)}</div>
+      </div>
+      <div class="venue">
+        <div class="venue-label">BINANCE SPOT</div>
+        <div class="venue-price ${st.binance_spot > 0 ? '' : 'zero'}">$${fmt(st.binance_spot, 2)}</div>
+      </div>
+      <div class="venue">
+        <div class="venue-label">PERP / MARK</div>
+        <div class="venue-price ${st.perp_price > 0 ? '' : 'zero'}">$${fmt(st.perp_price, 0)} / $${fmt(st.mark_price, 0)}</div>
+      </div>
+      <div class="venue">
+        <div class="venue-label">FUNDING RATE</div>
+        <div class="venue-price ${st.funding_rate !== 0 ? '' : 'zero'}">${(st.funding_rate * 100).toFixed(4)}%</div>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-label">BASIS</div>
+        <div class="metric-val ${st.basis > 0 ? 'positive' : st.basis < 0 ? 'negative' : ''}">$${fmt(st.basis, 2)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">DVOL</div>
+        <div class="metric-val ${st.dvol > 0 ? '' : 'neutral'}">${st.dvol > 0 ? st.dvol.toFixed(1) + '%' : '--'}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">BEST VOL</div>
+        <div class="metric-val">${st.best_vol ? (st.best_vol * 100).toFixed(1) + '%' : '--'}</div>
+      </div>
+    </div>`;
+}
+
+// ── Risk Panel ──────────────────────────────────────────
+function renderRisk(risk, ks) {
+  const lossPct = risk.max_daily_loss_cents > 0
+    ? (risk.daily_loss_cents / risk.max_daily_loss_cents) * 100 : 0;
+  const slotPct = risk.max_positions > 0
+    ? (risk.position_count / risk.max_positions) * 100 : 0;
+
+  const badge = document.getElementById('riskBadge');
+  if (ks.all) { badge.textContent = 'HALTED'; badge.style.color = 'var(--red)'; }
+  else if (lossPct > 80) { badge.textContent = 'DANGER'; badge.style.color = 'var(--red)'; }
+  else if (lossPct > 50) { badge.textContent = 'ELEVATED'; badge.style.color = 'var(--amber)'; }
+  else { badge.textContent = 'NOMINAL'; badge.style.color = 'var(--green)'; }
+
+  document.getElementById('riskBody').innerHTML = `
+    <div class="risk-bar">
+      <div class="risk-label"><span class="rl">DAILY LOSS</span><span class="rv">${fmtUsd(risk.daily_loss_cents).replace('+','')} / $${(risk.max_daily_loss_cents/100).toFixed(0)}</span></div>
+      <div class="bar-track"><div class="bar-fill ${barClass(lossPct)}" style="width:${Math.min(lossPct,100)}%"></div></div>
+    </div>
+    <div class="risk-bar">
+      <div class="risk-label"><span class="rl">POSITION SLOTS</span><span class="rv">${risk.position_count} / ${risk.max_positions}</span></div>
+      <div class="bar-track"><div class="bar-fill ${barClass(slotPct)}" style="width:${Math.min(slotPct,100)}%"></div></div>
+    </div>
+
+    <div class="risk-cards">
+      <div class="rcard">
+        <div class="rcard-label">DAY P&L</div>
+        <div class="rcard-val ${risk.daily_pnl_cents >= 0 ? 'green' : 'red'}">${fmtUsd(risk.daily_pnl_cents)}</div>
+      </div>
+      <div class="rcard">
+        <div class="rcard-label">MAX TRADE</div>
+        <div class="rcard-val white">$${(risk.max_trade_size_cents/100).toFixed(0)}</div>
+      </div>
+      <div class="rcard">
+        <div class="rcard-label">MAX EXPOSURE</div>
+        <div class="rcard-val white">$${(risk.max_exposure_cents/100).toFixed(0)}</div>
+      </div>
+      <div class="rcard">
+        <div class="rcard-label">KILL SWITCHES</div>
+        <div class="rcard-val ${ks.all ? 'red' : 'green'}">${ks.all ? 'ALL OFF' : ks.crypto || ks.weather ? 'PARTIAL' : 'CLEAR'}</div>
+      </div>
+    </div>`;
+}
+
+// ── Contracts Panel ─────────────────────────────────────
+function renderContracts(contracts) {
+  document.getElementById('contractBadge').textContent = contracts.length;
+  if (!contracts.length) {
+    document.getElementById('contractsBody').innerHTML =
+      '<div class="empty-state">NO CONTRACTS IN WINDOW</div>';
+    return;
+  }
+  document.getElementById('contractsBody').innerHTML = contracts.map(c => {
+    const m = c.minutes_remaining;
+    let phase, timeCls;
+    if (m > 15) { phase = 'eligible'; timeCls = 'safe'; }
+    else if (m >= 5) { phase = 'inwindow'; timeCls = 'warn'; }
+    else { phase = 'exitonly'; timeCls = 'urgent'; }
+    const mm = Math.floor(m);
+    const ss = Math.floor((m % 1) * 60);
+    return `<div class="contract-row ${phase}">
+      <div class="cr-top">
+        <span class="cr-ticker">${c.ticker}</span>
+        <span class="cr-time ${timeCls}">${mm}m ${ss}s</span>
+      </div>
+      <div class="cr-meta">Strike: <b>$${fmt(c.strike, 0)}</b></div>
+    </div>`;
+  }).join('');
+}
+
+// ── Signals Table ───────────────────────────────────────
+function renderSignals(signals) {
+  document.getElementById('signalBadge').textContent = signals.length + ' rows';
+  if (!signals.length) {
+    document.getElementById('signalsBody').innerHTML =
+      '<div class="empty-state">NO SIGNALS YET</div>';
+    return;
+  }
+  let html = `<table><thead><tr>
+    <th>AGE</th><th>TICKER</th><th>TYPE</th><th>DIR</th>
+    <th>EDGE</th><th>KELLY</th><th>MODEL</th><th>MKT</th><th>SRC</th>
+  </tr></thead><tbody>`;
+  signals.forEach(s => {
+    const a = age(s.created_at);
+    const edgePct = (s.edge * 100).toFixed(1);
+    const edgeCls = s.edge >= 0.06 ? 'edge-good' : s.edge >= 0.03 ? 'edge-ok' : 'edge-low';
+    const dirCls = s.direction === 'yes' ? 'dir-yes' : 'dir-no';
+    const srcCls = s.source === 'rust' ? 'source-rust' : 'source-python';
+    html += `<tr>
+      <td><span class="age ${a.cls}">${a.text}</span></td>
+      <td style="color:var(--cyan)">${s.ticker}</td>
+      <td>${s.signal_type}</td>
+      <td class="${dirCls}">${s.direction.toUpperCase()}</td>
+      <td class="${edgeCls}">${edgePct}%</td>
+      <td>${(s.kelly_fraction*100).toFixed(1)}%</td>
+      <td>${(s.model_prob*100).toFixed(1)}%</td>
+      <td>${(s.market_price*100).toFixed(0)}c</td>
+      <td class="${srcCls}">${(s.source||'?').toUpperCase()}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('signalsBody').innerHTML = html;
+}
+
+// ── Positions Panel ─────────────────────────────────────
+function renderPositions(positions, orders) {
+  const all = [...positions];
+  document.getElementById('posBadge').textContent = all.length;
+
+  if (!all.length && (!orders || !orders.length)) {
+    document.getElementById('positionsBody').innerHTML =
+      '<div class="empty-state">NO OPEN POSITIONS</div>';
+    return;
+  }
+
+  let html = all.map(p => {
+    const sideCls = p.direction === 'no' ? 'no-side' : '';
+    const stateCls = p.state === 'filled' ? 'filled' : p.state === 'acknowledged' ? 'acked' : 'pending';
+    return `<div class="pos-row ${sideCls}">
+      <div class="pos-top">
+        <span class="pos-ticker">${p.ticker}</span>
+        <span class="pos-state ${stateCls}">${p.state.toUpperCase()}</span>
+      </div>
+      <div class="pos-detail">
+        <span><b>${p.direction.toUpperCase()}</b></span>
+        <span>Qty: <b>${p.size}</b></span>
+        <span>Model: <b>${(p.model_prob*100).toFixed(1)}%</b></span>
+        ${p.entry_price ? `<span>Fill: <b>${(p.entry_price*100).toFixed(0)}c</b></span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
+  // Also show recent DB orders if we have them
+  if (orders && orders.length) {
+    html += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)"><div style="font-size:9px;letter-spacing:2px;color:var(--text);margin-bottom:6px">RECENT ORDERS</div>';
+    html += '<table><thead><tr><th>AGE</th><th>TICKER</th><th>DIR</th><th>STATUS</th><th>P&L</th></tr></thead><tbody>';
+    orders.slice(0, 10).forEach(o => {
+      const a = age(o.created_at);
+      const dirCls = o.direction === 'yes' ? 'dir-yes' : 'dir-no';
+      const pnl = o.pnl_cents != null
+        ? `<span class="${o.pnl_cents >= 0 ? 'pnl-pos' : 'pnl-neg'}">${fmtUsd(o.pnl_cents)}</span>`
+        : '<span class="pnl-zero">--</span>';
+      const stCls = o.status === 'filled' ? 'status-filled'
+        : o.status === 'cancelled' ? 'status-cancelled'
+        : o.status === 'rejected' ? 'status-rejected' : 'status-pending';
+      html += `<tr>
+        <td><span class="age ${a.cls}">${a.text}</span></td>
+        <td style="color:var(--cyan)">${o.ticker}</td>
+        <td class="${dirCls}">${o.direction.toUpperCase()}</td>
+        <td class="${stCls}">${o.status}</td>
+        <td>${pnl}</td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+  }
+
+  document.getElementById('positionsBody').innerHTML = html;
+}
+
+// ── Log Panel ───────────────────────────────────────────
+function renderLog() {
+  document.getElementById('logBody').innerHTML = logLines.map(l =>
+    `<div class="log-line">
+      <span class="log-time">${l.time}</span>
+      <span class="log-level ${l.level}">${l.level.toUpperCase()}</span>
+      <span class="log-msg">${l.msg}</span>
+    </div>`
+  ).join('');
+}
+
+// ── Polling ─────────────────────────────────────────────
+let stateOk = false;
+let signalsData = [];
+let ordersData = [];
+
+async function pollState() {
+  try {
+    const r = await fetch('/api/state');
+    if (!r.ok) throw new Error(r.status);
+    const st = await r.json();
+
+    // Mode badge
+    const tag = document.getElementById('modeTag');
+    tag.textContent = st.paper_mode ? 'PAPER' : 'LIVE';
+    tag.className = st.paper_mode ? 'hdr-mode' : 'hdr-mode live';
+
+    // Kill button sync
+    killActive = st.kill_switches.all;
+    const btn = document.getElementById('killBtn');
+    btn.className = killActive ? 'kill-btn active' : 'kill-btn';
+    btn.textContent = killActive ? 'KILLED' : 'KILL';
+
+    renderFeeds(st.feeds);
+    renderPrice(st);
+    renderRisk(st.risk, st.kill_switches);
+    renderContracts(st.contracts);
+    renderPositions(st.risk.positions, ordersData);
+
+    if (!stateOk) {
+      addLog('info', 'Dashboard connected to tradebot');
+      stateOk = true;
+    }
+  } catch(e) {
+    if (stateOk) addLog('error', 'Lost connection: ' + e.message);
+    stateOk = false;
+  }
+}
+
+async function pollSignals() {
+  try {
+    const r = await fetch('/api/signals');
+    if (!r.ok) return;
+    signalsData = await r.json();
+    renderSignals(signalsData);
+  } catch(e) { /* silent */ }
+}
+
+async function pollOrders() {
+  try {
+    const r = await fetch('/api/orders');
+    if (!r.ok) return;
+    ordersData = await r.json();
+  } catch(e) { /* silent */ }
+}
+
+// Initial log
+addLog('info', 'Connecting to tradebot...');
+
+// Start polling
+pollState();
+pollSignals();
+pollOrders();
+setInterval(pollState, 2000);
+setInterval(pollSignals, 5000);
+setInterval(pollOrders, 10000);
+</script>
+</body>
+</html>

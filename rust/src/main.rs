@@ -1,6 +1,9 @@
 mod config;
+mod contract_discovery;
+mod crypto_evaluator;
 mod crypto_fv;
 mod crypto_state;
+mod dashboard;
 mod execution;
 mod feed_health;
 mod feeds;
@@ -9,6 +12,7 @@ mod kill_switch;
 mod logging;
 mod order_manager;
 mod orderbook_feed;
+mod types;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +23,11 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install rustls crypto provider before any TLS connections
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     // Load .env file (ignore if missing — production uses real env vars)
     let _ = dotenvy::dotenv();
 
@@ -79,15 +88,15 @@ async fn main() -> Result<()> {
         .context("Failed to connect to NATS")?;
     tracing::info!(server = %config.nats_url, "nats connected");
 
-    // Initialize Kalshi client
+    // Initialize Kalshi client (Arc-shared between execution and crypto evaluator)
     let kalshi_auth = kalshi::auth::KalshiAuth::new(
         config.kalshi_api_key.clone(),
         &config.kalshi_private_key_path,
     ).context("Failed to initialize Kalshi auth")?;
-    let kalshi = kalshi::client::KalshiClient::new(
+    let kalshi = Arc::new(kalshi::client::KalshiClient::new(
         kalshi_auth,
         config.kalshi_base_url.clone(),
-    )?;
+    )?);
 
     // Shared cancellation token for graceful shutdown
     let cancel = CancellationToken::new();
@@ -178,8 +187,58 @@ async fn main() -> Result<()> {
     // Initialize feed health tracker
     let feed_health = Arc::new(feed_health::FeedHealth::new());
 
-    // Start Axum HTTP server for kill switch and health endpoints
-    let http_app = kill_switch::router(Arc::clone(&kill_switch));
+    // Phase 3: Contract discovery for crypto evaluator
+    let contract_discovery = Arc::new(contract_discovery::ContractDiscovery::new());
+    let discovery_handle = tokio::spawn({
+        let cd = Arc::clone(&contract_discovery);
+        let pool = pool.clone();
+        let cancel = cancel.clone();
+        async move {
+            cd.run(pool, cancel).await;
+        }
+    });
+
+    // Phase 3: Shared OrderManager (used by both execution engine and crypto evaluator)
+    let order_mgr = Arc::new(tokio::sync::Mutex::new(order_manager::OrderManager::new()));
+    {
+        let mut mgr = order_mgr.lock().await;
+        if let Err(e) = mgr.reconcile_on_startup(&kalshi, &pool).await {
+            tracing::warn!(error = %e, "startup reconciliation failed, continuing with empty state");
+        }
+    }
+
+    // Phase 3: Spawn event-driven crypto evaluator
+    let crypto_eval_handle = tokio::spawn({
+        let config = Arc::new(config.clone());
+        let cs = Arc::clone(&crypto_state);
+        let cd = Arc::clone(&contract_discovery);
+        let ob = Arc::clone(&orderbooks);
+        let om = Arc::clone(&order_mgr);
+        let k = Arc::clone(&kalshi);
+        let ks = Arc::clone(&kill_switch);
+        let fh = Arc::clone(&feed_health);
+        let pool = pool.clone();
+        let redis = redis.clone();
+        let nats = nats.clone();
+        let cancel = cancel.clone();
+        async move {
+            crypto_evaluator::run(config, cs, cd, ob, om, k, ks, fh, pool, redis, nats, cancel)
+                .await;
+        }
+    });
+
+    // Start Axum HTTP server (kill switch + health + dashboard)
+    let dashboard_state = dashboard::DashboardState {
+        config: Arc::new(config.clone()),
+        crypto_state: Arc::clone(&crypto_state),
+        order_mgr: Arc::clone(&order_mgr),
+        kill_switch: Arc::clone(&kill_switch),
+        feed_health: Arc::clone(&feed_health),
+        contract_discovery: Arc::clone(&contract_discovery),
+        pool: pool.clone(),
+    };
+    let http_app = kill_switch::router(Arc::clone(&kill_switch))
+        .merge(dashboard::routes(dashboard_state));
     let http_port = config.http_port;
     tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(("0.0.0.0", http_port)).await {
@@ -209,8 +268,11 @@ async fn main() -> Result<()> {
         let ks = Arc::clone(&kill_switch);
         let fh = Arc::clone(&feed_health);
         let cs = Arc::clone(&crypto_state);
+        let kalshi = Arc::clone(&kalshi);
+        let om = Arc::clone(&order_mgr);
+        let nats = nats.clone();
         async move {
-            if let Err(e) = execution::run(&config, nats, pool, kalshi, ks, fh, cs).await {
+            if let Err(e) = execution::run(&config, nats, pool, kalshi, ks, fh, cs, om).await {
                 tracing::error!(error = %e, "execution engine failed");
             }
         }
@@ -222,11 +284,13 @@ async fn main() -> Result<()> {
 
     cancel.cancel();
     execution_handle.abort();
+    crypto_eval_handle.abort();
 
     // Graceful shutdown with 10s timeout
     let shutdown = async {
         let _ = ws_handle.await;
         let _ = orderbook_handle.await;
+        let _ = discovery_handle.await;
         pool.close().await;
         let _ = redis.quit().await;
     };

@@ -16,12 +16,12 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::crypto_state::{CryptoState, CryptoStateInner};
-use crate::execution::Signal;
 use crate::feed_health::FeedHealth;
 use crate::kalshi::client::KalshiClient;
 use crate::kalshi::error::KalshiError;
 use crate::kalshi::types::OrderRequest;
 use crate::kill_switch::KillSwitchState;
+use crate::types::{Signal, SignalPriority};
 
 // ---------------------------------------------------------------------------
 // OrderState enum
@@ -380,12 +380,27 @@ impl OrderManager {
             return Err(format!("stale feeds: {:?}", stale_feeds));
         }
 
-        // Signal cooldown (Phase 2.6)
+        // Signal cooldown (Phase 2.6) with priority-based bypass (Phase 3)
         if self.is_in_cooldown(signal) {
-            return Err(format!(
-                "signal cooldown ({:?} remaining)",
-                cooldown_for_signal_type(&signal.signal_type)
-            ));
+            let bypass = match signal.priority {
+                // LockDetection always bypasses cooldown
+                SignalPriority::LockDetection => true,
+                // NewData with strong edge (2x MIN_EDGE = 0.12) bypasses cooldown
+                SignalPriority::NewData if signal.edge > 0.12 => true,
+                _ => false,
+            };
+            if !bypass {
+                return Err(format!(
+                    "signal cooldown ({:?} remaining)",
+                    cooldown_for_signal_type(&signal.signal_type)
+                ));
+            }
+            info!(
+                ticker = %signal.ticker,
+                priority = ?signal.priority,
+                edge = %format!("{:.4}", signal.edge),
+                "cooldown bypassed by priority"
+            );
         }
 
         // No double-entry
@@ -915,8 +930,41 @@ impl OrderManager {
         self.positions.contains_key(ticker)
     }
 
+    /// Get the held direction for a position (from the entry order).
+    pub fn held_direction(&self, ticker: &str) -> Option<&str> {
+        let order_id = self.positions.get(ticker)?;
+        let order = self.orders.get(order_id)?;
+        Some(&order.direction)
+    }
+
     pub fn position_count(&self) -> usize {
         self.positions.len()
+    }
+
+    /// Get all orders for dashboard display.
+    pub fn all_orders(&self) -> Vec<&ManagedOrder> {
+        self.orders.values().collect()
+    }
+
+    /// Get all held positions (ticker → direction).
+    pub fn all_positions(&self) -> Vec<(&str, &str)> {
+        self.positions
+            .iter()
+            .filter_map(|(ticker, order_id)| {
+                let order = self.orders.get(order_id)?;
+                Some((ticker.as_str(), order.direction.as_str()))
+            })
+            .collect()
+    }
+
+    /// Get daily PnL in cents.
+    pub fn daily_pnl_cents(&self) -> i64 {
+        self.daily_pnl.net_pnl_cents
+    }
+
+    /// Get current daily loss in cents (for risk display).
+    pub fn daily_loss_cents(&self) -> i64 {
+        self.daily_pnl.current_loss()
     }
 
     /// Clean up terminal orders older than 1 hour to prevent memory growth.
@@ -1236,6 +1284,7 @@ mod tests {
             minutes_remaining: 10.0,
             spread: 0.03,
             order_imbalance: 0.5,
+            priority: SignalPriority::default(),
         };
 
         assert!(!mgr.is_in_cooldown(&signal));
@@ -1283,6 +1332,7 @@ mod tests {
             minutes_remaining: 10.0,
             spread: 0.03,
             order_imbalance: 0.5,
+            priority: SignalPriority::default(),
         };
 
         let id1 = mgr.generate_client_order_id(&signal);

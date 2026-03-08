@@ -9,11 +9,15 @@
 use std::sync::RwLock;
 use std::time::Instant;
 
+use tokio::sync::watch;
 use tracing::trace;
 
 /// Thread-safe canonical crypto state, shared across all feeds and execution.
 pub struct CryptoState {
     inner: RwLock<CryptoStateInner>,
+    /// Monotonic counter incremented on every state update.
+    /// Crypto evaluator subscribes to this for event-driven evaluation.
+    notify: watch::Sender<u64>,
 }
 
 /// Internal state fields. Write-locked by feeds, read-locked by execution.
@@ -77,9 +81,17 @@ impl Default for CryptoStateInner {
 
 impl CryptoState {
     pub fn new() -> Self {
+        let (notify, _) = watch::channel(0u64);
         Self {
             inner: RwLock::new(CryptoStateInner::default()),
+            notify,
         }
+    }
+
+    /// Subscribe to state change notifications.
+    /// The receiver fires on every update — watch coalesces rapid updates automatically.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.notify.subscribe()
     }
 
     /// Update from Coinbase feed.
@@ -91,6 +103,8 @@ impl CryptoState {
         state.coinbase_updated = Some(Instant::now());
         recompute_derived(&mut state);
         trace!(spot, shadow_rti = state.shadow_rti, "coinbase updated");
+        drop(state);
+        self.notify.send_modify(|v| *v += 1);
     }
 
     /// Update from Binance spot feed.
@@ -109,6 +123,8 @@ impl CryptoState {
         state.binance_spot_updated = Some(Instant::now());
         recompute_derived(&mut state);
         trace!(spot, shadow_rti = state.shadow_rti, "binance spot updated");
+        drop(state);
+        self.notify.send_modify(|v| *v += 1);
     }
 
     /// Update from Binance futures feed.
@@ -126,6 +142,8 @@ impl CryptoState {
         state.futures_obi = obi;
         state.futures_updated = Some(Instant::now());
         recompute_derived(&mut state);
+        drop(state);
+        self.notify.send_modify(|v| *v += 1);
     }
 
     /// Update from Deribit DVOL feed.
@@ -134,6 +152,8 @@ impl CryptoState {
         state.dvol = dvol;
         state.dvol_updated = Some(Instant::now());
         recompute_derived(&mut state);
+        drop(state);
+        self.notify.send_modify(|v| *v += 1);
     }
 
     /// Read-lock snapshot of current state.
