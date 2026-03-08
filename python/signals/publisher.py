@@ -49,6 +49,13 @@ class SignalPublisher:
         self.nats = nats_client
         self.db_pool = db_pool
         self.redis = redis_client
+        self._background_tasks: set[asyncio.Task] = set()
+
+    def _track_task(self, coro) -> None:
+        """Create and track a background task with error logging."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def publish(self, signal: SignalSchema) -> None:
         """Publish a validated signal.
@@ -70,7 +77,7 @@ class SignalPublisher:
 
         # 2. DB persist — fire and forget
         if self.db_pool is not None:
-            asyncio.create_task(self._persist_signal(signal))
+            self._track_task(self._persist_signal(signal))
 
         logger.info(
             "signal_published",
@@ -96,7 +103,7 @@ class SignalPublisher:
 
         # DB persist — fire and forget
         if self.db_pool is not None:
-            asyncio.create_task(self._persist_rejection(rejection))
+            self._track_task(self._persist_rejection(rejection))
 
     async def publish_model_state(self, state: ModelState) -> None:
         """Write model state to Redis for real-time UI display."""
@@ -114,57 +121,69 @@ class SignalPublisher:
             logger.exception("redis_model_state_failed", ticker=state.ticker)
 
     async def _persist_signal(self, signal: SignalSchema) -> None:
-        """Insert signal into signals table."""
-        try:
-            async with self.db_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO signals (
-                        ticker, signal_type, direction, model_prob, market_price,
-                        edge, kelly_fraction, minutes_remaining,
-                        observation_data, acted_on
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                    """,
-                    signal.ticker,
-                    signal.signal_type,
-                    signal.direction,
-                    signal.model_prob,
-                    signal.market_price,
-                    signal.edge,
-                    signal.kelly_fraction,
-                    signal.minutes_remaining,
-                    json.dumps({
-                        "spread": signal.spread,
-                        "order_imbalance": signal.order_imbalance,
-                        "action": signal.action.value,
-                    }),
-                    True,  # acted_on
-                )
-        except Exception:
-            logger.exception("signal_persist_failed", ticker=signal.ticker)
+        """Insert signal into signals table with retry."""
+        for attempt in range(2):
+            try:
+                async with self.db_pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO signals (
+                            ticker, signal_type, direction, model_prob, market_price,
+                            edge, kelly_fraction, minutes_remaining,
+                            observation_data, acted_on
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        """,
+                        signal.ticker,
+                        signal.signal_type,
+                        signal.direction,
+                        signal.model_prob,
+                        signal.market_price,
+                        signal.edge,
+                        signal.kelly_fraction,
+                        signal.minutes_remaining,
+                        json.dumps({
+                            "spread": signal.spread,
+                            "order_imbalance": signal.order_imbalance,
+                            "action": signal.action.value,
+                        }),
+                        True,  # acted_on
+                    )
+                return
+            except Exception:
+                if attempt == 0:
+                    logger.warning("signal_persist_retry", ticker=signal.ticker)
+                    await asyncio.sleep(1)
+                else:
+                    logger.error("signal_persist_failed", ticker=signal.ticker, exc_info=True)
 
     async def _persist_rejection(self, rejection: RejectedSignal) -> None:
-        """Insert rejected signal into signals table with acted_on=false."""
-        try:
-            async with self.db_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO signals (
-                        ticker, signal_type, direction, model_prob, market_price,
-                        edge, kelly_fraction, minutes_remaining,
-                        acted_on, rejection_reason
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                    """,
-                    rejection.ticker,
-                    rejection.signal_type,
-                    "yes",  # placeholder direction for rejections
-                    rejection.model_prob or 0.0,
-                    rejection.market_price or 0.0,
-                    rejection.edge or 0.0,
-                    0.0,  # kelly_fraction
-                    rejection.minutes_remaining or 0.0,
-                    False,  # acted_on
-                    rejection.rejection_reason,
-                )
-        except Exception:
-            logger.exception("rejection_persist_failed", ticker=rejection.ticker)
+        """Insert rejected signal into signals table with acted_on=false, with retry."""
+        for attempt in range(2):
+            try:
+                async with self.db_pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO signals (
+                            ticker, signal_type, direction, model_prob, market_price,
+                            edge, kelly_fraction, minutes_remaining,
+                            acted_on, rejection_reason
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        """,
+                        rejection.ticker,
+                        rejection.signal_type,
+                        "yes",  # placeholder direction for rejections
+                        rejection.model_prob or 0.0,
+                        rejection.market_price or 0.0,
+                        rejection.edge or 0.0,
+                        0.0,  # kelly_fraction
+                        rejection.minutes_remaining or 0.0,
+                        False,  # acted_on
+                        rejection.rejection_reason,
+                    )
+                return
+            except Exception:
+                if attempt == 0:
+                    logger.warning("rejection_persist_retry", ticker=rejection.ticker)
+                    await asyncio.sleep(1)
+                else:
+                    logger.error("rejection_persist_failed", ticker=rejection.ticker, exc_info=True)

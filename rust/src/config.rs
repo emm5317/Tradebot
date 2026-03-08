@@ -40,6 +40,25 @@ impl Config {
         envy::from_env::<Self>()
     }
 
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_trade_size_cents <= 0 {
+            return Err("max_trade_size_cents must be positive".into());
+        }
+        if self.max_daily_loss_cents <= 0 {
+            return Err("max_daily_loss_cents must be positive".into());
+        }
+        if self.max_positions == 0 {
+            return Err("max_positions must be positive".into());
+        }
+        if self.max_exposure_cents <= 0 {
+            return Err("max_exposure_cents must be positive".into());
+        }
+        if self.kelly_fraction_multiplier <= 0.0 || self.kelly_fraction_multiplier > 1.0 {
+            return Err("kelly_fraction_multiplier must be in (0.0, 1.0]".into());
+        }
+        Ok(())
+    }
+
     /// Log non-secret configuration values at startup.
     pub fn log_startup(&self) {
         tracing::info!(
@@ -63,8 +82,8 @@ impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("database_url", &"[redacted]")
-            .field("redis_url", &self.redis_url)
-            .field("nats_url", &self.nats_url)
+            .field("redis_url", &"[redacted]")
+            .field("nats_url", &"[redacted]")
             .field("kalshi_api_key", &"[redacted]")
             .field("kalshi_private_key_path", &"[redacted]")
             .field("kalshi_base_url", &self.kalshi_base_url)

@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use fred::clients::Client as RedisClient;
 use fred::interfaces::KeysInterface;
+use rust_decimal::prelude::ToPrimitive;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::kalshi::orderbook::{OrderbookManager, Side};
 use crate::kalshi::websocket::WsFeedMessage;
@@ -28,6 +29,7 @@ pub async fn run(
 ) {
     let mut flush_interval = tokio::time::interval(Duration::from_millis(500));
     let mut dirty_tickers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut redis_consecutive_failures: u32 = 0;
 
     loop {
         tokio::select! {
@@ -65,7 +67,8 @@ pub async fn run(
                 if dirty_tickers.is_empty() {
                     continue;
                 }
-                flush_to_redis(&orderbooks, &redis, &dirty_tickers).await;
+                let failures = flush_to_redis(&orderbooks, &redis, &dirty_tickers, redis_consecutive_failures).await;
+                redis_consecutive_failures = failures;
                 dirty_tickers.clear();
             }
         }
@@ -81,12 +84,13 @@ async fn flush_to_redis(
     orderbooks: &OrderbookManager,
     redis: &RedisClient,
     tickers: &std::collections::HashSet<String>,
-) {
+    mut consecutive_failures: u32,
+) -> u32 {
     for ticker in tickers {
-        let mid = orderbooks.mid_price(ticker).map(|d| d.to_string().parse::<f64>().unwrap_or(0.5));
-        let spread = orderbooks.spread(ticker).map(|d| d.to_string().parse::<f64>().unwrap_or(0.0));
-        let best_bid = orderbooks.best_bid(ticker).map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
-        let best_ask = orderbooks.best_ask(ticker).map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
+        let mid = orderbooks.mid_price(ticker).map(|d| d.to_f64().unwrap_or(0.5));
+        let spread = orderbooks.spread(ticker).map(|d| d.to_f64().unwrap_or(0.0));
+        let best_bid = orderbooks.best_bid(ticker).map(|(p, _)| p.to_f64().unwrap_or(0.0));
+        let best_ask = orderbooks.best_ask(ticker).map(|(p, _)| p.to_f64().unwrap_or(0.0));
 
         let bid_depth: i64 = orderbooks.best_bid(ticker).map(|(_, s)| s).unwrap_or(0);
         let ask_depth: i64 = orderbooks.best_ask(ticker).map(|(_, s)| s).unwrap_or(0);
@@ -112,8 +116,20 @@ async fn flush_to_redis(
             false,
         ).await;
 
-        if let Err(e) = result {
-            warn!(ticker, error = %e, "failed to write orderbook to redis");
+        match result {
+            Ok(()) => {
+                consecutive_failures = 0;
+            }
+            Err(e) => {
+                consecutive_failures += 1;
+                if consecutive_failures >= 10 {
+                    error!(ticker, error = %e, consecutive = consecutive_failures, "redis write failures exceeded threshold");
+                } else {
+                    warn!(ticker, error = %e, "failed to write orderbook to redis");
+                }
+            }
         }
     }
+
+    consecutive_failures
 }

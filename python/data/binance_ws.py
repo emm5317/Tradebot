@@ -185,7 +185,7 @@ class BinanceFeed:
         log_return = math.log(bar.close / prev_close)
 
         if self._ewma_variance == 0.0:
-            # Initialize with simple variance from available bars
+            # Bootstrap from available returns (don't wait for 10 bars)
             if len(self.bars_1m) >= 10:
                 closes = [b.close for b in bars[-11:]]
                 returns = [
@@ -195,6 +195,9 @@ class BinanceFeed:
                 ]
                 if returns:
                     self._ewma_variance = sum(r * r for r in returns) / len(returns)
+            else:
+                # Single-return bootstrap to avoid staying at 0
+                self._ewma_variance = log_return * log_return
 
         self._ewma_variance = (
             self._ewma_lambda * self._ewma_variance

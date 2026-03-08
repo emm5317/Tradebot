@@ -7,6 +7,7 @@ via NATS, DB, and Redis. This is the core trading loop.
 from __future__ import annotations
 
 import asyncio
+import json
 import signal
 from datetime import datetime, timezone
 
@@ -42,6 +43,7 @@ class EvaluationDaemon:
         self.registry = EvaluatorRegistry()
         self.notifier = DiscordNotifier(self.settings.discord_webhook_url or None)
         self._shutdown = asyncio.Event()
+        self._last_blackout_refresh: datetime | None = None
 
     async def run(self) -> None:
         """Initialize connections, register evaluators, run evaluation loop."""
@@ -109,6 +111,9 @@ class EvaluationDaemon:
         """Evaluate all active contracts nearing settlement."""
         assert self.pool is not None
         assert self.publisher is not None
+
+        # Refresh blackout windows every 5 minutes
+        await self._maybe_refresh_blackouts()
 
         # Fetch contracts settling within 30 minutes
         async with self.pool.acquire() as conn:
@@ -213,6 +218,19 @@ class EvaluationDaemon:
                     "evaluate_contract_error", {"ticker": ticker}
                 )
 
+    async def _maybe_refresh_blackouts(self) -> None:
+        """Refresh blackout windows from DB every 5 minutes."""
+        now = datetime.now(timezone.utc)
+        if self._last_blackout_refresh and (now - self._last_blackout_refresh).total_seconds() < 300:
+            return
+        crypto_eval = self.registry.get("crypto")
+        if crypto_eval is not None and self.pool is not None:
+            from signals.crypto import load_blackout_windows
+            windows = await load_blackout_windows(self.pool)
+            crypto_eval.set_blackout_windows(windows)
+            self._last_blackout_refresh = now
+            logger.debug("blackout_windows_refreshed", count=len(windows))
+
     def _infer_signal_type(self, contract: Contract) -> str:
         """Infer signal type from contract category."""
         cat = (contract.category or "").lower()
@@ -258,19 +276,23 @@ class EvaluationDaemon:
 
     async def _fetch_redis_orderbooks(self, tickers: list[str]) -> dict:
         """Fetch orderbook summaries from Redis (written by Rust WS feed)."""
-        if self.redis is None:
+        if self.redis is None or not tickers:
+            return {}
+
+        keys = [f"orderbook:{t}" for t in tickers]
+        try:
+            values = await self.redis.mget(keys)
+        except Exception:
+            logger.warning("redis_orderbook_mget_failed", exc_info=True)
             return {}
 
         result = {}
-        for ticker in tickers:
-            try:
-                import json
-
-                raw = await self.redis.get(f"orderbook:{ticker}")
-                if raw:
+        for ticker, raw in zip(tickers, values):
+            if raw:
+                try:
                     result[ticker] = json.loads(raw)
-            except Exception:
-                pass
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("redis_orderbook_parse_failed", ticker=ticker)
         return result
 
     async def _sleep_or_shutdown(self, seconds: float) -> None:

@@ -21,6 +21,8 @@ async fn main() -> Result<()> {
          Copy config/.env.example to .env and fill in required values.",
     )?;
 
+    config.validate().context("Invalid configuration")?;
+
     logging::init(&config.log_level, &config.log_format);
     config.log_startup();
 

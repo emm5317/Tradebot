@@ -77,6 +77,10 @@ impl PositionTracker {
     fn total_exposure(&self) -> i64 {
         self.positions.values().map(|p| p.size_cents).sum()
     }
+
+    fn get_position(&self, ticker: &str) -> Option<&HeldPosition> {
+        self.positions.get(ticker)
+    }
 }
 
 /// Daily loss tracking for circuit breaker.
@@ -324,9 +328,9 @@ async fn execute_exit(
         Utc::now().timestamp_millis()
     );
 
-    // Sell the opposite side to exit
+    // Sell the held side to close position
     let exit_side = if signal.direction == "yes" { "yes" } else { "no" };
-    let position = tracker.positions.get(&signal.ticker);
+    let position = tracker.get_position(&signal.ticker);
     let size = position.map(|p| p.size_cents).unwrap_or(1);
 
     let order_req = OrderRequest {
@@ -350,10 +354,12 @@ async fn execute_exit(
     }
 
     match kalshi.place_order(order_req).await {
-        Ok(_resp) => {
-            // Estimate PnL (simplified — real PnL comes from settlement)
-            if let Some(pos) = tracker.positions.get(&signal.ticker) {
-                let pnl_estimate = ((signal.market_price - pos.entry_price) * pos.size_cents as f64) as i64;
+        Ok(resp) => {
+            let fill_price = resp.order.yes_price.or(resp.order.no_price).map(|p| p as f64 / 100.0);
+            // Estimate PnL using fill price (simplified — real PnL comes from settlement)
+            if let Some(pos) = tracker.get_position(&signal.ticker) {
+                let exit_price = fill_price.unwrap_or(signal.market_price);
+                let pnl_estimate = ((exit_price - pos.entry_price) * pos.size_cents as f64) as i64;
                 daily_pnl.record_pnl(pnl_estimate);
             }
             tracker.remove_position(&signal.ticker);
@@ -385,10 +391,10 @@ async fn record_order(
     .bind(&signal.ticker)
     .bind(&signal.direction)
     .bind("market")
-    .bind(size_cents as i32)
+    .bind(size_cents)
     .bind(fill_price)
     .bind(status)
-    .bind(latency_ms as i32)
+    .bind(latency_ms)
     .execute(pool)
     .await
     .context("Failed to record order")?;

@@ -121,12 +121,21 @@ class DiscordNotifier:
                 if elapsed < _MIN_INTERVAL_SECONDS:
                     await asyncio.sleep(_MIN_INTERVAL_SECONDS - elapsed)
 
-                if self._client and self.webhook_url:
+                sent = False
+                for attempt in range(3):
+                    if not self._client or not self.webhook_url:
+                        break
                     resp = await self._client.post(self.webhook_url, json=payload)
                     if resp.status_code == 429:
-                        retry_after = float(resp.headers.get("Retry-After", "5"))
+                        retry_after = float(resp.headers.get("Retry-After", str(5 * (attempt + 1))))
+                        logger.warning("discord_rate_limited", attempt=attempt, retry_after=retry_after)
                         await asyncio.sleep(retry_after)
-                        await self._client.post(self.webhook_url, json=payload)
+                        continue
+                    sent = True
+                    break
+
+                if not sent:
+                    logger.error("discord_notification_dropped", payload=payload)
 
                 self._last_sent = time.monotonic()
             except Exception:

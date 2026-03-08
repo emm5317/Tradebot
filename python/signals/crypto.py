@@ -12,7 +12,7 @@ Improvements over spec:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import structlog
 
@@ -80,6 +80,11 @@ class CryptoSignalEvaluator:
         """Update blackout windows (called after loading from DB)."""
         self.blackout_windows = windows
 
+    def _cleanup_cooldowns(self) -> None:
+        """Remove expired cooldown entries to prevent unbounded growth."""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_SIGNAL_COOLDOWN_SECONDS * 2)
+        self._recent_signals = {k: v for k, v in self._recent_signals.items() if v > cutoff}
+
     def evaluate(
         self,
         contract: Contract,
@@ -94,6 +99,8 @@ class CryptoSignalEvaluator:
         Returns:
             Tuple of (signal_or_none, rejection_or_none, model_state).
         """
+        self._cleanup_cooldowns()
+
         now = datetime.now(timezone.utc)
         minutes = (contract.settlement_time - now).total_seconds() / 60.0
 

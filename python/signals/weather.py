@@ -11,7 +11,7 @@ Improvements over spec:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import structlog
@@ -72,6 +72,11 @@ class WeatherSignalEvaluator:
         self.ensemble_weights = ensemble_weights
         self._recent_signals: dict[str, datetime] = {}
 
+    def _cleanup_cooldowns(self) -> None:
+        """Remove expired cooldown entries to prevent unbounded growth."""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_SIGNAL_COOLDOWN_SECONDS * 2)
+        self._recent_signals = {k: v for k, v in self._recent_signals.items() if v > cutoff}
+
     def evaluate(
         self,
         contract: Contract,
@@ -86,6 +91,8 @@ class WeatherSignalEvaluator:
             Exactly one of signal/rejection will be non-None (or both None
             if outside time window).
         """
+        self._cleanup_cooldowns()
+
         now = datetime.now(timezone.utc)
         minutes = (contract.settlement_time - now).total_seconds() / 60.0
 

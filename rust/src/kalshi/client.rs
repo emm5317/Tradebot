@@ -35,15 +35,18 @@ impl KalshiClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             "KALSHI-ACCESS-KEY",
-            HeaderValue::from_str(&ah.api_key).unwrap(),
+            HeaderValue::from_str(&ah.api_key)
+                .map_err(|e| KalshiError::SigningError(format!("invalid header value: {e}")))?,
         );
         headers.insert(
             "KALSHI-ACCESS-SIGNATURE",
-            HeaderValue::from_str(&ah.signature).unwrap(),
+            HeaderValue::from_str(&ah.signature)
+                .map_err(|e| KalshiError::SigningError(format!("invalid header value: {e}")))?,
         );
         headers.insert(
             "KALSHI-ACCESS-TIMESTAMP",
-            HeaderValue::from_str(&ah.timestamp).unwrap(),
+            HeaderValue::from_str(&ah.timestamp)
+                .map_err(|e| KalshiError::SigningError(format!("invalid header value: {e}")))?,
         );
         Ok(headers)
     }
@@ -252,25 +255,30 @@ impl KalshiClient {
 
 /// Parse Kalshi error response body into typed error.
 fn parse_error_response(status: u16, body: &str) -> KalshiError {
+    // Try JSON parsing first
+    let json_body: Option<serde_json::Value> = serde_json::from_str(body).ok();
+    let code = json_body.as_ref().and_then(|j| j.get("code")).and_then(|c| c.as_str()).unwrap_or("");
+    let message = json_body.as_ref().and_then(|j| j.get("message")).and_then(|m| m.as_str()).unwrap_or(body);
+
     match status {
         401 | 403 => KalshiError::AuthFailure,
         429 => {
-            // Try to parse retry-after from body
-            let retry_after = Duration::from_secs(1);
-            KalshiError::RateLimit { retry_after }
+            let retry_ms = json_body.as_ref()
+                .and_then(|j| j.get("retry_after_ms"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1000);
+            KalshiError::RateLimit { retry_after: Duration::from_millis(retry_ms) }
         }
         400 => {
-            if body.contains("insufficient") || body.contains("balance") {
+            if code == "insufficient_balance" || message.contains("insufficient") || message.contains("balance") {
                 KalshiError::InsufficientFunds
-            } else if body.contains("closed") {
+            } else if code == "market_closed" || message.contains("closed") {
                 KalshiError::MarketClosed
             } else {
-                KalshiError::InvalidOrder {
-                    reason: body.to_string(),
-                }
+                KalshiError::InvalidOrder { reason: message.to_string() }
             }
         }
         500..=599 => KalshiError::ServerError(status),
-        _ => KalshiError::Other(format!("HTTP {status}: {body}")),
+        _ => KalshiError::Other(format!("HTTP {status}: {message}")),
     }
 }
