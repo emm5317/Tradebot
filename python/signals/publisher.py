@@ -31,6 +31,7 @@ logger = structlog.get_logger()
 # NATS subjects
 _SUBJECT_SIGNALS = "tradebot.signals"  # actionable signals only
 _SUBJECT_SIGNALS_LIVE = "tradebot.signals.live"  # all evaluations (for UI)
+_SUBJECT_ADVISORY_CRYPTO = "tradebot.advisory.crypto"  # crypto advisory (Phase 1.3)
 
 # Redis key prefix for model state
 _REDIS_MODEL_STATE_PREFIX = "model_state:"
@@ -61,9 +62,15 @@ class SignalPublisher:
         payload = signal.model_dump_json().encode()
 
         # 1. NATS — latency-critical, awaited
+        # Crypto signals are demoted to advisory (Phase 1.3) — Rust handles
+        # crypto execution directly from CryptoState. Weather signals remain
+        # actionable and route to the execution engine.
         if self.nats is not None:
             try:
-                await self.nats.publish(_SUBJECT_SIGNALS, payload)
+                if signal.signal_type == "crypto":
+                    await self.nats.publish(_SUBJECT_ADVISORY_CRYPTO, payload)
+                else:
+                    await self.nats.publish(_SUBJECT_SIGNALS, payload)
                 await self.nats.publish(_SUBJECT_SIGNALS_LIVE, payload)
             except Exception:
                 logger.exception("nats_publish_failed", ticker=signal.ticker)

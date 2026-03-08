@@ -7,6 +7,7 @@
 //! Ported from `python/data/binance_ws.py` (Phase 0.1).
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use fred::clients::Client as RedisClient;
@@ -16,6 +17,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+use crate::crypto_state::CryptoState;
 
 /// Maximum number of 1-minute bars to retain (60 minutes of history).
 const MAX_BARS: usize = 60;
@@ -205,8 +208,8 @@ impl BinanceSpotFeed {
         Self { ws_url, cancel }
     }
 
-    /// Run the feed with auto-reconnect. Writes to Redis key `crypto:binance_spot`.
-    pub async fn run(&self, redis: RedisClient) {
+    /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
+    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -216,7 +219,7 @@ impl BinanceSpotFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis).await {
+            match self.connect_and_stream(&redis, &crypto_state).await {
                 Ok(()) => {
                     info!("binance spot ws closed cleanly");
                     return;
@@ -239,6 +242,7 @@ impl BinanceSpotFeed {
     async fn connect_and_stream(
         &self,
         redis: &RedisClient,
+        crypto_state: &CryptoState,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let request = self.ws_url.as_str().into_client_request()?;
         let (ws_stream, _) = tokio_tungstenite::connect_async(request).await?;
@@ -267,6 +271,12 @@ impl BinanceSpotFeed {
                 }
                 _ = flush_interval.tick() => {
                     if state.spot_price > 0.0 {
+                        crypto_state.update_binance_spot(
+                            state.spot_price,
+                            state.realized_vol_30m,
+                            state.ewma_vol_30m,
+                            state.bars_1m.len(),
+                        );
                         flush_binance_spot_state(&state, redis).await;
                     }
                 }

@@ -1,4 +1,6 @@
 mod config;
+mod crypto_fv;
+mod crypto_state;
 mod execution;
 mod feed_health;
 mod feeds;
@@ -117,6 +119,9 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Canonical crypto state — shared across all feeds and execution
+    let crypto_state = Arc::new(crypto_state::CryptoState::new());
+
     // Spawn crypto exchange feeds (gated by config)
     if config.enable_coinbase {
         let feed = feeds::coinbase::CoinbaseFeed::new(
@@ -124,7 +129,8 @@ async fn main() -> Result<()> {
             cancel.clone(),
         );
         let redis_clone = redis.clone();
-        tokio::spawn(async move { feed.run(redis_clone).await });
+        let cs = Arc::clone(&crypto_state);
+        tokio::spawn(async move { feed.run(redis_clone, cs).await });
         tracing::info!("coinbase feed enabled");
     }
 
@@ -134,7 +140,8 @@ async fn main() -> Result<()> {
             cancel.clone(),
         );
         let redis_clone = redis.clone();
-        tokio::spawn(async move { feed.run(redis_clone).await });
+        let cs = Arc::clone(&crypto_state);
+        tokio::spawn(async move { feed.run(redis_clone, cs).await });
         tracing::info!("binance spot feed enabled");
     }
 
@@ -144,7 +151,8 @@ async fn main() -> Result<()> {
             cancel.clone(),
         );
         let redis_clone = redis.clone();
-        tokio::spawn(async move { feed.run(redis_clone).await });
+        let cs = Arc::clone(&crypto_state);
+        tokio::spawn(async move { feed.run(redis_clone, cs).await });
         tracing::info!("binance futures feed enabled");
     }
 
@@ -154,7 +162,8 @@ async fn main() -> Result<()> {
             cancel.clone(),
         );
         let redis_clone = redis.clone();
-        tokio::spawn(async move { feed.run(redis_clone).await });
+        let cs = Arc::clone(&crypto_state);
+        tokio::spawn(async move { feed.run(redis_clone, cs).await });
         tracing::info!("deribit dvol feed enabled");
     }
 
@@ -198,8 +207,9 @@ async fn main() -> Result<()> {
         let pool = pool.clone();
         let ks = Arc::clone(&kill_switch);
         let fh = Arc::clone(&feed_health);
+        let cs = Arc::clone(&crypto_state);
         async move {
-            if let Err(e) = execution::run(&config, nats, pool, kalshi, ks, fh).await {
+            if let Err(e) = execution::run(&config, nats, pool, kalshi, ks, fh, cs).await {
                 tracing::error!(error = %e, "execution engine failed");
             }
         }

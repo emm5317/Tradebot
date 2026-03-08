@@ -4,6 +4,7 @@
 //! Maintains perp price, mark price, funding rate, and order book imbalance.
 //! Flushes to Redis every 500ms.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use fred::clients::Client as RedisClient;
@@ -13,6 +14,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+use crate::crypto_state::CryptoState;
 
 /// Binance futures state written to Redis.
 #[derive(Debug, Clone)]
@@ -70,8 +73,8 @@ impl BinanceFuturesFeed {
         Self { ws_url, cancel }
     }
 
-    /// Run the feed with auto-reconnect. Writes to Redis key `crypto:binance_futures`.
-    pub async fn run(&self, redis: RedisClient) {
+    /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
+    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -81,7 +84,7 @@ impl BinanceFuturesFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis).await {
+            match self.connect_and_stream(&redis, &crypto_state).await {
                 Ok(()) => {
                     info!("binance futures ws closed cleanly");
                     return;
@@ -104,6 +107,7 @@ impl BinanceFuturesFeed {
     async fn connect_and_stream(
         &self,
         redis: &RedisClient,
+        crypto_state: &CryptoState,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Combined stream URL: aggTrade + depth@100ms + markPrice@1s
         let url = format!(
@@ -137,6 +141,12 @@ impl BinanceFuturesFeed {
                 }
                 _ = flush_interval.tick() => {
                     if state.perp_price > 0.0 {
+                        crypto_state.update_binance_futures(
+                            state.perp_price,
+                            state.mark_price,
+                            state.funding_rate,
+                            state.obi(),
+                        );
                         flush_binance_futures_state(&state, redis).await;
                     }
                 }

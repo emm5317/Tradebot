@@ -3,16 +3,18 @@
 //! Subscribes to the `level2` channel (public, no auth) to maintain
 //! best bid/ask/mid. Flushes to Redis every 500ms for Python model consumption.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use fred::clients::Client as RedisClient;
 use fred::interfaces::KeysInterface;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+use crate::crypto_state::CryptoState;
 
 /// Coinbase feed state written to Redis.
 #[derive(Debug, Clone)]
@@ -43,8 +45,8 @@ impl CoinbaseFeed {
         Self { ws_url, cancel }
     }
 
-    /// Run the feed with auto-reconnect. Writes to Redis key `crypto:coinbase`.
-    pub async fn run(&self, redis: RedisClient) {
+    /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
+    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -54,7 +56,7 @@ impl CoinbaseFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis).await {
+            match self.connect_and_stream(&redis, &crypto_state).await {
                 Ok(()) => {
                     info!("coinbase ws closed cleanly");
                     return;
@@ -77,6 +79,7 @@ impl CoinbaseFeed {
     async fn connect_and_stream(
         &self,
         redis: &RedisClient,
+        crypto_state: &CryptoState,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let request = self.ws_url.as_str().into_client_request()?;
         let (ws_stream, _) = tokio_tungstenite::connect_async(request).await?;
@@ -116,6 +119,7 @@ impl CoinbaseFeed {
                 }
                 _ = flush_interval.tick() => {
                     if state.spot > 0.0 {
+                        crypto_state.update_coinbase(state.spot, state.best_bid, state.best_ask);
                         flush_coinbase_state(&state, redis).await;
                     }
                 }

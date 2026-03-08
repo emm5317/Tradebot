@@ -4,6 +4,7 @@
 //! `deribit_volatility_index.btc_usd` channel. No auth required.
 //! Flushes DVOL to Redis key `crypto:deribit_dvol`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use fred::clients::Client as RedisClient;
@@ -13,6 +14,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+use crate::crypto_state::CryptoState;
 
 /// Deribit DVOL state.
 #[derive(Debug, Clone, Default)]
@@ -31,8 +34,8 @@ impl DeribitFeed {
         Self { ws_url, cancel }
     }
 
-    /// Run the feed with auto-reconnect. Writes to Redis key `crypto:deribit_dvol`.
-    pub async fn run(&self, redis: RedisClient) {
+    /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
+    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -42,7 +45,7 @@ impl DeribitFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis).await {
+            match self.connect_and_stream(&redis, &crypto_state).await {
                 Ok(()) => {
                     info!("deribit ws closed cleanly");
                     return;
@@ -65,6 +68,7 @@ impl DeribitFeed {
     async fn connect_and_stream(
         &self,
         redis: &RedisClient,
+        crypto_state: &CryptoState,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let request = self.ws_url.as_str().into_client_request()?;
         let (ws_stream, _) = tokio_tungstenite::connect_async(request).await?;
@@ -107,6 +111,7 @@ impl DeribitFeed {
                 }
                 _ = flush_interval.tick() => {
                     if state.dvol > 0.0 {
+                        crypto_state.update_deribit(state.dvol);
                         flush_deribit_state(&state, redis).await;
                     }
                 }

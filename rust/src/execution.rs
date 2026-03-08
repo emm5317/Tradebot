@@ -14,6 +14,8 @@ use serde::Deserialize;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
+use crate::crypto_fv;
+use crate::crypto_state::CryptoState;
 use crate::feed_health::FeedHealth;
 use crate::kalshi::client::KalshiClient;
 use crate::kalshi::error::KalshiError;
@@ -122,13 +124,51 @@ pub async fn run(
     kalshi: KalshiClient,
     kill_switch: Arc<KillSwitchState>,
     feed_health: Arc<FeedHealth>,
+    crypto_state: Arc<CryptoState>,
 ) -> Result<()> {
     let mut subscriber = nats
         .subscribe("tradebot.signals")
         .await
         .context("Failed to subscribe to tradebot.signals")?;
 
-    info!("execution engine listening on tradebot.signals");
+    // Subscribe to advisory crypto signals for logging/comparison (Phase 1.3)
+    let mut advisory_sub = nats
+        .subscribe("tradebot.advisory.crypto")
+        .await
+        .context("Failed to subscribe to tradebot.advisory.crypto")?;
+
+    info!("execution engine listening on tradebot.signals + tradebot.advisory.crypto");
+
+    // Spawn advisory logger — these signals are informational only
+    let advisory_crypto_state = Arc::clone(&crypto_state);
+    tokio::spawn(async move {
+        while let Some(msg) = advisory_sub.next().await {
+            if let Ok(signal) = serde_json::from_slice::<Signal>(&msg.payload) {
+                let snap = advisory_crypto_state.snapshot();
+                if snap.shadow_rti > 0.0 {
+                    let fv = crypto_fv::compute_crypto_fair_value(
+                        &snap,
+                        signal.market_price * 100_000.0,
+                        signal.minutes_remaining,
+                    );
+                    info!(
+                        ticker = %signal.ticker,
+                        python_prob = %format!("{:.4}", signal.model_prob),
+                        rust_prob = %format!("{:.4}", fv.probability),
+                        python_edge = %format!("{:.4}", signal.edge),
+                        confidence = %format!("{:.2}", fv.confidence),
+                        "advisory crypto signal (python → rust comparison)"
+                    );
+                } else {
+                    info!(
+                        ticker = %signal.ticker,
+                        python_prob = %format!("{:.4}", signal.model_prob),
+                        "advisory crypto signal (no rust state yet)"
+                    );
+                }
+            }
+        }
+    });
 
     let mut tracker = PositionTracker::new();
     let mut daily_pnl = DailyPnl::new();
