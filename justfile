@@ -59,6 +59,33 @@ dashboard:
 backtest start end:
     cd python && python -m backtester.engine --start {{start}} --end {{end}}
 
+# Historical data import (ASOS observations + Kalshi settlements)
+import-history months="6":
+    cd python && python -m data.historical_import --months {{months}}
+
+import-asos months="6":
+    cd python && python -m data.historical_import --asos-only --months {{months}}
+
+import-kalshi months="6":
+    cd python && python -m data.historical_import --kalshi-only --months {{months}}
+
+# Calibration analysis (runs backtest + writes to calibration table + analyzes)
+calibrate start end:
+    cd python && python -m backtester.calibration --start {{start}} --end {{end}}
+
+# Ensemble weight optimization (grid search + cross-validation)
+optimize start end:
+    cd python && python -m backtester.optimize --start {{start}} --end {{end}}
+
+optimize-fine start end:
+    cd python && python -m backtester.optimize --start {{start}} --end {{end}} --granularity fine --folds 5
+
+# Full pipeline: import → calibrate → optimize
+tune start end months="6":
+    just import-history {{months}}
+    just calibrate {{start}} {{end}}
+    just optimize {{start}} {{end}}
+
 # Diagnostics
 health:
     curl -s localhost:8050/api/health | jq .
