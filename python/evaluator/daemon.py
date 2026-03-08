@@ -20,6 +20,7 @@ from data.binance_ws import BinanceFeed
 from data.mesonet import fetch_all_stations
 from models.physics import build_climo_table, build_sigma_table
 from signals.crypto import CryptoSignalEvaluator, load_blackout_windows
+from signals.notifier import DiscordNotifier
 from signals.publisher import SignalPublisher
 from signals.registry import EvaluatorRegistry
 from signals.types import Contract, OrderbookState
@@ -39,6 +40,7 @@ class EvaluationDaemon:
         self.publisher: SignalPublisher | None = None
         self.btc_feed = BinanceFeed(ws_url=self.settings.binance_ws_url)
         self.registry = EvaluatorRegistry()
+        self.notifier = DiscordNotifier(self.settings.discord_webhook_url or None)
         self._shutdown = asyncio.Event()
 
     async def run(self) -> None:
@@ -70,6 +72,8 @@ class EvaluationDaemon:
 
         self.registry.register("weather", weather_eval)
         self.registry.register("crypto", crypto_eval)
+
+        await self.notifier.start()
 
         logger.info(
             "evaluator_started",
@@ -199,11 +203,15 @@ class EvaluationDaemon:
                 await self.publisher.publish_model_state(state)
                 if sig is not None:
                     await self.publisher.publish(sig)
+                    await self.notifier.notify_signal(sig)
                 elif rej is not None:
                     await self.publisher.publish_rejection(rej)
 
             except Exception:
                 logger.exception("evaluate_contract_error", ticker=ticker)
+                await self.notifier.notify_error(
+                    "evaluate_contract_error", {"ticker": ticker}
+                )
 
     def _infer_signal_type(self, contract: Contract) -> str:
         """Infer signal type from contract category."""
@@ -272,6 +280,7 @@ class EvaluationDaemon:
             pass
 
     async def _cleanup(self) -> None:
+        await self.notifier.close()
         if self.nc:
             await self.nc.close()
         if self.redis:

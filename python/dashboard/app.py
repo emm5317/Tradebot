@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import asyncpg
+import nats
 import redis.asyncio as aioredis
 import structlog
 import uvicorn
@@ -28,15 +29,19 @@ logger = structlog.get_logger()
 settings: Settings = get_settings()
 pool: asyncpg.Pool | None = None
 redis_client: aioredis.Redis | None = None
+nats_client: nats.NATS | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool, redis_client
+    global pool, redis_client, nats_client
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     redis_client = aioredis.from_url(settings.redis_url)
+    nats_client = await nats.connect(settings.nats_url)
     logger.info("dashboard_started", port=settings.dashboard_port)
     yield
+    if nats_client:
+        await nats_client.close()
     if pool:
         await pool.close()
     if redis_client:
@@ -154,19 +159,46 @@ async def daily_summary():
 
 @app.get("/api/events")
 async def event_stream(request: Request):
-    """SSE endpoint for live model state updates."""
+    """SSE endpoint for live updates via NATS subscription.
+
+    Streams both real-time signals from NATS and periodic model state
+    from Redis, so the dashboard gets push updates instead of polling.
+    """
 
     async def generate():
-        while True:
-            if await request.is_disconnected():
-                break
+        sub = None
+        try:
+            if nats_client:
+                sub = await nats_client.subscribe("tradebot.signals.live")
 
-            states = await model_state()
-            yield {
-                "event": "model_state",
-                "data": json.dumps(states),
-            }
-            await asyncio.sleep(2)
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                # Drain any pending NATS messages (non-blocking)
+                if sub:
+                    try:
+                        while True:
+                            msg = await asyncio.wait_for(
+                                sub.next_msg(), timeout=0.1
+                            )
+                            yield {
+                                "event": "signal",
+                                "data": msg.data.decode(),
+                            }
+                    except (asyncio.TimeoutError, nats.errors.TimeoutError):
+                        pass
+
+                # Also send model state snapshot every cycle
+                states = await model_state()
+                yield {
+                    "event": "model_state",
+                    "data": json.dumps(states),
+                }
+                await asyncio.sleep(2)
+        finally:
+            if sub:
+                await sub.unsubscribe()
 
     return EventSourceResponse(generate())
 
