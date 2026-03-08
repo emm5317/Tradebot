@@ -1,5 +1,6 @@
 mod config;
 mod execution;
+mod feeds;
 mod kalshi;
 mod logging;
 mod orderbook_feed;
@@ -102,6 +103,37 @@ async fn main() -> Result<()> {
             orderbook_feed::run(ws_rx, orderbooks, redis.clone(), cancel).await;
         }
     });
+
+    // Spawn crypto exchange feeds (gated by config)
+    if config.enable_coinbase {
+        let feed = feeds::coinbase::CoinbaseFeed::new(
+            config.coinbase_ws_url.clone(),
+            cancel.clone(),
+        );
+        let redis_clone = redis.clone();
+        tokio::spawn(async move { feed.run(redis_clone).await });
+        tracing::info!("coinbase feed enabled");
+    }
+
+    if config.enable_binance_futures {
+        let feed = feeds::binance_futures::BinanceFuturesFeed::new(
+            config.binance_futures_ws_url.clone(),
+            cancel.clone(),
+        );
+        let redis_clone = redis.clone();
+        tokio::spawn(async move { feed.run(redis_clone).await });
+        tracing::info!("binance futures feed enabled");
+    }
+
+    if config.enable_deribit {
+        let feed = feeds::deribit::DeribitFeed::new(
+            config.deribit_ws_url.clone(),
+            cancel.clone(),
+        );
+        let redis_clone = redis.clone();
+        tokio::spawn(async move { feed.run(redis_clone).await });
+        tracing::info!("deribit dvol feed enabled");
+    }
 
     tracing::info!(
         paper_mode = config.paper_mode,

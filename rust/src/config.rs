@@ -14,6 +14,19 @@ pub struct Config {
     pub binance_ws_url: String,
     pub mesonet_base_url: String,
 
+    #[serde(default = "default_coinbase_ws_url")]
+    pub coinbase_ws_url: String,
+    #[serde(default = "default_binance_futures_ws_url")]
+    pub binance_futures_ws_url: String,
+    #[serde(default = "default_deribit_ws_url")]
+    pub deribit_ws_url: String,
+    #[serde(default)]
+    pub enable_coinbase: bool,
+    #[serde(default)]
+    pub enable_binance_futures: bool,
+    #[serde(default)]
+    pub enable_deribit: bool,
+
     pub paper_mode: bool,
     pub max_trade_size_cents: i64,
     pub max_daily_loss_cents: i64,
@@ -33,6 +46,18 @@ pub struct Config {
 
 fn default_db_pool_size() -> u32 {
     20
+}
+
+fn default_coinbase_ws_url() -> String {
+    "wss://advanced-trade-ws.coinbase.com".to_string()
+}
+
+fn default_binance_futures_ws_url() -> String {
+    "wss://fstream.binance.com".to_string()
+}
+
+fn default_deribit_ws_url() -> String {
+    "wss://www.deribit.com/ws/api/v2".to_string()
 }
 
 impl Config {
