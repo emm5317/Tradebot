@@ -60,10 +60,13 @@ async fn main() -> Result<()> {
     tracing::info!(server = %config.nats_url, "nats connected");
 
     // Initialize Kalshi client
-    let kalshi = kalshi::client::KalshiClient::new(
-        &config.kalshi_base_url,
-        &config.kalshi_api_key,
+    let kalshi_auth = kalshi::auth::KalshiAuth::new(
+        config.kalshi_api_key.clone(),
         &config.kalshi_private_key_path,
+    ).context("Failed to initialize Kalshi auth")?;
+    let kalshi = kalshi::client::KalshiClient::new(
+        kalshi_auth,
+        config.kalshi_base_url.clone(),
     )?;
 
     tracing::info!(

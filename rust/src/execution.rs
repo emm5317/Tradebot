@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use tracing::{error, info, warn};
 
@@ -276,7 +277,7 @@ async fn execute_entry(
     match kalshi.place_order(order_req).await {
         Ok(resp) => {
             let latency_ms = start.elapsed().as_millis() as i64;
-            let fill_price = resp.avg_price.map(|p| p as f64 / 100.0);
+            let fill_price = resp.order.yes_price.or(resp.order.no_price).map(|p| p as f64 / 100.0);
             tracker.record_entry(
                 &signal.ticker,
                 &signal.direction,
@@ -312,7 +313,7 @@ async fn execute_entry(
 async fn execute_exit(
     config: &Config,
     kalshi: &KalshiClient,
-    pool: &sqlx::PgPool,
+    _pool: &sqlx::PgPool,
     signal: &Signal,
     tracker: &mut PositionTracker,
     daily_pnl: &mut DailyPnl,
