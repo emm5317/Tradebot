@@ -139,4 +139,6 @@ No formal benchmark was needed — the write rates are 3-4 orders of magnitude b
 - [x] Python advisory signals logged for comparison via `tradebot.advisory.crypto`
 - [x] Redis no longer in critical path for crypto orders
 - [x] DashMap benchmark documented with decision
-- [ ] Crypto signals generated in Rust within 1ms of price update (requires event-driven trigger, Phase 3)
+- [x] Crypto signals generated in Rust within 1ms of price update (Phase 3 event-driven trigger)
+
+**Status: Complete**

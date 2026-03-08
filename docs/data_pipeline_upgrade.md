@@ -103,13 +103,16 @@ Usage: run baseline replay, then re-run with a source ablated. Compare Brier sco
 | Component | Tests | Framework |
 |-----------|-------|-----------|
 | Contract rules (ticker parser, timezone, resolver) | 35 | pytest |
-| Weather fair-value (rounding, locking, HRRR, METAR parsing) | 35 | pytest |
-| Crypto fair-value (shadow RTI, basis, funding, DVOL) | 15 | pytest |
-| Existing tests (physics, evaluators, publisher, etc.) | 114 | pytest |
+| Weather fair-value (rounding, locking, HRRR, calibration, conflict) | 56 | pytest |
+| Crypto fair-value (shadow RTI, basis, funding, DVOL, parity) | 36 | pytest |
+| Existing tests (physics, evaluators, publisher, etc.) | 109 | pytest |
+| Crypto state (venue weighting, staleness, outlier, volume) | 12 | cargo test |
+| Crypto FV (N(d2), Levy, basis, confidence) | 18 | cargo test |
 | Trade tape (aggressiveness, VWAP, volume, bounds) | 7 | cargo test |
 | Orderbook (snapshots, deltas, staleness) | 6 | cargo test |
-| Crypto feeds (Coinbase, Binance, Deribit parsing) | 11 | cargo test |
-| **Total** | **223** | |
+| Crypto feeds (Coinbase, Binance, Deribit parsing) | 14 | cargo test |
+| Order manager, kill switch, feed health | 35 | cargo test |
+| **Total** | **328** | |
 
 ## Migration Sequence
 

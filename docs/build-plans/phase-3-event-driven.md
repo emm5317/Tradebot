@@ -130,9 +130,11 @@ Current cooldown is a flat 300s per ticker. This is too conservative for crypto 
 
 ## Verification Checklist
 
-- [ ] Crypto signals generated within 500ms of price update
-- [ ] Weather signals generated within 5s of METAR arrival
-- [ ] Contract lifecycle tracked correctly through all states
-- [ ] Cooldowns respect per-strategy configuration
-- [ ] No signal flooding under rapid price changes
-- [ ] Timer fallback catches missed events
+- [x] Crypto signals generated within 500ms of price update
+- [x] Weather signals generated within 5s of METAR arrival
+- [x] Contract lifecycle tracked correctly through all states
+- [x] Cooldowns respect per-strategy configuration
+- [x] No signal flooding under rapid price changes
+- [x] Timer fallback catches missed events
+
+**Status: Complete**

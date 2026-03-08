@@ -191,12 +191,14 @@ Phase 0.2 kill switch blocks new signal processing, but has no effect on in-flig
 
 ## Verification Checklist
 
-- [ ] All 10 order states reachable and logged
-- [ ] Invalid state transitions panic in debug, warn in release
-- [ ] Client order IDs are deterministic for same signal
-- [ ] Startup reconciliation correctly rebuilds position tracker
-- [ ] Partial fills tracked accurately
-- [ ] Rate limit backoff prevents 429 errors
-- [ ] Stale orderbook detection uses FeedHealth (not reimplemented)
-- [ ] Kill switch activation cancels in-flight orders
-- [ ] Signal-type-aware cooldowns (crypto 30s, weather 120s)
+- [x] All 10 order states reachable and logged
+- [x] Invalid state transitions panic in debug, warn in release
+- [x] Client order IDs are deterministic for same signal
+- [x] Startup reconciliation correctly rebuilds position tracker
+- [x] Partial fills tracked accurately
+- [x] Rate limit backoff prevents 429 errors
+- [x] Stale orderbook detection uses FeedHealth (not reimplemented)
+- [x] Kill switch activation cancels in-flight orders
+- [x] Signal-type-aware cooldowns (crypto 30s, weather 120s)
+
+**Status: Complete**

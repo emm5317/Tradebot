@@ -250,11 +250,13 @@ pub struct FeedHealth {
 
 ## Verification Checklist
 
-- [ ] `cargo build` compiles cleanly with new axum dep
-- [ ] `cargo test` passes all existing + new Rust tests
-- [ ] `pytest` passes all Python tests (evaluator daemon reads from Redis)
-- [ ] Binance spot feed writes to `crypto:binance_spot` Redis key
-- [ ] Kill switch GET/POST endpoints respond correctly
-- [ ] Paper mode logs prominently at startup
-- [ ] Stale feed detection blocks execution
-- [ ] `python/data/binance_ws.py` deleted
+- [x] `cargo build` compiles cleanly with new axum dep
+- [x] `cargo test` passes all existing + new Rust tests
+- [x] `pytest` passes all Python tests (evaluator daemon reads from Redis)
+- [x] Binance spot feed writes to `crypto:binance_spot` Redis key
+- [x] Kill switch GET/POST endpoints respond correctly
+- [x] Paper mode logs prominently at startup
+- [x] Stale feed detection blocks execution
+- [x] `python/data/binance_ws.py` deleted
+
+**Status: Complete**
