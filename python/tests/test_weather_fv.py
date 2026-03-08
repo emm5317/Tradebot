@@ -1,0 +1,382 @@
+"""Tests for weather fair-value engine, rounding model, and METAR parsing."""
+
+from models.rounding import (
+    RoundingResult,
+    celsius_to_cli_fahrenheit,
+    compute_rounding_uncertainty,
+    fahrenheit_to_threshold_celsius,
+)
+from models.weather_fv import (
+    WeatherFairValue,
+    WeatherState,
+    compute_weather_fair_value,
+)
+
+
+# ─── Rounding Model Tests ────────────────────────────────────────────
+
+
+class TestRoundingUncertainty:
+    def test_unambiguous_well_above(self):
+        """7°C → 44.6°F, strike 40°F → not ambiguous."""
+        result = compute_rounding_uncertainty(7, 40.0)
+        assert not result.is_ambiguous
+        assert result.reported_f == 45.0
+        assert result.min_f < result.max_f
+
+    def test_unambiguous_well_below(self):
+        """0°C → 32°F, strike 40°F → not ambiguous."""
+        result = compute_rounding_uncertainty(0, 40.0)
+        assert not result.is_ambiguous
+
+    def test_ambiguous_at_boundary(self):
+        """7°C → range [43.7, 45.5]°F, strike 45°F → ambiguous."""
+        result = compute_rounding_uncertainty(7, 45.0)
+        assert result.is_ambiguous
+        assert result.min_f <= 45.0 <= result.max_f
+
+    def test_band_width_is_1_8f(self):
+        """1°C range → 1.8°F range."""
+        result = compute_rounding_uncertainty(10, 50.0)
+        assert abs(result.ambiguity_band - 1.8) < 0.01
+
+    def test_negative_celsius(self):
+        """-5°C → 23°F."""
+        result = compute_rounding_uncertainty(-5, 23.0)
+        assert result.reported_f == 23.0
+        assert result.is_ambiguous  # 23 is within range
+
+    def test_freezing_point(self):
+        """0°C → 32°F."""
+        result = compute_rounding_uncertainty(0, 32.0)
+        assert result.reported_f == 32.0
+        assert result.is_ambiguous
+
+
+class TestCelsiusToFahrenheit:
+    def test_freezing(self):
+        assert celsius_to_cli_fahrenheit(0.0) == 32
+
+    def test_boiling(self):
+        assert celsius_to_cli_fahrenheit(100.0) == 212
+
+    def test_body_temp(self):
+        assert celsius_to_cli_fahrenheit(37.0) == 99
+
+    def test_negative(self):
+        assert celsius_to_cli_fahrenheit(-40.0) == -40
+
+
+class TestFahrenheitThresholdCelsius:
+    def test_32f_threshold(self):
+        min_c, max_c = fahrenheit_to_threshold_celsius(32.0)
+        # C values in this range round to >= 32°F
+        assert min_c < 0.0 < max_c
+
+    def test_range_width(self):
+        min_c, max_c = fahrenheit_to_threshold_celsius(50.0)
+        assert abs((max_c - min_c) - 5.0 / 9.0) < 0.01
+
+
+# ─── Weather Fair-Value Engine Tests ─────────────────────────────────
+
+
+class TestWeatherFairValueLocked:
+    def test_max_already_exceeded(self):
+        """If running max already exceeds strike, probability ≈ 1."""
+        state = WeatherState(
+            station="KORD",
+            obs_date="2024-03-08",
+            contract_type="weather_max",
+            strike_f=45.0,
+            running_max_f=47.0,
+        )
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=45.0,
+            current_temp_f=42.0,
+            minutes_remaining=60.0,
+            state=state,
+        )
+        assert result.already_locked
+        assert result.probability >= 0.95
+
+    def test_min_already_below(self):
+        """If running min already below strike, probability ≈ 1."""
+        state = WeatherState(
+            station="KJFK",
+            obs_date="2024-03-08",
+            contract_type="weather_min",
+            strike_f=30.0,
+            running_min_f=28.0,
+        )
+        result = compute_weather_fair_value(
+            contract_type="weather_min",
+            strike_f=30.0,
+            current_temp_f=35.0,
+            minutes_remaining=60.0,
+            state=state,
+        )
+        assert result.already_locked
+        assert result.probability >= 0.95
+
+    def test_not_locked_when_below_strike(self):
+        """Running max below strike → not locked."""
+        state = WeatherState(
+            station="KORD",
+            obs_date="2024-03-08",
+            contract_type="weather_max",
+            strike_f=45.0,
+            running_max_f=40.0,
+        )
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=45.0,
+            current_temp_f=40.0,
+            minutes_remaining=60.0,
+            state=state,
+        )
+        assert not result.already_locked
+
+
+class TestWeatherFairValuePhysics:
+    def test_temp_well_above_max_strike(self):
+        """Current temp well above max strike → high probability."""
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=40.0,
+            current_temp_f=50.0,
+            minutes_remaining=30.0,
+        )
+        assert result.probability > 0.7
+
+    def test_temp_well_below_max_strike(self):
+        """Current temp well below max strike → low probability."""
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=80.0,
+            current_temp_f=50.0,
+            minutes_remaining=30.0,
+        )
+        assert result.probability < 0.3
+
+    def test_temp_at_strike_locks(self):
+        """Current temp at strike for max contract → locked (max already reached)."""
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=50.0,
+            minutes_remaining=30.0,
+        )
+        assert result.already_locked
+        assert result.probability >= 0.95
+
+    def test_temp_just_below_strike(self):
+        """Current temp just below max strike → moderate probability."""
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=49.0,
+            minutes_remaining=30.0,
+        )
+        assert 0.2 < result.probability < 0.8
+
+    def test_zero_minutes_above(self):
+        """At settlement, temp above strike → high probability."""
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=40.0,
+            current_temp_f=45.0,
+            minutes_remaining=0.0,
+        )
+        assert result.probability > 0.5
+
+    def test_zero_minutes_below(self):
+        """At settlement, temp below strike → low probability."""
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=45.0,
+            minutes_remaining=0.0,
+        )
+        assert result.probability < 0.5
+
+
+class TestWeatherFairValueHRRR:
+    def test_hrrr_high_forecast(self):
+        """HRRR forecasting high temps → increases max probability."""
+        result_no_hrrr = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=60.0,
+            current_temp_f=55.0,
+            minutes_remaining=120.0,
+        )
+        result_with_hrrr = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=60.0,
+            current_temp_f=55.0,
+            minutes_remaining=120.0,
+            hrrr_forecast_temps_f=[62.0, 65.0, 63.0, 58.0],
+        )
+        # HRRR showing max above strike should increase probability
+        assert result_with_hrrr.probability >= result_no_hrrr.probability - 0.05
+
+
+class TestWeatherFairValueRounding:
+    def test_rounding_ambiguity_flagged(self):
+        """Rounding ambiguity at boundary is detected."""
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=45.0,
+            current_temp_f=44.6,
+            minutes_remaining=30.0,
+            metar_temp_c=7,  # 7°C → 44.6°F, range [43.7, 45.5]
+        )
+        assert result.rounding_ambiguous
+
+    def test_no_rounding_ambiguity(self):
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=60.0,
+            current_temp_f=44.6,
+            minutes_remaining=30.0,
+            metar_temp_c=7,
+        )
+        assert not result.rounding_ambiguous
+
+
+class TestWeatherFairValueState:
+    def test_state_updates_running_max(self):
+        """State running max updates with new observations."""
+        state = WeatherState(
+            station="KORD",
+            obs_date="2024-03-08",
+            contract_type="weather_max",
+            strike_f=50.0,
+            running_max_f=45.0,
+        )
+        compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=60.0,
+            state=state,
+        )
+        assert state.running_max_f == 48.0
+        assert state.obs_count == 1
+
+    def test_state_incorporates_6hr_max(self):
+        """6-hourly METAR max group updates running max."""
+        state = WeatherState(
+            station="KORD",
+            obs_date="2024-03-08",
+            contract_type="weather_max",
+            strike_f=50.0,
+            running_max_f=42.0,
+        )
+        compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=40.0,
+            minutes_remaining=60.0,
+            state=state,
+            max_temp_6hr_f=47.0,
+        )
+        assert state.running_max_f == 47.0
+
+    def test_state_running_min_updates(self):
+        state = WeatherState(
+            station="KJFK",
+            obs_date="2024-03-08",
+            contract_type="weather_min",
+            strike_f=30.0,
+            running_min_f=35.0,
+        )
+        compute_weather_fair_value(
+            contract_type="weather_min",
+            strike_f=30.0,
+            current_temp_f=32.0,
+            minutes_remaining=60.0,
+            state=state,
+        )
+        assert state.running_min_f == 32.0
+
+
+class TestWeatherFairValueComponents:
+    def test_components_present(self):
+        """Output includes component probabilities."""
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=30.0,
+        )
+        assert "physics" in result.components
+        assert "trend" in result.components
+        assert "climo" in result.components
+
+    def test_probability_clamped(self):
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=30.0,
+        )
+        assert 0.01 <= result.probability <= 0.99
+
+    def test_confidence_range(self):
+        result = compute_weather_fair_value(
+            contract_type="weather_max",
+            strike_f=50.0,
+            current_temp_f=48.0,
+            minutes_remaining=30.0,
+        )
+        assert 0.0 < result.confidence <= 1.0
+
+
+# ─── METAR Parsing Tests ─────────────────────────────────────────────
+
+
+class TestMETARParsing:
+    def test_parse_6hr_max(self):
+        from data.aviationweather import _parse_6hr_temps
+
+        max_t, min_t = _parse_6hr_temps("KORD 081756Z ... RMK ... 10156 20067")
+        assert max_t is not None
+        assert abs(max_t - 15.6) < 0.01
+        assert min_t is not None
+        assert abs(min_t - 6.7) < 0.01
+
+    def test_parse_6hr_negative(self):
+        from data.aviationweather import _parse_6hr_temps
+
+        max_t, min_t = _parse_6hr_temps("KORD 081756Z ... RMK ... 11023 21045")
+        assert max_t is not None
+        assert abs(max_t - (-2.3)) < 0.01
+        assert min_t is not None
+        assert abs(min_t - (-4.5)) < 0.01
+
+    def test_parse_6hr_no_groups(self):
+        from data.aviationweather import _parse_6hr_temps
+
+        max_t, min_t = _parse_6hr_temps("KORD 081756Z 36008KT 10SM FEW250")
+        assert max_t is None
+        assert min_t is None
+
+    def test_parse_24hr_temps(self):
+        from data.aviationweather import _parse_24hr_temps
+
+        max_t, min_t = _parse_24hr_temps("RMK ... 401560067")
+        assert max_t is not None
+        assert abs(max_t - 15.6) < 0.01
+        assert min_t is not None
+        assert abs(min_t - 6.7) < 0.01
+
+    def test_parse_24hr_negative(self):
+        from data.aviationweather import _parse_24hr_temps
+
+        max_t, min_t = _parse_24hr_temps("RMK 411001200")
+        assert max_t is not None
+        assert abs(max_t - (-10.0)) < 0.01
+        assert min_t is not None
+        assert abs(min_t - (-20.0)) < 0.01

@@ -15,8 +15,10 @@ import httpx
 import structlog
 
 from config import Settings, get_settings
+from data.aviationweather import METARObservation, fetch_metar
 from data.binance_ws import BinanceFeed
 from data.mesonet import ASOSObservation, fetch_all_stations
+from data.open_meteo import HRRRForecast, fetch_hrrr_forecasts
 
 logger = structlog.get_logger()
 
@@ -52,6 +54,8 @@ class CollectorDaemon:
                 self.collect_asos_loop(),
                 self.collect_market_snapshots_loop(),
                 self.collect_btc_loop(),
+                self.collect_metar_loop(),
+                self.collect_hrrr_loop(),
                 self.btc_feed.connect(),
                 return_exceptions=True,
             )
@@ -123,6 +127,40 @@ class CollectorDaemon:
 
             await self._sleep_or_shutdown(interval)
 
+    async def collect_metar_loop(self) -> None:
+        """Every 60s: fetch METAR observations for settlement-relevant fields."""
+        interval = self.settings.collection_interval_seconds
+
+        while not self._shutdown.is_set():
+            try:
+                observations = await fetch_metar(
+                    self.settings.asos_stations, hours=1.0
+                )
+                if observations:
+                    await self._insert_metar_observations(observations)
+                    logger.info("metar_collected", count=len(observations))
+            except Exception:
+                logger.exception("metar_collection_error")
+
+            await self._sleep_or_shutdown(interval)
+
+    async def collect_hrrr_loop(self) -> None:
+        """Every 300s: fetch HRRR forecasts for remaining-day estimation."""
+        interval = 300  # 5 minutes
+
+        while not self._shutdown.is_set():
+            try:
+                forecasts = await fetch_hrrr_forecasts(
+                    self.settings.asos_stations, forecast_hours=24
+                )
+                if forecasts:
+                    await self._insert_hrrr_forecasts(forecasts)
+                    logger.info("hrrr_collected", count=len(forecasts))
+            except Exception:
+                logger.exception("hrrr_collection_error")
+
+            await self._sleep_or_shutdown(interval)
+
     # --- Database writes ---
 
     async def _insert_asos_observations(
@@ -178,6 +216,72 @@ class CollectorDaemon:
                 state.spot_price,
                 state.realized_vol_30m,
             )
+
+    async def _insert_metar_observations(
+        self, observations: list[METARObservation]
+    ) -> None:
+        """Insert METAR observations into metar_observations table."""
+        assert self.pool is not None
+
+        async with self.pool.acquire() as conn:
+            for obs in observations:
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO metar_observations (
+                            station, observed_at, temp_c, dewpoint_c,
+                            wind_speed_kts, wind_gust_kts, altimeter_inhg,
+                            visibility_mi, wx_string,
+                            max_temp_6hr_c, min_temp_6hr_c,
+                            max_temp_24hr_c, min_temp_24hr_c, raw_metar
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                        ON CONFLICT (station, observed_at) DO NOTHING
+                        """,
+                        obs.station,
+                        obs.observed_at,
+                        obs.temp_c,
+                        obs.dewpoint_c,
+                        obs.wind_speed_kts,
+                        obs.wind_gust_kts,
+                        obs.altimeter_inhg,
+                        obs.visibility_mi,
+                        obs.wx_string,
+                        obs.max_temp_6hr_c,
+                        obs.min_temp_6hr_c,
+                        obs.max_temp_24hr_c,
+                        obs.min_temp_24hr_c,
+                        obs.raw_metar,
+                    )
+                except Exception:
+                    logger.debug("metar_insert_skipped", station=obs.station)
+
+    async def _insert_hrrr_forecasts(
+        self, forecasts: list[HRRRForecast]
+    ) -> None:
+        """Insert HRRR forecasts into hrrr_forecasts table."""
+        assert self.pool is not None
+
+        async with self.pool.acquire() as conn:
+            for fc in forecasts:
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO hrrr_forecasts (
+                            station, forecast_time, run_time,
+                            temp_2m_f, temp_2m_c, wind_10m_kts, precip_mm
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+                        ON CONFLICT (station, forecast_time, run_time) DO NOTHING
+                        """,
+                        fc.station,
+                        fc.forecast_time,
+                        fc.run_time,
+                        fc.temp_2m_f,
+                        fc.temp_2m_c,
+                        fc.wind_10m_kts,
+                        fc.precip_mm,
+                    )
+                except Exception:
+                    logger.debug("hrrr_insert_skipped", station=fc.station)
 
     async def _collect_market_snapshots(self, client: httpx.AsyncClient) -> None:
         """Snapshot prices for contracts settling within 30 minutes.
