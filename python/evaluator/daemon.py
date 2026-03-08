@@ -19,6 +19,7 @@ from config import Settings, get_settings
 from data.binance_ws import BinanceFeed
 from data.mesonet import fetch_all_stations
 from models.physics import build_climo_table, build_sigma_table
+from rules.resolver import ContractRulesResolver
 from signals.crypto import CryptoSignalEvaluator, load_blackout_windows
 from signals.notifier import DiscordNotifier
 from signals.publisher import SignalPublisher
@@ -40,6 +41,7 @@ class EvaluationDaemon:
         self.publisher: SignalPublisher | None = None
         self.btc_feed = BinanceFeed(ws_url=self.settings.binance_ws_url)
         self.registry = EvaluatorRegistry()
+        self.rules_resolver = ContractRulesResolver()
         self.notifier = DiscordNotifier(self.settings.discord_webhook_url or None)
         self._shutdown = asyncio.Event()
 
@@ -72,6 +74,12 @@ class EvaluationDaemon:
 
         self.registry.register("weather", weather_eval)
         self.registry.register("crypto", crypto_eval)
+
+        # Load contract rules
+        try:
+            await self.rules_resolver.load(self.pool)
+        except Exception:
+            logger.warning("rules_load_failed", exc_info=True)
 
         await self.notifier.start()
 
@@ -155,6 +163,10 @@ class EvaluationDaemon:
 
         for row in rows:
             ticker = row["ticker"]
+
+            # Attach resolved rules if available
+            rules = self.rules_resolver.get(ticker)
+
             contract = Contract(
                 ticker=ticker,
                 category=row["category"] or "",
@@ -163,15 +175,23 @@ class EvaluationDaemon:
                 threshold=row["threshold"],
                 settlement_time=row["settlement_time"],
                 status=row["status"],
+                rules=rules,
             )
+
+            # Use rules-based station/threshold if contract fields are missing
+            if rules:
+                if contract.station is None and rules.settlement_station:
+                    contract.station = rules.settlement_station
+                if contract.threshold is None and rules.strike:
+                    contract.threshold = rules.strike
 
             # Build orderbook state — prefer Redis (real-time), fall back to snapshot
             orderbook = self._build_orderbook(ticker, snapshots, orderbook_overrides)
             if orderbook is None:
                 continue
 
-            # Determine signal type from category
-            signal_type = self._infer_signal_type(contract)
+            # Determine signal type: prefer rules, fall back to category inference
+            signal_type = rules.signal_type if rules else self._infer_signal_type(contract)
             evaluator = self.registry.get(signal_type)
             if evaluator is None:
                 continue

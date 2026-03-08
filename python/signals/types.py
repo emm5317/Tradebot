@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -102,3 +102,8 @@ class Contract(BaseModel):
     threshold: float | None = None
     settlement_time: datetime
     status: str = "active"
+
+    # Resolved settlement rules (populated by ContractRulesResolver)
+    rules: Any | None = None  # rules.resolver.ContractRules
+
+    model_config = {"arbitrary_types_allowed": True}

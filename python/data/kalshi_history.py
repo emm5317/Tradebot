@@ -12,6 +12,8 @@ import structlog
 from pydantic import BaseModel
 
 from config import Settings, get_settings
+from rules.ticker_parser import parse_ticker
+from rules.timezone import compute_day_boundaries
 
 logger = structlog.get_logger()
 
@@ -218,6 +220,15 @@ async def _upsert_contracts(pool: asyncpg.Pool, markets: list[dict]) -> None:
                 close_price,
             )
 
+            # Also upsert into contract_rules via ticker parser
+            await _upsert_rules(
+                conn,
+                ticker=ticker,
+                title=market.get("title", ""),
+                category=_categorize(market),
+                settlement_time=settlement_time,
+            )
+
 
 async def pull_historical_prices(
     ticker: str,
@@ -354,3 +365,67 @@ def _extract_threshold(market: dict) -> float | None:
         except ValueError:
             pass
     return None
+
+
+async def _upsert_rules(
+    conn: asyncpg.Connection,
+    ticker: str,
+    title: str,
+    category: str,
+    settlement_time: datetime,
+) -> None:
+    """Parse ticker and upsert into contract_rules table."""
+    parsed = parse_ticker(ticker, title=title, category=category)
+    if parsed is None or parsed.contract_type is None:
+        return
+
+    # Compute day boundaries for weather contracts
+    day_start = None
+    day_end = None
+    if parsed.settlement_tz and parsed.contract_type in ("weather_max", "weather_min"):
+        try:
+            day_start, day_end = compute_day_boundaries(
+                parsed.settlement_tz,
+                settlement_time.date(),
+            )
+        except Exception:
+            pass
+
+    try:
+        await conn.execute(
+            """
+            INSERT INTO contract_rules (
+                series_ticker, market_ticker, contract_type,
+                settlement_source, settlement_station, settlement_tz,
+                strike, expiry_time,
+                settlement_window_start, settlement_window_end,
+                day_boundary_start, day_boundary_end,
+                underlying, constituent_exchanges
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (market_ticker) DO UPDATE SET
+                contract_type = EXCLUDED.contract_type,
+                settlement_source = EXCLUDED.settlement_source,
+                settlement_station = EXCLUDED.settlement_station,
+                settlement_tz = EXCLUDED.settlement_tz,
+                strike = EXCLUDED.strike,
+                day_boundary_start = EXCLUDED.day_boundary_start,
+                day_boundary_end = EXCLUDED.day_boundary_end,
+                updated_at = now()
+            """,
+            parsed.series_ticker,
+            parsed.market_ticker,
+            parsed.contract_type,
+            parsed.settlement_source or "unknown",
+            parsed.settlement_station,
+            parsed.settlement_tz,
+            parsed.strike or 0.0,
+            settlement_time,
+            None,  # settlement_window_start (populated for crypto at runtime)
+            None,  # settlement_window_end
+            day_start,
+            day_end,
+            parsed.underlying,
+            parsed.constituent_exchanges or None,
+        )
+    except Exception:
+        logger.debug("rules_upsert_skipped", ticker=ticker)
