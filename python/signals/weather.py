@@ -26,6 +26,7 @@ from signals.types import (
     SignalSchema,
 )
 from signals.utils import (
+    compute_confidence,
     compute_effective_edge,
     compute_kelly,
     determine_direction,
@@ -208,12 +209,14 @@ class WeatherSignalEvaluator:
         # 8. Kelly sizing using estimated fill price, not mid-price
         fill_price = estimate_fill_price(direction, orderbook)
         kelly = compute_kelly(p_ensemble, fill_price, direction)
+        confidence = compute_confidence(orderbook.spread, minutes)
+        adjusted_kelly = kelly * confidence
 
-        if kelly < _MIN_KELLY:
+        if adjusted_kelly < _MIN_KELLY:
             rejection = RejectedSignal(
                 ticker=contract.ticker,
                 signal_type="weather",
-                rejection_reason=f"kelly_too_low ({kelly:.3f} < {_MIN_KELLY})",
+                rejection_reason=f"kelly_too_low ({adjusted_kelly:.3f} < {_MIN_KELLY})",
                 model_prob=p_ensemble,
                 market_price=market_price,
                 edge=effective_edge,
@@ -233,10 +236,11 @@ class WeatherSignalEvaluator:
             model_prob=p_ensemble,
             market_price=market_price,
             edge=effective_edge,
-            kelly_fraction=kelly,
+            kelly_fraction=adjusted_kelly,
             minutes_remaining=minutes,
             spread=orderbook.spread,
             order_imbalance=orderbook.imbalance,
+            confidence=confidence,
         )
 
         logger.info(

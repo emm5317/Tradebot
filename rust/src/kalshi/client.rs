@@ -210,6 +210,11 @@ impl KalshiClient {
         self.post("/trade-api/v2/portfolio/orders", &req).await
     }
 
+    /// Place multiple orders in a single batch (max 20).
+    pub async fn place_batch_orders(&self, req: BatchOrderRequest) -> Result<BatchOrderResponse, KalshiError> {
+        self.post("/trade-api/v2/portfolio/orders/batched", &req).await
+    }
+
     /// Cancel an order by ID.
     pub async fn cancel_order(&self, order_id: &str) -> Result<CancelResponse, KalshiError> {
         let path = format!(

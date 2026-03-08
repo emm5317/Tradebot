@@ -41,6 +41,34 @@ pub struct OrderRequest {
     pub no_price: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_order_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration_time: Option<String>,
+}
+
+/// Request to place multiple orders in a batch.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchOrderRequest {
+    pub orders: Vec<OrderRequest>,
+}
+
+/// Response from batch order placement.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchOrderResponse {
+    pub orders: Vec<Order>,
+}
+
+/// Fill event from WebSocket.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FillEvent {
+    pub trade_id: Option<String>,
+    pub order_id: Option<String>,
+    pub market_ticker: String,
+    pub side: String,
+    pub yes_price: Option<i64>,
+    pub no_price: Option<i64>,
+    pub count: Option<i64>,
+    pub action: Option<String>,
+    pub is_taker: Option<bool>,
 }
 
 /// Response from placing an order.

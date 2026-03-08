@@ -83,6 +83,30 @@ impl PositionTracker {
     }
 }
 
+/// Cached portfolio balance from Kalshi.
+struct CachedBalance {
+    balance_cents: i64,
+    last_updated: chrono::DateTime<Utc>,
+}
+
+impl CachedBalance {
+    fn new() -> Self {
+        Self {
+            balance_cents: i64::MAX, // No limit until first fetch
+            last_updated: Utc::now(),
+        }
+    }
+
+    fn is_stale(&self) -> bool {
+        (Utc::now() - self.last_updated).num_seconds() > 60
+    }
+
+    fn update(&mut self, cents: i64) {
+        self.balance_cents = cents;
+        self.last_updated = Utc::now();
+    }
+}
+
 /// Daily loss tracking for circuit breaker.
 struct DailyPnl {
     date: chrono::NaiveDate,
@@ -115,6 +139,51 @@ impl DailyPnl {
     }
 }
 
+/// Load existing positions from Kalshi API on startup.
+async fn load_positions(
+    kalshi: &KalshiClient,
+    pool: &sqlx::PgPool,
+    tracker: &mut PositionTracker,
+) -> Result<()> {
+    // Query Kalshi for non-zero positions
+    let positions = kalshi.get_positions().await?;
+
+    for pos in positions {
+        if pos.market_exposure.unwrap_or(0) == 0 {
+            continue;
+        }
+
+        // Try to find entry price from recent orders
+        let entry_price: Option<f64> = sqlx::query_scalar(
+            "SELECT fill_price FROM orders WHERE ticker = $1 AND status = 'filled' ORDER BY created_at DESC LIMIT 1"
+        )
+        .bind(&pos.ticker)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+        let exposure = pos.market_exposure.unwrap_or(0);
+        let direction = if exposure > 0 { "yes" } else { "no" };
+
+        tracker.record_entry(
+            &pos.ticker,
+            direction,
+            exposure.unsigned_abs() as i64,
+            entry_price.unwrap_or(0.5),
+        );
+
+        info!(
+            ticker = %pos.ticker,
+            direction,
+            size = exposure,
+            "restored position from Kalshi"
+        );
+    }
+
+    Ok(())
+}
+
 /// Run the execution loop: subscribe to NATS and process signals.
 pub async fn run(
     config: &Config,
@@ -131,6 +200,12 @@ pub async fn run(
 
     let mut tracker = PositionTracker::new();
     let mut daily_pnl = DailyPnl::new();
+    let mut cached_balance = CachedBalance::new();
+
+    // Restore positions from Kalshi on startup
+    if let Err(e) = load_positions(&kalshi, &pool, &mut tracker).await {
+        warn!(error = %e, "failed to load positions on startup (continuing with empty tracker)");
+    }
 
     while let Some(msg) = subscriber.next().await {
         let start = Instant::now();
@@ -163,6 +238,10 @@ pub async fn run(
                             latency_ms = %latency.as_millis(),
                             "exit order executed"
                         );
+                        // Refresh balance after order
+                        if let Ok(balance) = kalshi.get_balance().await {
+                            cached_balance.update(balance.balance);
+                        }
                     }
                     Err(e) => error!(ticker = %signal.ticker, error = %e, "exit order failed"),
                 }
@@ -171,7 +250,7 @@ pub async fn run(
         }
 
         // Entry signal — apply risk checks
-        if let Err(reason) = check_risk(config, &signal, &tracker, &daily_pnl) {
+        if let Err(reason) = check_risk(config, &signal, &tracker, &daily_pnl, &cached_balance) {
             warn!(ticker = %signal.ticker, reason = %reason, "signal rejected by risk check");
             continue;
         }
@@ -184,6 +263,10 @@ pub async fn run(
                     latency_ms = %latency.as_millis(),
                     "entry order executed"
                 );
+                // Refresh balance after order
+                if let Ok(balance) = kalshi.get_balance().await {
+                    cached_balance.update(balance.balance);
+                }
             }
             Err(e) => error!(ticker = %signal.ticker, error = %e, "entry order failed"),
         }
@@ -197,6 +280,7 @@ fn check_risk(
     signal: &Signal,
     tracker: &PositionTracker,
     daily_pnl: &DailyPnl,
+    balance: &CachedBalance,
 ) -> std::result::Result<(), String> {
     // No double-entry
     if tracker.has_position(&signal.ticker) {
@@ -227,6 +311,15 @@ fn check_risk(
         return Err("would exceed max exposure".into());
     }
 
+    // Check against actual Kalshi balance
+    if balance.balance_cents != i64::MAX {
+        let effective_max = (balance.balance_cents as f64 * 0.8) as i64;
+        let max_exposure = (config.max_exposure_cents as i64).min(effective_max);
+        if tracker.total_exposure() + size > max_exposure {
+            return Err("would exceed available balance".into());
+        }
+    }
+
     Ok(())
 }
 
@@ -251,15 +344,23 @@ async fn execute_entry(
         Utc::now().timestamp_millis()
     );
 
+    // Use limit order at market price for fee savings (resting orders exempt from fees)
+    let price_cents = (signal.market_price * 100.0).round() as i64;
+    let (yes_price, no_price) = if signal.direction == "yes" {
+        (Some(price_cents), None)
+    } else {
+        (None, Some(price_cents))
+    };
     let order_req = OrderRequest {
         ticker: signal.ticker.clone(),
         action: "buy".to_string(),
         side: signal.direction.clone(),
-        r#type: "market".to_string(),
+        r#type: "limit".to_string(),
         count: size_cents,
-        yes_price: None,
-        no_price: None,
+        yes_price,
+        no_price,
         client_order_id: Some(idempotency_key.clone()),
+        expiration_time: None,
     };
 
     if config.paper_mode {
@@ -342,6 +443,7 @@ async fn execute_exit(
         yes_price: None,
         no_price: None,
         client_order_id: Some(idempotency_key.clone()),
+        expiration_time: None,
     };
 
     if config.paper_mode {
@@ -398,6 +500,66 @@ async fn record_order(
     .execute(pool)
     .await
     .context("Failed to record order")?;
+
+    Ok(())
+}
+
+/// Poll for settlements and update P&L tracking.
+pub async fn poll_settlements(
+    kalshi: &KalshiClient,
+    pool: &sqlx::PgPool,
+    tracker: &mut PositionTracker,
+    daily_pnl: &mut DailyPnl,
+) -> Result<()> {
+    let since = Utc::now() - chrono::Duration::hours(24);
+    let settlements = kalshi.get_settlements(since).await?;
+
+    for settlement in settlements {
+        if !tracker.has_position(&settlement.ticker) {
+            continue;
+        }
+
+        let result = settlement.result.as_deref().unwrap_or("unknown");
+
+        // Calculate actual P&L from settlement before removing position
+        let pnl_cents = if let Some(pos) = tracker.get_position(&settlement.ticker) {
+            match (result, pos.direction.as_str()) {
+                ("yes", "yes") | ("no", "no") => {
+                    // Won: receive 100 cents per contract, paid entry_price * size
+                    (100.0 - pos.entry_price * 100.0) as i64 * pos.size_cents / 100
+                }
+                _ => {
+                    // Lost: paid entry_price * size, receive nothing
+                    -(pos.entry_price * 100.0) as i64 * pos.size_cents / 100
+                }
+            }
+        } else {
+            0
+        };
+
+        daily_pnl.record_pnl(pnl_cents);
+
+        info!(
+            ticker = %settlement.ticker,
+            result,
+            pnl_cents,
+            "settlement processed"
+        );
+
+        tracker.remove_position(&settlement.ticker);
+
+        // Record to daily_summary
+        let _ = sqlx::query(
+            "INSERT INTO daily_summary (date, net_pnl_cents, total_orders) \
+             VALUES (CURRENT_DATE, $1, 1) \
+             ON CONFLICT (date) DO UPDATE SET \
+             net_pnl_cents = daily_summary.net_pnl_cents + $1, \
+             total_orders = daily_summary.total_orders + 1"
+        )
+        .bind(pnl_cents)
+        .execute(pool)
+        .await;
+    }
 
     Ok(())
 }

@@ -33,6 +33,7 @@ class SignalSchema(BaseModel):
     minutes_remaining: float = Field(ge=0.0)
     spread: float = Field(ge=0.0, default=0.0)
     order_imbalance: float = Field(ge=0.0, le=1.0, default=0.5)
+    confidence: float = 1.0
     published_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

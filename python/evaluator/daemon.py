@@ -44,6 +44,7 @@ class EvaluationDaemon:
         self.notifier = DiscordNotifier(self.settings.discord_webhook_url or None)
         self._shutdown = asyncio.Event()
         self._last_blackout_refresh: datetime | None = None
+        self._signal_outcomes: list[bool] = []  # Rolling window of recent outcomes
 
     async def run(self) -> None:
         """Initialize connections, register evaluators, run evaluation loop."""
@@ -86,6 +87,7 @@ class EvaluationDaemon:
         try:
             await asyncio.gather(
                 self._evaluation_loop(),
+                self._fast_evaluation_loop(),
                 self.btc_feed.connect(),
                 return_exceptions=True,
             )
@@ -106,6 +108,123 @@ class EvaluationDaemon:
                 logger.exception("evaluation_cycle_error")
 
             await self._sleep_or_shutdown(interval)
+
+    def _get_recent_accuracy(self) -> tuple[float | None, int]:
+        """Get accuracy from recent signal outcomes."""
+        if not self._signal_outcomes:
+            return None, 0
+        recent = self._signal_outcomes[-50:]
+        return sum(recent) / len(recent), len(recent)
+
+    async def _fast_evaluation_loop(self) -> None:
+        """Fast-path loop: every 2s, evaluate contracts settling within 5 minutes."""
+        # Wait for BTC feed + initial data
+        await self._sleep_or_shutdown(10)
+
+        while not self._shutdown.is_set():
+            try:
+                await self._evaluate_near_expiry()
+            except Exception:
+                logger.exception("fast_evaluation_cycle_error")
+            await self._sleep_or_shutdown(2)
+
+    async def _evaluate_near_expiry(self) -> None:
+        """Evaluate only contracts within 5 minutes of settlement (fast path)."""
+        assert self.pool is not None
+        assert self.publisher is not None
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT ticker, category, city, station, threshold,
+                       settlement_time, status
+                FROM contracts
+                WHERE status = 'active'
+                  AND settlement_time > now()
+                  AND settlement_time < now() + interval '5 minutes'
+                """
+            )
+
+        if not rows:
+            return
+
+        btc_state = self.btc_feed.get_state()
+
+        # Use Redis orderbook data (fresher than DB)
+        orderbook_overrides = await self._fetch_redis_orderbooks(
+            [r["ticker"] for r in rows]
+        )
+
+        # Get latest snapshots for fallback
+        async with self.pool.acquire() as conn:
+            snapshot_rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (ticker)
+                    ticker, yes_price, no_price, spread,
+                    best_bid, best_ask, bid_depth, ask_depth
+                FROM market_snapshots
+                WHERE captured_at > now() - interval '2 minutes'
+                ORDER BY ticker, captured_at DESC
+                """
+            )
+        snapshots = {r["ticker"]: r for r in snapshot_rows}
+
+        for row in rows:
+            ticker = row["ticker"]
+            contract = Contract(
+                ticker=ticker,
+                category=row["category"] or "",
+                city=row["city"],
+                station=row["station"],
+                threshold=row["threshold"],
+                settlement_time=row["settlement_time"],
+                status=row["status"],
+            )
+
+            orderbook = self._build_orderbook(ticker, snapshots, orderbook_overrides)
+            if orderbook is None:
+                continue
+
+            signal_type = self._infer_signal_type(contract)
+            evaluator = self.registry.get(signal_type)
+            if evaluator is None:
+                continue
+
+            try:
+                if signal_type == "weather":
+                    asos_obs = await fetch_all_stations(
+                        self.settings.asos_stations,
+                        mesonet_base_url=self.settings.mesonet_base_url,
+                    )
+                    station = contract.station or "KORD"
+                    obs = asos_obs.get(station) if asos_obs else None
+                    if obs is None:
+                        continue
+                    sig, rej, state = evaluator.evaluate(
+                        contract=contract,
+                        observation=obs,
+                        orderbook=orderbook,
+                    )
+                elif signal_type == "crypto":
+                    vol = btc_state.ewma_vol_30m or btc_state.realized_vol_30m
+                    sig, rej, state = evaluator.evaluate(
+                        contract=contract,
+                        spot_price=btc_state.spot_price,
+                        realized_vol=vol,
+                        btc_last_updated=btc_state.last_updated,
+                        orderbook=orderbook,
+                    )
+                else:
+                    continue
+
+                await self.publisher.publish_model_state(state)
+                if sig is not None:
+                    await self.publisher.publish(sig)
+                    await self.notifier.notify_signal(sig)
+                elif rej is not None:
+                    await self.publisher.publish_rejection(rej)
+            except Exception:
+                logger.exception("fast_evaluate_error", ticker=ticker)
 
     async def _evaluate_all(self) -> None:
         """Evaluate all active contracts nearing settlement."""

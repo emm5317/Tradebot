@@ -71,6 +71,55 @@ def compute_effective_edge(
     return effective
 
 
+def compute_dynamic_kelly_multiplier(
+    base_multiplier: float,
+    recent_accuracy: float | None,
+    signal_count: int,
+) -> float:
+    """Scale Kelly multiplier based on recent signal accuracy.
+
+    If accuracy > 60% over last 50+ signals, scale up (1.5x).
+    If accuracy < 45%, scale down (0.5x).
+    Otherwise use base multiplier.
+
+    Returns multiplier clamped to [0.1, 0.5].
+    """
+    if recent_accuracy is None or signal_count < 20:
+        return base_multiplier
+
+    if recent_accuracy > 0.60:
+        scaled = base_multiplier * 1.5
+    elif recent_accuracy < 0.45:
+        scaled = base_multiplier * 0.5
+    else:
+        scaled = base_multiplier
+
+    return max(0.1, min(0.5, scaled))
+
+
+def compute_confidence(spread: float, minutes_remaining: float) -> float:
+    """Compute signal confidence from spread and time to expiry.
+
+    Tight spread = high confidence, wide spread = low confidence.
+    More time = higher confidence, less time = lower confidence.
+
+    Returns a value in [0.1, 1.0].
+    """
+    # Spread factor: 1.0 at spread=0, 0.0 at spread=0.20
+    spread_factor = max(0.0, 1.0 - spread / 0.20)
+
+    # Time decay: 1.0 at 30 min, 0.5 at 2 min
+    if minutes_remaining >= 30.0:
+        time_factor = 1.0
+    elif minutes_remaining <= 2.0:
+        time_factor = 0.5
+    else:
+        time_factor = 0.5 + 0.5 * (minutes_remaining - 2.0) / 28.0
+
+    confidence = spread_factor * time_factor
+    return max(0.1, min(1.0, confidence))
+
+
 def determine_direction(
     model_prob: float, market_price: float
 ) -> tuple[str, float]:
