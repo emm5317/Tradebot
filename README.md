@@ -2,6 +2,8 @@
 
 Automated binary options trading system for Kalshi, targeting weather and crypto markets. Dual-language architecture: Python signal engine + Rust execution layer, connected via NATS messaging.
 
+> **Build Status**: All 10 planned improvement phases are implemented. See [docs/BUILD_STATUS.md](docs/BUILD_STATUS.md) for detailed completion status and known issues.
+
 ## Architecture
 
 ```
@@ -9,7 +11,7 @@ Automated binary options trading system for Kalshi, targeting weather and crypto
 │                   PYTHON SIGNAL ENGINE                        │
 ├──────────────────────────────────────────────────────────────┤
 │  CollectorDaemon (always-on, 60s cycles)                     │
-│  ├─ ASOS weather observations (5 stations, concurrent)       │
+│  ├─ ASOS weather observations (10 stations, concurrent)      │
 │  ├─ Kalshi market snapshots (near-settlement contracts)      │
 │  └─ Binance BTC spot + 30-min realized volatility            │
 │                                                              │
@@ -92,18 +94,21 @@ Tradebot/
 │   └── tests/
 ├── rust/
 │   ├── src/
-│   │   ├── main.rs           # Entry point, NATS consumer, execution loop
-│   │   ├── config.rs         # Configuration from env vars
-│   │   ├── logging.rs        # Structured logging (tracing)
-│   │   └── kalshi/           # Kalshi exchange integration
-│   │       ├── auth.rs       # RSA-PSS request signing
-│   │       ├── client.rs     # REST API client
-│   │       ├── websocket.rs  # Orderbook WebSocket feed
-│   │       ├── orderbook.rs  # In-memory orderbook (DashMap)
-│   │       ├── types.rs      # API types
-│   │       └── error.rs      # Error handling
-│   └── Cargo.toml
-└── justfile                  # Task runner
+│   │   ├── main.rs            # Entry point, service orchestration, graceful shutdown
+│   │   ├── config.rs          # Configuration from env vars (envy)
+│   │   ├── logging.rs         # Structured logging (tracing, JSON/pretty)
+│   │   ├── execution.rs       # NATS signal consumer, risk checks, order execution
+│   │   ├── orderbook_feed.rs  # WebSocket → in-memory orderbook → Redis bridge
+│   │   └── kalshi/            # Kalshi exchange integration
+│   │       ├── auth.rs        # RSA-PSS request signing
+│   │       ├── client.rs      # REST API client (retry, error parsing)
+│   │       ├── websocket.rs   # Persistent WS feed (auto-reconnect)
+│   │       ├── orderbook.rs   # In-memory orderbook (BTreeMap, DashMap)
+│   │       ├── types.rs       # API types (Market, Order, Position)
+│   │       └── error.rs       # Error handling (KalshiError enum)
+│   ├── Cargo.toml
+│   └── Cargo.lock
+└── justfile                   # Task runner
 ```
 
 ## Quick Start
@@ -112,7 +117,7 @@ Tradebot/
 # 1. Infrastructure
 just db-up                     # Start Postgres, Redis, NATS
 
-# 2. Migrate
+# 2. Configure & migrate
 cp config/.env.example .env    # Configure credentials
 just migrate                   # Run SQL migrations
 
@@ -120,16 +125,19 @@ just migrate                   # Run SQL migrations
 just collector                 # Start data collection daemon
 
 # 4. Run evaluator (after collector has data)
-cd python && python -m evaluator.daemon
+just evaluator                 # Signal evaluation loop (10s cycle)
 
 # 5. Start execution engine
 just dev                       # Rust NATS consumer + order execution
 
 # 6. Dashboard
-cd python && python -m dashboard.app   # Terminal-style UI on :8050
+just dashboard                 # Terminal-style UI on :8050
 
 # 7. Run tests
 just test-all                  # Rust + Python tests
+
+# 8. Backtest (optional)
+just backtest 2024-01-01 2024-06-30   # Historical replay
 ```
 
 ## Trading Models
@@ -173,9 +181,26 @@ Key environment variables (see `config/.env.example` for full list):
 ## Development
 
 ```bash
-just test-python     # Python tests (pytest)
+just test-python     # Python tests (pytest, 11 test files)
 just test            # Rust tests (cargo test)
 just test-all        # Both
 just fmt             # Format Rust code
 just clippy          # Rust lints
+just health          # Check system health (requires running dashboard)
 ```
+
+## Risk Controls
+
+The system enforces multiple safety layers:
+
+| Control | Default | Description |
+|---------|---------|-------------|
+| Paper mode | `true` | Logs orders without executing — must explicitly disable |
+| Max trade size | $25 | Per-order size cap |
+| Daily loss limit | $100 | Circuit breaker stops all trading |
+| Max positions | 5 | Concurrent position limit |
+| Max exposure | $150 | Total capital at risk |
+| Kelly multiplier | 0.25 | Quarter-Kelly for conservative sizing |
+| Signal cooldown | 300s | Prevents signal flooding per ticker |
+| Idempotency keys | — | Prevents duplicate fills on NATS redelivery |
+| Blackout windows | — | Pauses crypto trading during FOMC/scheduled events |
