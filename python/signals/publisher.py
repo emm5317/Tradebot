@@ -113,6 +113,71 @@ class SignalPublisher:
         except Exception:
             logger.exception("redis_model_state_failed", ticker=state.ticker)
 
+    async def publish_model_evaluation(
+        self,
+        ticker: str,
+        signal_type: str,
+        model_prob: float | None,
+        market_price: float | None,
+        edge: float | None,
+        direction: str | None,
+        inputs: dict | None = None,
+        components: dict | None = None,
+        confidence: float | None = None,
+        acted_on: bool = False,
+    ) -> None:
+        """Persist full model evaluation snapshot for replay and attribution.
+
+        Called every evaluation cycle for every contract, not just signals.
+        """
+        if self.db_pool is None:
+            return
+
+        asyncio.create_task(
+            self._persist_evaluation(
+                ticker, signal_type, model_prob, market_price,
+                edge, direction, inputs, components, confidence, acted_on,
+            )
+        )
+
+    async def _persist_evaluation(
+        self,
+        ticker: str,
+        signal_type: str,
+        model_prob: float | None,
+        market_price: float | None,
+        edge: float | None,
+        direction: str | None,
+        inputs: dict | None,
+        components: dict | None,
+        confidence: float | None,
+        acted_on: bool,
+    ) -> None:
+        """Insert into model_evaluations table."""
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO model_evaluations (
+                        ticker, signal_type, model_prob, market_price,
+                        edge, direction, inputs, components,
+                        confidence, acted_on
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    """,
+                    ticker,
+                    signal_type,
+                    model_prob,
+                    market_price,
+                    edge,
+                    direction,
+                    json.dumps(inputs) if inputs else None,
+                    json.dumps(components) if components else None,
+                    confidence,
+                    acted_on,
+                )
+        except Exception:
+            logger.debug("evaluation_persist_skipped", ticker=ticker)
+
     async def _persist_signal(self, signal: SignalSchema) -> None:
         """Insert signal into signals table."""
         try:
