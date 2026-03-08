@@ -2,11 +2,14 @@ mod config;
 mod execution;
 mod kalshi;
 mod logging;
+mod orderbook_feed;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fred::interfaces::ClientLike;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -69,6 +72,37 @@ async fn main() -> Result<()> {
         config.kalshi_base_url.clone(),
     )?;
 
+    // Shared cancellation token for graceful shutdown
+    let cancel = CancellationToken::new();
+
+    // Start Kalshi WebSocket feed → OrderbookManager → Redis pipeline
+    let orderbooks = Arc::new(kalshi::orderbook::OrderbookManager::new());
+    let (ws_tx, ws_rx) = tokio::sync::mpsc::channel(1024);
+
+    let ws_auth = kalshi::auth::KalshiAuth::new(
+        config.kalshi_api_key.clone(),
+        &config.kalshi_private_key_path,
+    ).context("Failed to create WS auth")?;
+
+    let ws_feed = kalshi::websocket::KalshiWsFeed::new(
+        config.kalshi_ws_url.clone(),
+        ws_auth,
+        cancel.clone(),
+    );
+
+    let ws_handle = tokio::spawn(async move {
+        ws_feed.run(ws_tx).await;
+    });
+
+    let orderbook_handle = tokio::spawn({
+        let orderbooks = Arc::clone(&orderbooks);
+        let redis = redis.clone();
+        let cancel = cancel.clone();
+        async move {
+            orderbook_feed::run(ws_rx, orderbooks, redis.clone(), cancel).await;
+        }
+    });
+
     tracing::info!(
         paper_mode = config.paper_mode,
         max_trade_size = config.max_trade_size_cents,
@@ -76,7 +110,7 @@ async fn main() -> Result<()> {
         "all systems operational — tradebot ready"
     );
 
-    // Run execution engine with graceful shutdown
+    // Run execution engine
     let execution_handle = tokio::spawn({
         let config = config.clone();
         let pool = pool.clone();
@@ -91,10 +125,13 @@ async fn main() -> Result<()> {
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutting down");
 
+    cancel.cancel();
     execution_handle.abort();
 
     // Graceful shutdown with 10s timeout
     let shutdown = async {
+        let _ = ws_handle.await;
+        let _ = orderbook_handle.await;
         pool.close().await;
         let _ = redis.quit().await;
     };
