@@ -4,6 +4,7 @@
 //! applies risk checks, and places orders via the Kalshi REST API.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -13,9 +14,11 @@ use serde::Deserialize;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
+use crate::feed_health::FeedHealth;
 use crate::kalshi::client::KalshiClient;
 use crate::kalshi::error::KalshiError;
 use crate::kalshi::types::OrderRequest;
+use crate::kill_switch::KillSwitchState;
 
 /// Signal schema matching the Python SignalSchema.
 #[derive(Debug, Deserialize)]
@@ -117,6 +120,8 @@ pub async fn run(
     nats: async_nats::Client,
     pool: sqlx::PgPool,
     kalshi: KalshiClient,
+    kill_switch: Arc<KillSwitchState>,
+    feed_health: Arc<FeedHealth>,
 ) -> Result<()> {
     let mut subscriber = nats
         .subscribe("tradebot.signals")
@@ -147,6 +152,26 @@ pub async fn run(
             kelly = %signal.kelly_fraction,
             "signal received"
         );
+
+        // Check kill switch
+        if kill_switch.is_blocked(&signal.signal_type) {
+            warn!(
+                ticker = %signal.ticker,
+                signal_type = %signal.signal_type,
+                "signal blocked by kill switch"
+            );
+            continue;
+        }
+
+        // Check feed health
+        if let Err(stale_feeds) = feed_health.required_feeds_healthy(&signal.signal_type) {
+            warn!(
+                ticker = %signal.ticker,
+                stale_feeds = ?stale_feeds,
+                "signal blocked by stale feeds"
+            );
+            continue;
+        }
 
         // Handle exit signals
         if signal.action == "exit" {
@@ -268,7 +293,8 @@ async fn execute_entry(
         );
         tracker.record_entry(&signal.ticker, &signal.direction, size_cents, signal.market_price);
 
-        // Record paper order to DB
+        // Record paper trade with full signal parameters
+        record_paper_trade(pool, signal, size_cents).await?;
         record_order(pool, signal, size_cents, &idempotency_key, "filled", None, 0).await?;
         return Ok(());
     }
@@ -392,6 +418,36 @@ async fn record_order(
     .execute(pool)
     .await
     .context("Failed to record order")?;
+
+    Ok(())
+}
+
+/// Record a paper trade with full signal parameters for analysis.
+async fn record_paper_trade(
+    pool: &sqlx::PgPool,
+    signal: &Signal,
+    size_cents: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO paper_trades (
+            ticker, direction, action, size_cents,
+            model_prob, market_price, edge, kelly_fraction, signal_type
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(&signal.ticker)
+    .bind(&signal.direction)
+    .bind(&signal.action)
+    .bind(size_cents as i32)
+    .bind(signal.model_prob as f32)
+    .bind(signal.market_price as f32)
+    .bind(signal.edge as f32)
+    .bind(signal.kelly_fraction as f32)
+    .bind(&signal.signal_type)
+    .execute(pool)
+    .await
+    .context("Failed to record paper trade")?;
 
     Ok(())
 }

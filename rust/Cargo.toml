@@ -28,6 +28,9 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
+# HTTP server (kill switch, health endpoints)
+axum = "0.8"
+
 # WebSocket
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"

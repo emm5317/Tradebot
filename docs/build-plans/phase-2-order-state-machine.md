@@ -1,0 +1,169 @@
+# Phase 2 — Order State Machine
+
+**Timeline:** Weeks 4–8
+**Risk:** HIGH
+**Goal:** Replace fire-and-forget order submission with a robust state machine that handles partial fills, cancellations, and restart recovery
+
+---
+
+## 2.1 Order State Machine Enum
+
+### Problem
+Current `execution.rs` treats orders as fire-and-forget: submit, assume filled, move on. No tracking of order lifecycle, no handling of partial fills or rejections.
+
+### Implementation
+
+**New file:** `rust/src/order_state.rs`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderState {
+    /// Signal received, pre-validation
+    Pending,
+    /// Risk checks passed, about to submit
+    Submitting,
+    /// Sent to exchange, waiting for ACK
+    Acknowledged,
+    /// Partially filled (qty > 0 but < requested)
+    PartialFill,
+    /// Completely filled
+    Filled,
+    /// Cancel requested
+    CancelPending,
+    /// Cancel confirmed by exchange
+    Cancelled,
+    /// Cancel+replace in flight
+    Replacing,
+    /// Exchange rejected the order
+    Rejected,
+    /// Unknown state (needs reconciliation)
+    Unknown,
+}
+```
+
+**Transition rules (enforced):**
+- `Pending → Submitting` (risk check passed)
+- `Submitting → Acknowledged` (exchange ACK received)
+- `Acknowledged → PartialFill | Filled | Rejected`
+- `PartialFill → Filled | CancelPending | Replacing`
+- `CancelPending → Cancelled | Filled` (race condition: fill arrives before cancel ACK)
+- `Replacing → Acknowledged | Rejected`
+- Any state → `Unknown` (connection lost mid-operation)
+
+Every transition logged with tracing at INFO level.
+
+**Order struct:**
+```rust
+struct ManagedOrder {
+    client_order_id: String,
+    kalshi_order_id: Option<String>,
+    ticker: String,
+    direction: String,
+    requested_qty: i64,
+    filled_qty: i64,
+    state: OrderState,
+    created_at: Instant,
+    transitions: Vec<(OrderState, Instant)>,
+}
+```
+
+---
+
+## 2.2 Idempotency Keys and Client Order IDs
+
+### Problem
+Current idempotency key is `{ticker}-{direction}-{timestamp_ms}` which is not deterministic across retries.
+
+### Implementation
+- Client order ID format: `tb-{signal_hash}-{sequence}` where `signal_hash` is a deterministic hash of signal parameters
+- Sequence number increments on retry (same signal, different attempt)
+- Kalshi's `client_order_id` field used for idempotent submission
+- DB `orders` table: add `client_order_id` column with unique constraint
+
+---
+
+## 2.3 Cancel/Replace Semantics
+
+### Problem
+No ability to cancel or modify live orders. If market moves after submission, order sits at stale price.
+
+### Implementation
+- `cancel_order(client_order_id)` → Kalshi DELETE endpoint
+- `replace_order(client_order_id, new_price)` → cancel + resubmit (Kalshi doesn't support atomic modify)
+- State transitions: `Acknowledged → CancelPending → Cancelled → Submitting`
+- Timeout: if cancel not ACKed within 5s, mark Unknown and reconcile
+
+---
+
+## 2.4 Partial Fill Handling
+
+### Problem
+Current code assumes all-or-nothing fills. Partial fills leave phantom positions.
+
+### Implementation
+- Track `filled_qty` vs `requested_qty`
+- On partial fill: update position tracker with actual filled amount
+- Decision: hold partial position (don't auto-cancel remainder)
+- Remainder auto-expires if market order (Kalshi market orders fill-or-kill)
+- For future limit orders: implement cancel-remainder logic
+
+---
+
+## 2.5 Restart Recovery (Reconciliation)
+
+### Problem
+On restart, position tracker is empty. Open positions from previous session are invisible.
+
+### Implementation
+
+**Startup reconciliation gate:**
+1. On startup, before processing any new signals, query Kalshi REST API for open orders
+2. Query `orders` table for orders with `status IN ('pending', 'filled')` and `settled_at IS NULL`
+3. Reconcile: mark orders that were filled on Kalshi but not in DB
+4. Rebuild position tracker from reconciled state
+5. Log discrepancies at WARN level
+6. Block signal processing until reconciliation completes
+
+**New migration:** `014_order_state_tracking.sql`
+- Add `state` column to `orders` (enum matching OrderState)
+- Add `filled_qty` column
+- Add `transitions` JSONB column for audit trail
+
+---
+
+## 2.6 Execution Safeguards
+
+### Problem
+Various edge cases can cause bad order submission: stale orderbook, rate limiting, rapid-fire signals.
+
+### Implementation
+
+**Stale-book prevention:**
+- Check orderbook `updated_at` timestamp before order submission
+- If orderbook data >5s old, reject signal with reason
+
+**Rate-limit backoff:**
+- Track Kalshi API rate limit headers (X-RateLimit-Remaining, X-RateLimit-Reset)
+- When remaining < 10: exponential backoff
+- When remaining = 0: pause all order submission until reset
+
+**Duplicate signal suppression:**
+- Per-ticker cooldown (already exists at 300s in Python)
+- Add Rust-side dedup: reject if same ticker+direction signal received within 30s
+
+**Max order frequency:**
+- Global: max 10 orders per minute
+- Per-ticker: max 2 orders per 5 minutes
+- Configurable via env vars
+
+---
+
+## Verification Checklist
+
+- [ ] All 10 order states reachable and logged
+- [ ] Invalid state transitions panic in debug, warn in release
+- [ ] Client order IDs are deterministic for same signal
+- [ ] Startup reconciliation correctly rebuilds position tracker
+- [ ] Partial fills tracked accurately
+- [ ] Rate limit backoff prevents 429 errors
+- [ ] Stale orderbook detection blocks orders

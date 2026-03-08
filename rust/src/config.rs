@@ -20,10 +20,14 @@ pub struct Config {
     pub binance_futures_ws_url: String,
     #[serde(default = "default_deribit_ws_url")]
     pub deribit_ws_url: String,
+    #[serde(default = "default_binance_spot_ws_url")]
+    pub binance_spot_ws_url: String,
     #[serde(default)]
     pub enable_coinbase: bool,
     #[serde(default)]
     pub enable_binance_futures: bool,
+    #[serde(default)]
+    pub enable_binance_spot: bool,
     #[serde(default)]
     pub enable_deribit: bool,
 
@@ -42,6 +46,14 @@ pub struct Config {
 
     pub discord_webhook_url: Option<String>,
     pub http_port: u16,
+
+    // Kill switches (default: false = trading enabled)
+    #[serde(default)]
+    pub kill_switch_all: bool,
+    #[serde(default)]
+    pub kill_switch_crypto: bool,
+    #[serde(default)]
+    pub kill_switch_weather: bool,
 }
 
 fn default_db_pool_size() -> u32 {
@@ -54,6 +66,10 @@ fn default_coinbase_ws_url() -> String {
 
 fn default_binance_futures_ws_url() -> String {
     "wss://fstream.binance.com".to_string()
+}
+
+fn default_binance_spot_ws_url() -> String {
+    "wss://stream.binance.com:9443/ws/btcusdt@trade".to_string()
 }
 
 fn default_deribit_ws_url() -> String {

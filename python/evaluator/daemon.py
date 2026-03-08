@@ -16,7 +16,6 @@ import redis.asyncio as aioredis
 import structlog
 
 from config import Settings, get_settings
-from data.binance_ws import BinanceFeed
 from data.mesonet import fetch_all_stations
 from models.physics import build_climo_table, build_sigma_table
 from rules.resolver import ContractRulesResolver
@@ -39,7 +38,6 @@ class EvaluationDaemon:
         self.nc: nats.NATS | None = None
         self.redis: aioredis.Redis | None = None
         self.publisher: SignalPublisher | None = None
-        self.btc_feed = BinanceFeed(ws_url=self.settings.binance_ws_url)
         self.registry = EvaluatorRegistry()
         self.rules_resolver = ContractRulesResolver()
         self.notifier = DiscordNotifier(self.settings.discord_webhook_url or None)
@@ -90,11 +88,7 @@ class EvaluationDaemon:
         )
 
         try:
-            await asyncio.gather(
-                self._evaluation_loop(),
-                self.btc_feed.connect(),
-                return_exceptions=True,
-            )
+            await self._evaluation_loop()
         finally:
             await self._cleanup()
 
@@ -102,7 +96,7 @@ class EvaluationDaemon:
         """Main loop: every N seconds, evaluate all near-settlement contracts."""
         interval = self.settings.evaluation_interval_seconds
 
-        # Wait for BTC feed to establish
+        # Wait for Rust feeds to establish and write to Redis
         await self._sleep_or_shutdown(5)
 
         while not self._shutdown.is_set():
@@ -139,7 +133,7 @@ class EvaluationDaemon:
             self.settings.asos_stations,
             mesonet_base_url=self.settings.mesonet_base_url,
         )
-        btc_state = self.btc_feed.get_state()
+        btc_state = await self._fetch_btc_state_from_redis()
 
         # Fetch latest market snapshots for orderbook state
         async with self.pool.acquire() as conn:
@@ -208,12 +202,17 @@ class EvaluationDaemon:
                         orderbook=orderbook,
                     )
                 elif signal_type == "crypto":
-                    vol = btc_state.ewma_vol_30m or btc_state.realized_vol_30m
+                    if btc_state is None:
+                        continue
+                    vol = btc_state.get("ewma_vol_30m") or btc_state.get("realized_vol_30m")
+                    btc_updated = btc_state.get("updated_at")
+                    if btc_updated:
+                        btc_updated = datetime.fromisoformat(btc_updated)
                     sig, rej, state = evaluator.evaluate(
                         contract=contract,
-                        spot_price=btc_state.spot_price,
+                        spot_price=btc_state.get("spot_price", 0.0),
                         realized_vol=vol,
-                        btc_last_updated=btc_state.last_updated,
+                        btc_last_updated=btc_updated or datetime.now(timezone.utc),
                         orderbook=orderbook,
                     )
                 else:
@@ -276,6 +275,20 @@ class EvaluationDaemon:
 
         return None
 
+    async def _fetch_btc_state_from_redis(self) -> dict | None:
+        """Fetch BTC spot price and volatility from Redis (written by Rust feed)."""
+        if self.redis is None:
+            return None
+        try:
+            import json
+
+            raw = await self.redis.get("crypto:binance_spot")
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            logger.warning("btc_state_redis_fetch_failed", exc_info=True)
+        return None
+
     async def _fetch_redis_orderbooks(self, tickers: list[str]) -> dict:
         """Fetch orderbook summaries from Redis (written by Rust WS feed)."""
         if self.redis is None:
@@ -311,7 +324,6 @@ class EvaluationDaemon:
 
     def shutdown(self) -> None:
         self._shutdown.set()
-        self.btc_feed.stop()
 
 
 async def main() -> None:

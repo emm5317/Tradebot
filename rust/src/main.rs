@@ -1,7 +1,9 @@
 mod config;
 mod execution;
+mod feed_health;
 mod feeds;
 mod kalshi;
+mod kill_switch;
 mod logging;
 mod orderbook_feed;
 
@@ -24,6 +26,17 @@ async fn main() -> Result<()> {
 
     logging::init(&config.log_level, &config.log_format);
     config.log_startup();
+
+    // Paper mode startup guard (Phase 0.3)
+    if !config.paper_mode {
+        tracing::warn!("LIVE TRADING MODE — PAPER_MODE=false");
+        tracing::warn!(
+            kalshi_base_url = %config.kalshi_base_url,
+            "Orders will be submitted with real money"
+        );
+    } else {
+        tracing::info!("Paper trading mode active — no real orders will be submitted");
+    }
 
     // Connect to PostgreSQL with configurable pool size
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -115,6 +128,16 @@ async fn main() -> Result<()> {
         tracing::info!("coinbase feed enabled");
     }
 
+    if config.enable_binance_spot {
+        let feed = feeds::binance_spot::BinanceSpotFeed::new(
+            config.binance_spot_ws_url.clone(),
+            cancel.clone(),
+        );
+        let redis_clone = redis.clone();
+        tokio::spawn(async move { feed.run(redis_clone).await });
+        tracing::info!("binance spot feed enabled");
+    }
+
     if config.enable_binance_futures {
         let feed = feeds::binance_futures::BinanceFuturesFeed::new(
             config.binance_futures_ws_url.clone(),
@@ -135,6 +158,33 @@ async fn main() -> Result<()> {
         tracing::info!("deribit dvol feed enabled");
     }
 
+    // Initialize kill switch state
+    let kill_switch = Arc::new(kill_switch::KillSwitchState::new(
+        config.kill_switch_all,
+        config.kill_switch_crypto,
+        config.kill_switch_weather,
+    ));
+
+    // Initialize feed health tracker
+    let feed_health = Arc::new(feed_health::FeedHealth::new());
+
+    // Start Axum HTTP server for kill switch and health endpoints
+    let http_app = kill_switch::router(Arc::clone(&kill_switch));
+    let http_port = config.http_port;
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(("0.0.0.0", http_port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(error = %e, port = http_port, "failed to bind HTTP server");
+                return;
+            }
+        };
+        tracing::info!(port = http_port, "http server listening");
+        if let Err(e) = axum::serve(listener, http_app).await {
+            tracing::error!(error = %e, "http server error");
+        }
+    });
+
     tracing::info!(
         paper_mode = config.paper_mode,
         max_trade_size = config.max_trade_size_cents,
@@ -146,8 +196,10 @@ async fn main() -> Result<()> {
     let execution_handle = tokio::spawn({
         let config = config.clone();
         let pool = pool.clone();
+        let ks = Arc::clone(&kill_switch);
+        let fh = Arc::clone(&feed_health);
         async move {
-            if let Err(e) = execution::run(&config, nats, pool, kalshi).await {
+            if let Err(e) = execution::run(&config, nats, pool, kalshi, ks, fh).await {
                 tracing::error!(error = %e, "execution engine failed");
             }
         }
