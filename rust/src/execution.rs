@@ -1,14 +1,13 @@
 //! NATS signal consumer and order execution engine.
 //!
 //! Subscribes to `tradebot.signals`, deserializes incoming signals,
-//! applies risk checks, and places orders via the Kalshi REST API.
+//! applies risk checks via OrderManager, and places orders via Kalshi.
+//! Phase 2: uses OrderManager state machine instead of fire-and-forget.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tracing::{error, info, warn};
@@ -18,9 +17,8 @@ use crate::crypto_fv;
 use crate::crypto_state::CryptoState;
 use crate::feed_health::FeedHealth;
 use crate::kalshi::client::KalshiClient;
-use crate::kalshi::error::KalshiError;
-use crate::kalshi::types::OrderRequest;
 use crate::kill_switch::KillSwitchState;
+use crate::order_manager::OrderManager;
 
 /// Signal schema matching the Python SignalSchema.
 #[derive(Debug, Deserialize)]
@@ -36,84 +34,6 @@ pub struct Signal {
     pub minutes_remaining: f64,
     pub spread: f64,
     pub order_imbalance: f64,
-}
-
-/// Tracks open positions to prevent double-entry.
-struct PositionTracker {
-    positions: HashMap<String, HeldPosition>,
-}
-
-struct HeldPosition {
-    direction: String,
-    size_cents: i64,
-    entry_price: f64,
-}
-
-impl PositionTracker {
-    fn new() -> Self {
-        Self {
-            positions: HashMap::new(),
-        }
-    }
-
-    fn has_position(&self, ticker: &str) -> bool {
-        self.positions.contains_key(ticker)
-    }
-
-    fn record_entry(&mut self, ticker: &str, direction: &str, size_cents: i64, price: f64) {
-        self.positions.insert(
-            ticker.to_string(),
-            HeldPosition {
-                direction: direction.to_string(),
-                size_cents,
-                entry_price: price,
-            },
-        );
-    }
-
-    fn remove_position(&mut self, ticker: &str) {
-        self.positions.remove(ticker);
-    }
-
-    fn count(&self) -> usize {
-        self.positions.len()
-    }
-
-    fn total_exposure(&self) -> i64 {
-        self.positions.values().map(|p| p.size_cents).sum()
-    }
-}
-
-/// Daily loss tracking for circuit breaker.
-struct DailyPnl {
-    date: chrono::NaiveDate,
-    net_pnl_cents: i64,
-}
-
-impl DailyPnl {
-    fn new() -> Self {
-        Self {
-            date: Utc::now().date_naive(),
-            net_pnl_cents: 0,
-        }
-    }
-
-    fn record_pnl(&mut self, cents: i64) {
-        let today = Utc::now().date_naive();
-        if today != self.date {
-            self.date = today;
-            self.net_pnl_cents = 0;
-        }
-        self.net_pnl_cents += cents;
-    }
-
-    fn current_loss(&self) -> i64 {
-        let today = Utc::now().date_naive();
-        if today != self.date {
-            return 0;
-        }
-        -self.net_pnl_cents.min(0)
-    }
 }
 
 /// Run the execution loop: subscribe to NATS and process signals.
@@ -170,324 +90,93 @@ pub async fn run(
         }
     });
 
-    let mut tracker = PositionTracker::new();
-    let mut daily_pnl = DailyPnl::new();
+    // Initialize order manager with startup reconciliation (Phase 2.5)
+    let mut order_mgr = OrderManager::new();
+    if let Err(e) = order_mgr.reconcile_on_startup(&kalshi, &pool).await {
+        warn!(error = %e, "startup reconciliation failed, continuing with empty state");
+    }
 
-    while let Some(msg) = subscriber.next().await {
-        let start = Instant::now();
+    // Periodic GC and kill switch check interval
+    let mut gc_interval = tokio::time::interval(std::time::Duration::from_secs(300));
+    let mut kill_check_interval = tokio::time::interval(std::time::Duration::from_secs(5));
 
-        let signal: Signal = match serde_json::from_slice(&msg.payload) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "failed to deserialize signal");
-                continue;
-            }
-        };
+    loop {
+        tokio::select! {
+            Some(msg) = subscriber.next() => {
+                let start = Instant::now();
 
-        info!(
-            ticker = %signal.ticker,
-            action = %signal.action,
-            direction = %signal.direction,
-            edge = %signal.edge,
-            kelly = %signal.kelly_fraction,
-            "signal received"
-        );
-
-        // Check kill switch
-        if kill_switch.is_blocked(&signal.signal_type) {
-            warn!(
-                ticker = %signal.ticker,
-                signal_type = %signal.signal_type,
-                "signal blocked by kill switch"
-            );
-            continue;
-        }
-
-        // Check feed health
-        if let Err(stale_feeds) = feed_health.required_feeds_healthy(&signal.signal_type) {
-            warn!(
-                ticker = %signal.ticker,
-                stale_feeds = ?stale_feeds,
-                "signal blocked by stale feeds"
-            );
-            continue;
-        }
-
-        // Handle exit signals
-        if signal.action == "exit" {
-            if tracker.has_position(&signal.ticker) {
-                match execute_exit(config, &kalshi, &pool, &signal, &mut tracker, &mut daily_pnl).await {
-                    Ok(()) => {
-                        let latency = start.elapsed();
-                        info!(
-                            ticker = %signal.ticker,
-                            latency_ms = %latency.as_millis(),
-                            "exit order executed"
-                        );
+                let signal: Signal = match serde_json::from_slice(&msg.payload) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(error = %e, "failed to deserialize signal");
+                        continue;
                     }
-                    Err(e) => error!(ticker = %signal.ticker, error = %e, "exit order failed"),
-                }
-            }
-            continue;
-        }
+                };
 
-        // Entry signal — apply risk checks
-        if let Err(reason) = check_risk(config, &signal, &tracker, &daily_pnl) {
-            warn!(ticker = %signal.ticker, reason = %reason, "signal rejected by risk check");
-            continue;
-        }
-
-        match execute_entry(config, &kalshi, &pool, &signal, &mut tracker).await {
-            Ok(()) => {
-                let latency = start.elapsed();
                 info!(
                     ticker = %signal.ticker,
-                    latency_ms = %latency.as_millis(),
-                    "entry order executed"
+                    action = %signal.action,
+                    direction = %signal.direction,
+                    edge = %format!("{:.4}", signal.edge),
+                    kelly = %format!("{:.4}", signal.kelly_fraction),
+                    "signal received"
                 );
+
+                // Handle exit signals
+                if signal.action == "exit" {
+                    if order_mgr.has_position(&signal.ticker) {
+                        match order_mgr.submit_exit(config, &kalshi, &pool, &signal, &crypto_state).await {
+                            Ok(()) => {
+                                info!(
+                                    ticker = %signal.ticker,
+                                    latency_ms = %start.elapsed().as_millis(),
+                                    "exit order processed"
+                                );
+                            }
+                            Err(e) => error!(ticker = %signal.ticker, error = %e, "exit order failed"),
+                        }
+                    }
+                    continue;
+                }
+
+                // Entry signal — apply risk checks (Phase 2.6)
+                if let Err(reason) = order_mgr.check_risk(config, &signal, &kill_switch, &feed_health) {
+                    warn!(ticker = %signal.ticker, reason = %reason, "signal rejected");
+                    continue;
+                }
+
+                // Submit entry via order manager (Phase 2.1)
+                match order_mgr.submit_entry(config, &kalshi, &pool, &signal, &crypto_state).await {
+                    Ok(()) => {
+                        info!(
+                            ticker = %signal.ticker,
+                            latency_ms = %start.elapsed().as_millis(),
+                            positions = order_mgr.position_count(),
+                            "entry order processed"
+                        );
+                    }
+                    Err(e) => error!(ticker = %signal.ticker, error = %e, "entry order failed"),
+                }
             }
-            Err(e) => error!(ticker = %signal.ticker, error = %e, "entry order failed"),
-        }
-    }
 
-    Ok(())
-}
-
-fn check_risk(
-    config: &Config,
-    signal: &Signal,
-    tracker: &PositionTracker,
-    daily_pnl: &DailyPnl,
-) -> std::result::Result<(), String> {
-    // No double-entry
-    if tracker.has_position(&signal.ticker) {
-        return Err("already holding position".into());
-    }
-
-    // Max positions
-    if tracker.count() >= config.max_positions as usize {
-        return Err(format!(
-            "max positions reached ({}/{})",
-            tracker.count(),
-            config.max_positions
-        ));
-    }
-
-    // Daily loss circuit breaker
-    if daily_pnl.current_loss() >= config.max_daily_loss_cents as i64 {
-        return Err(format!(
-            "daily loss limit reached ({} >= {})",
-            daily_pnl.current_loss(),
-            config.max_daily_loss_cents
-        ));
-    }
-
-    // Max exposure
-    let size = compute_order_size(config, signal);
-    if tracker.total_exposure() + size > config.max_exposure_cents as i64 {
-        return Err("would exceed max exposure".into());
-    }
-
-    Ok(())
-}
-
-fn compute_order_size(config: &Config, signal: &Signal) -> i64 {
-    let kelly_adjusted = signal.kelly_fraction * config.kelly_fraction_multiplier;
-    let size = (kelly_adjusted * 10000.0) as i64; // Convert to cents
-    size.min(config.max_trade_size_cents as i64).max(1)
-}
-
-async fn execute_entry(
-    config: &Config,
-    kalshi: &KalshiClient,
-    pool: &sqlx::PgPool,
-    signal: &Signal,
-    tracker: &mut PositionTracker,
-) -> Result<()> {
-    let size_cents = compute_order_size(config, signal);
-    let idempotency_key = format!(
-        "{}-{}-{}",
-        signal.ticker,
-        signal.direction,
-        Utc::now().timestamp_millis()
-    );
-
-    let order_req = OrderRequest {
-        ticker: signal.ticker.clone(),
-        action: "buy".to_string(),
-        side: signal.direction.clone(),
-        r#type: "market".to_string(),
-        count: size_cents,
-        yes_price: None,
-        no_price: None,
-        client_order_id: Some(idempotency_key.clone()),
-    };
-
-    if config.paper_mode {
-        info!(
-            ticker = %signal.ticker,
-            direction = %signal.direction,
-            size_cents = size_cents,
-            edge = %signal.edge,
-            "[PAPER] would place order"
-        );
-        tracker.record_entry(&signal.ticker, &signal.direction, size_cents, signal.market_price);
-
-        // Record paper trade with full signal parameters
-        record_paper_trade(pool, signal, size_cents).await?;
-        record_order(pool, signal, size_cents, &idempotency_key, "filled", None, 0).await?;
-        return Ok(());
-    }
-
-    let start = Instant::now();
-    match kalshi.place_order(order_req).await {
-        Ok(resp) => {
-            let latency_ms = start.elapsed().as_millis() as i64;
-            let fill_price = resp.order.yes_price.or(resp.order.no_price).map(|p| p as f64 / 100.0);
-            tracker.record_entry(
-                &signal.ticker,
-                &signal.direction,
-                size_cents,
-                fill_price.unwrap_or(signal.market_price),
-            );
-            record_order(
-                pool,
-                signal,
-                size_cents,
-                &idempotency_key,
-                "filled",
-                fill_price,
-                latency_ms,
-            )
-            .await?;
-            Ok(())
-        }
-        Err(KalshiError::InsufficientFunds) => {
-            warn!(ticker = %signal.ticker, "insufficient funds");
-            record_order(pool, signal, size_cents, &idempotency_key, "failed", None, 0).await?;
-            Ok(())
-        }
-        Err(KalshiError::MarketClosed) => {
-            warn!(ticker = %signal.ticker, "market closed");
-            record_order(pool, signal, size_cents, &idempotency_key, "failed", None, 0).await?;
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-async fn execute_exit(
-    config: &Config,
-    kalshi: &KalshiClient,
-    _pool: &sqlx::PgPool,
-    signal: &Signal,
-    tracker: &mut PositionTracker,
-    daily_pnl: &mut DailyPnl,
-) -> Result<()> {
-    let idempotency_key = format!(
-        "{}-exit-{}",
-        signal.ticker,
-        Utc::now().timestamp_millis()
-    );
-
-    // Sell the opposite side to exit
-    let exit_side = if signal.direction == "yes" { "yes" } else { "no" };
-    let position = tracker.positions.get(&signal.ticker);
-    let size = position.map(|p| p.size_cents).unwrap_or(1);
-
-    let order_req = OrderRequest {
-        ticker: signal.ticker.clone(),
-        action: "sell".to_string(),
-        side: exit_side.to_string(),
-        r#type: "market".to_string(),
-        count: size,
-        yes_price: None,
-        no_price: None,
-        client_order_id: Some(idempotency_key.clone()),
-    };
-
-    if config.paper_mode {
-        info!(
-            ticker = %signal.ticker,
-            "[PAPER] would exit position"
-        );
-        tracker.remove_position(&signal.ticker);
-        return Ok(());
-    }
-
-    match kalshi.place_order(order_req).await {
-        Ok(_resp) => {
-            // Estimate PnL (simplified — real PnL comes from settlement)
-            if let Some(pos) = tracker.positions.get(&signal.ticker) {
-                let pnl_estimate = ((signal.market_price - pos.entry_price) * pos.size_cents as f64) as i64;
-                daily_pnl.record_pnl(pnl_estimate);
+            // Periodic kill switch check — cancel in-flight orders (Phase 2.7)
+            _ = kill_check_interval.tick() => {
+                if kill_switch.is_blocked("crypto") {
+                    order_mgr.cancel_in_flight(&kalshi, Some("crypto")).await;
+                }
+                if kill_switch.is_blocked("weather") {
+                    order_mgr.cancel_in_flight(&kalshi, Some("weather")).await;
+                }
             }
-            tracker.remove_position(&signal.ticker);
-            Ok(())
+
+            // Periodic GC of old terminal orders
+            _ = gc_interval.tick() => {
+                order_mgr.gc_old_orders();
+            }
+
+            else => break,
         }
-        Err(e) => Err(e.into()),
     }
-}
-
-async fn record_order(
-    pool: &sqlx::PgPool,
-    signal: &Signal,
-    size_cents: i64,
-    idempotency_key: &str,
-    status: &str,
-    fill_price: Option<f64>,
-    latency_ms: i64,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO orders (
-            idempotency_key, ticker, direction, order_type,
-            size_cents, fill_price, status, latency_ms
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (idempotency_key) DO NOTHING
-        "#,
-    )
-    .bind(idempotency_key)
-    .bind(&signal.ticker)
-    .bind(&signal.direction)
-    .bind("market")
-    .bind(size_cents as i32)
-    .bind(fill_price)
-    .bind(status)
-    .bind(latency_ms as i32)
-    .execute(pool)
-    .await
-    .context("Failed to record order")?;
-
-    Ok(())
-}
-
-/// Record a paper trade with full signal parameters for analysis.
-async fn record_paper_trade(
-    pool: &sqlx::PgPool,
-    signal: &Signal,
-    size_cents: i64,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO paper_trades (
-            ticker, direction, action, size_cents,
-            model_prob, market_price, edge, kelly_fraction, signal_type
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        "#,
-    )
-    .bind(&signal.ticker)
-    .bind(&signal.direction)
-    .bind(&signal.action)
-    .bind(size_cents as i32)
-    .bind(signal.model_prob as f32)
-    .bind(signal.market_price as f32)
-    .bind(signal.edge as f32)
-    .bind(signal.kelly_fraction as f32)
-    .bind(&signal.signal_type)
-    .execute(pool)
-    .await
-    .context("Failed to record paper trade")?;
 
     Ok(())
 }

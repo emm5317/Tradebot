@@ -7,6 +7,7 @@ mod feeds;
 mod kalshi;
 mod kill_switch;
 mod logging;
+mod order_manager;
 mod orderbook_feed;
 
 use std::sync::Arc;
