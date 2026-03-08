@@ -8,9 +8,10 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# Environment
+# Environment & secrets
 .env
 config/.env
+*.pem
 
 # IDE
 .idea/

@@ -31,16 +31,21 @@ impl KalshiAuth {
         })
     }
 
+    /// Return the API key (for WS auth which only needs the key).
+    pub fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
     /// Sign a request and return the three auth headers.
     ///
-    /// Message format: `{timestamp_ms}\n{METHOD}\n{path}`
+    /// Message format: `{timestamp_ms}{METHOD}{path}`
     pub fn sign_request(
         &self,
         method: &str,
         path: &str,
     ) -> Result<AuthHeaders, KalshiError> {
         let timestamp_ms = chrono::Utc::now().timestamp_millis();
-        let message = format!("{timestamp_ms}\n{method}\n{path}");
+        let message = format!("{timestamp_ms}{method}{path}");
 
         let mut signer = Signer::new(MessageDigest::sha256(), &self.private_key)
             .map_err(|e| KalshiError::SigningError(e.to_string()))?;

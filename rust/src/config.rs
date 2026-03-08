@@ -69,7 +69,7 @@ fn default_binance_futures_ws_url() -> String {
 }
 
 fn default_binance_spot_ws_url() -> String {
-    "wss://stream.binance.com:9443/ws/btcusdt@trade".to_string()
+    "wss://stream.binance.us:9443/ws/btcusd@trade".to_string()
 }
 
 fn default_deribit_ws_url() -> String {

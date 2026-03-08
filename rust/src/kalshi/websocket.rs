@@ -160,7 +160,6 @@ impl KalshiWsFeed {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let auth_headers = self.auth.sign_request("GET", "/trade-api/ws/v2")?;
 
-        // Auth via headers instead of query params to avoid leaking secrets in logs
         let mut request = self.ws_url.as_str().into_client_request()?;
         let headers = request.headers_mut();
         headers.insert("KALSHI-ACCESS-KEY", auth_headers.api_key.parse()?);
