@@ -1,27 +1,46 @@
-# Tradebot — Automated Kalshi Prediction Market Trading Bot
+# Tradebot — Algorithmic Trading Bot for Kalshi Prediction Markets
+
+![Tests](https://img.shields.io/badge/tests-354-brightgreen)
+![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue)
+![Exchange](https://img.shields.io/badge/exchange-Kalshi-purple)
 
 Algorithmic trading system for [Kalshi](https://kalshi.com) prediction markets. Trades **weather temperature contracts** and **Bitcoin crypto binary options** using settlement-aware fair-value models, real-time WebSocket feeds, and automated order execution.
 
 Built with **Rust** (low-latency execution, exchange feeds) and **Python** (signal generation, fair-value models), connected via NATS messaging and Redis state cache.
 
-> **328 tests** (92 Rust + 236 Python) | Paper trading mode for safe development
+> **354 tests** (112 Rust + 242 Python) | Paper trading mode for safe development
+
+---
+
+## Why This Project?
+
+Most trading bots follow price action. Tradebot takes a fundamentally different approach — it models **how contracts actually settle** and trades when the market price diverges from fair value.
+
+- **Settlement-aware models** — Weather contracts settle on the NWS Daily Climate Report; crypto contracts settle on the CF Benchmarks Real-Time Index. The models replicate these exact mechanics rather than following price trends
+- **Two asset classes** — Weather temperature contracts and Bitcoin binary options, each with specialized fair-value engines
+- **Rust + Python split architecture** — Rust for sub-millisecond feed processing and order execution; Python for weather signal generation, backtesting, and analytics
+- **Paper trading first** — Kalshi demo environment support, parameter sweep framework, walk-forward optimization, and Brier score validation before risking capital
+- **Full observability** — Live htmx dashboard, P&L attribution with model component tracking, per-strategy Brier scoring, and settlement summary analytics
+
+*Keywords: prediction markets, event contracts, fair value, Kelly criterion, low-latency WebSocket, algorithmic trading, binary options*
 
 ---
 
 ## Key Features
 
-- **Settlement-aware pricing models** — Models map directly to how Kalshi contracts settle: CFB Real-Time Index for crypto, NWS Daily Climate Reports for weather
+- **Settlement-aware pricing models** — Maps directly to how Kalshi contracts settle (CFB RTI for crypto, NWS Daily Climate Reports for weather)
 - **Multi-exchange crypto feeds** — Coinbase, Binance Spot, Binance Futures, Deribit DVOL via persistent WebSocket connections in Rust
-- **Dynamic venue weighting** — Volume-based, staleness-aware, outlier-detecting RTI estimation replaces fixed 60/40 weights
-- **Weather fair-value engine** — Running max/min tracking, METAR 6-hourly group parsing, HRRR forecast blending, C-to-F rounding ambiguity with boundary probability model
+- **Dynamic venue weighting** — Volume-based, staleness-aware, outlier-detecting RTI estimation
+- **Weather fair-value engine** — Running max/min tracking, METAR 6-hourly groups, HRRR forecast blending, C-to-F rounding ambiguity with boundary probability
 - **Station-specific calibration** — Per-(station, month, hour) sigma, HRRR bias correction, skill-weighted ensemble blending
 - **Kalshi microstructure layer** — Trade tape aggressiveness, spread regime detection, depth imbalance adjustments
-- **Structured contract rules** — Ticker parser extracts strike, station, settlement source from structured ticker format (no regex-on-title)
-- **Real-time orderbook** — DashMap-based in-memory orderbook per ticker with trade tape, aggressiveness metrics, and stale feed detection
-- **Order state machine** — Full lifecycle tracking: Pending → Submitting → Acknowledged → PartialFill → Filled, with restart recovery and kill switch integration
-- **Risk management** — Kelly criterion sizing, max position limits, daily loss stops, spread-adjusted edge thresholds, rate limiting
-- **Source conflict detection** — METAR/HRRR disagreement handling with automatic sigma inflation and outage policies
-- **Historical replay** — Source attribution via Brier score ablation testing to prove each data source adds marginal value
+- **Order state machine** — Full 10-state lifecycle tracking with restart recovery and kill switch integration
+- **Risk management** — Kelly criterion sizing, max position limits, daily loss stops, spread-adjusted edge thresholds
+- **Per-strategy analytics** — Brier scoring, P&L attribution with model component tracking, calibration dashboard
+- **Parameter sweep framework** — Grid search over model hyperparameters with walk-forward optimization
+- **Dynamic WS subscription** — Contract discovery drives automatic orderbook feed subscriptions
 - **Live dashboard** — FastAPI + htmx terminal-style UI with SSE for real-time model state, signals, and P&L
 
 ## Architecture
@@ -89,39 +108,48 @@ Built with **Rust** (low-latency execution, exchange feeds) and **Python** (sign
 
 ## Trading Models
 
-### Weather Contracts — Settlement-Aware Fair Value
+**Weather contracts** settle on the NWS Daily Climate Report using an 8-step pipeline: running max/min tracking, lock detection, METAR 6-hourly group parsing, HRRR forecast blending, C-to-F rounding ambiguity modeling, station-specific calibration, source conflict detection, and Gaussian diffusion ensemble with station-calibrated weights.
 
-Kalshi weather contracts settle on the **NWS Daily Climate Report** (CLI/DSM), which uses **local standard time** (not DST). The model tracks settlement mechanics directly:
+**Crypto contracts** settle on the CF Benchmarks Real-Time Index using a 7-step pipeline: dynamic RTI estimation with volume weighting, N(d2) Gaussian probability, Levy averaging near expiry, basis and funding rate signals, Deribit DVOL implied volatility, and microstructure adjustments from trade tape analysis.
 
-1. **Running max/min tracking** — Maintains daily running maximum (or minimum) temperature from all observations throughout the settlement day
-2. **Lock detection** — If the running max already exceeds the strike, probability locks at ~0.99 (the day's high has been recorded)
-3. **METAR 6-hourly groups** — Parses `1xxxx`/`2xxxx` remark groups that feed directly into the Daily Climate Report
-4. **HRRR forecast blending** — High-resolution (15-min) HRRR forecasts from Open-Meteo for remaining-day excursion probability, with per-station bias correction
-5. **C-to-F rounding ambiguity** — METAR reports Celsius; CLI reports Fahrenheit. Near threshold boundaries, the integer rounding creates settlement ambiguity. The model computes boundary probability using a uniform distribution over the possible Fahrenheit range and identifies "safe zones" where rounding cannot affect the outcome
-6. **Station-specific calibration** — Per-(station, month, hour) sigma from historical observations, HRRR skill scoring (1 - RMSE/climo_std), and optimized ensemble weights per station
-7. **Source conflict detection** — When METAR and HRRR disagree by >3°F, sigma is inflated 50%. METAR outage inflates sigma 25%. Both missing yields low-confidence 0.5 probability
-8. **Gaussian diffusion ensemble** — Physics, HRRR, trend, and climatology components with station-calibrated weights
+Both models use spread-adjusted edge filtering, Kelly criterion sizing, signal cooldowns, and exit signals on edge reversal.
 
-Default component weights: 35% physics, 25% HRRR, 20% trend, 20% climatology (overridden by station-specific calibration when available).
+See [docs/trading-models.md](docs/trading-models.md) for the full step-by-step breakdown.
 
-### Crypto Contracts — Event-Driven Fair Value (Rust)
+## Quick Start
 
-Kalshi BTC contracts settle to the **CF Benchmarks Real-Time Index** (CFB RTI) — a 60-second weighted average from constituent exchanges (Coinbase, Bitstamp, Kraken, etc.):
+### Docker (recommended)
 
-1. **Dynamic RTI estimation** — Volume-weighted average of constituent exchange spot prices with staleness detection (>5s = weight 0), outlier capping (>0.5% deviation from median = weight capped at 10%), and reliability flagging (requires 2+ healthy venues)
-2. **Gaussian probability** — N(d2) model using shadow RTI, time-scaled volatility, and the contract strike
-3. **Levy averaging near expiry** — Within the final 60s, the RTI averaging window dampens tail risk. Uses Levy's approximation for arithmetic average options to model effective strike shift and volatility reduction
-4. **Basis signal** — Perpetual futures vs spot basis indicates directional sentiment
-5. **Funding rate signal** — Positive funding (longs pay shorts) signals bullish market structure
-6. **Deribit DVOL** — Market-implied volatility from the BTC volatility index, preferred over realized vol when available
-7. **Microstructure adjustments** — Trade tape aggressiveness (±2%), spread regime penalties (tight: +1%, wide: -2%), depth imbalance (±2%), clamped to ±4% total
+```bash
+just db-up                     # Start Postgres/TimescaleDB, Redis, NATS
+just up                        # Start Rust binary + all services
+just dashboard                 # Live UI on :8050
+```
 
-### Shared Signal Logic
+### Local Development
 
-- Spread-adjusted edge with wide-spread penalty (15% discount above 10% spread)
-- Kelly criterion sizing using estimated fill price (best ask for YES, best bid for NO)
-- Signal cooldown (crypto: 30s, weather: 120s per ticker) to prevent duplicate entries
-- Exit signals when edge flips below -3%
+```bash
+# 1. Start infrastructure
+just db-up                     # PostgreSQL, Redis, NATS via Docker Compose
+
+# 2. Configure
+cp config/.env.example .env    # Fill in Kalshi API key + credentials
+
+# 3. Run migrations
+just migrate                   # SQL migrations (000-018)
+
+# 4. Start data collection
+just collector                 # ASOS, METAR, HRRR, market snapshots
+
+# 5. Run weather signal evaluator
+just evaluator                 # Weather evaluation loop (10s cycle)
+
+# 6. Start Rust execution engine
+just dev                       # Kalshi WS + crypto feeds + order execution
+
+# 7. Dashboard
+just dashboard                 # Live UI on :8050
+```
 
 ## Project Structure
 
@@ -132,18 +160,25 @@ Tradebot/
 │   └── kalshi_dev.pem            # RSA private key (gitignored in prod)
 ├── docker/                       # Docker Compose (Postgres, Redis, NATS)
 │   └── docker-compose.yml
-├── docs/                         # Architecture docs & build plans
-│   ├── build-plans/              # Phase 0-5 implementation plans
+├── docs/                         # Architecture & reference docs
+│   ├── build-plans/              # Phase 0-6 implementation plans
+│   ├── trading-models.md         # Full model documentation
+│   ├── configuration.md          # Environment variable reference
+│   ├── redis-keys.md             # Redis key structure
+│   ├── sql-reference.md          # SQL query reference
 │   ├── data_pipeline_upgrade.md  # Settlement-focused architecture
 │   └── improvements.md           # Original improvement roadmap
-├── migrations/                   # SQL migrations (001-015)
+├── migrations/                   # SQL migrations (000-018)
 │   ├── 009_contract_rules.sql    # Contract settlement rules
 │   ├── 010_weather_sources.sql   # METAR observations, HRRR forecasts
 │   ├── 011_crypto_sources.sql    # Multi-exchange crypto ticks
 │   ├── 012_replay_tables.sql     # Event capture + model evaluations
 │   ├── 013_paper_trades.sql      # Paper trading audit trail
 │   ├── 014_order_state_tracking.sql  # Order state machine
-│   └── 015_station_calibration.sql   # Per-station model calibration
+│   ├── 015_station_calibration.sql   # Per-station model calibration
+│   ├── 016_phase5_tables.sql     # strategy_performance, dead_letters, reconciliation
+│   ├── 017_model_components.sql  # P&L attribution JSONB
+│   └── 018_backtest_tables.sql   # backtest_runs, daily_settlement_summary
 ├── python/
 │   ├── rules/                    # Contract rules & settlement mapping
 │   │   ├── resolver.py           # ContractRulesResolver (DB-cached)
@@ -169,30 +204,38 @@ Tradebot/
 │   │   ├── registry.py           # Evaluator plugin registry
 │   │   ├── utils.py              # Kelly, edge, fill price utilities
 │   │   └── types.py              # Pydantic schemas
+│   ├── analytics/                # Performance analytics
+│   │   ├── aggregator.py         # Per-strategy analytics & Brier scoring
+│   │   └── settlement_summary.py # Daily settlement summary aggregation
 │   ├── collector/daemon.py       # Data collection (ASOS, METAR, HRRR, Kalshi)
 │   ├── evaluator/daemon.py       # Weather signal evaluation loop (10s cycle)
-│   ├── backtester/               # Backtesting & source attribution
+│   ├── sync_contracts.py         # Kalshi contract sync (active + settled)
+│   ├── backtester/               # Backtesting & optimization
 │   │   ├── engine.py             # Backtesting engine
+│   │   ├── sweep.py              # Parameter sweep + walk-forward optimization
 │   │   └── replay.py             # Brier score ablation replay
 │   ├── dashboard/                # FastAPI + htmx live UI
 │   │   ├── app.py                # SSE server (port 8050)
-│   │   ├── templates/index.html  # htmx live dashboard
+│   │   ├── templates/            # htmx templates (index, calibration)
 │   │   └── static/style.css      # Terminal-style CSS
-│   └── tests/                    # 236 Python tests
+│   └── tests/                    # 242 Python tests
 ├── rust/
 │   └── src/
 │       ├── main.rs               # Entry point, feed orchestration
 │       ├── config.rs             # Environment configuration (incl. RTI params)
 │       ├── execution.rs          # NATS consumer, order execution
-│       ├── order_manager.rs      # Order state machine (10 states)
+│       ├── order_manager.rs      # Order state machine (10 states) + reconciliation
 │       ├── crypto_evaluator.rs   # Event-driven crypto evaluation + microstructure
 │       ├── crypto_fv.rs          # Shadow RTI, N(d2), Levy averaging, basis/funding
 │       ├── crypto_state.rs       # In-process state (RwLock) + dynamic venue weights
 │       ├── orderbook_feed.rs     # Kalshi WS → OrderbookManager → Redis
 │       ├── dashboard.rs          # Axum HTTP dashboard server
 │       ├── kill_switch.rs        # Emergency trading halt (per-strategy)
-│       ├── feed_health.rs        # Feed staleness detection
+│       ├── feed_health.rs        # Per-feed health scoring (0.0-1.0)
+│       ├── clock.rs              # Clock discipline (HTTP Date header sync)
+│       ├── dead_letter.rs        # Dead-letter handling (NATS + DB persistence)
 │       ├── contract_discovery.rs # Contract enumeration from DB
+│       ├── integration_tests.rs  # Integration test scenarios
 │       ├── feeds/                # External exchange WebSocket feeds
 │       │   ├── coinbase.rs       # Coinbase BTC-USD level2 + trade volume
 │       │   ├── binance_spot.rs   # Binance spot (OHLC bars, EWMA vol)
@@ -205,33 +248,9 @@ Tradebot/
 │           ├── auth.rs           # RSA-PSS request signing (pure Rust)
 │           └── client.rs         # REST API client
 ├── Dockerfile                    # Multi-stage Rust build
-└── justfile                      # Task runner (just dev, just test-all, etc.)
-```
-
-## Quick Start
-
-```bash
-# 1. Infrastructure
-just db-up                     # Start Postgres/TimescaleDB, Redis, NATS
-
-# 2. Configure and migrate
-cp config/.env.example .env    # Fill in Kalshi API key + credentials
-just migrate                   # Run SQL migrations (001-015)
-
-# 3. Start data collection
-just collector                 # ASOS, METAR, HRRR, market snapshots
-
-# 4. Run signal evaluator (weather)
-just evaluator                 # Weather signal evaluation loop
-
-# 5. Start Rust execution engine
-just dev                       # Kalshi WS + crypto feeds + order execution
-
-# 6. Dashboard
-just dashboard                 # Live UI on :8050
-
-# 7. Run tests
-just test-all                  # 92 Rust + 236 Python = 328 tests
+├── justfile                      # Task runner (just dev, just test-all, etc.)
+├── CONTRIBUTING.md               # Contribution guidelines
+└── CLAUDE.md                     # AI-assisted development guide
 ```
 
 ## Data Sources
@@ -249,54 +268,6 @@ just test-all                  # 92 Rust + 236 Python = 328 tests
 | Open-Meteo (HRRR) | Weather | Python REST | 300s | 15-min forecast temps |
 | Kalshi API | Market | Python REST | 60s | Settlement history, prices |
 
-## Redis Key Structure
-
-```
-orderbook:{ticker}          # Kalshi book state (from Rust, 500ms flush)
-crypto:coinbase             # Coinbase BTC-USD spot/bid/ask + trade volume
-crypto:binance_spot         # Binance spot + realized/EWMA vol
-crypto:binance_futures      # Binance perp/mark/funding/OBI
-crypto:deribit_dvol         # Deribit BTC volatility index
-model_state:{ticker}        # Model output for dashboard
-feed:status:{ticker}        # Feed health/staleness
-```
-
-## Configuration
-
-Key environment variables (see `config/.env.example` for full list):
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL (TimescaleDB) connection | required |
-| `REDIS_URL` | Redis for state cache | `redis://localhost:6379` |
-| `NATS_URL` | NATS messaging | `nats://localhost:4222` |
-| `KALSHI_API_KEY` | Kalshi API key | required |
-| `KALSHI_PRIVATE_KEY_PATH` | RSA private key for signing | required |
-| `PAPER_MODE` | Paper trading (no real orders) | `true` |
-| `MAX_TRADE_SIZE_CENTS` | Per-order limit | `2500` ($25) |
-| `MAX_DAILY_LOSS_CENTS` | Daily stop-loss | `10000` ($100) |
-| `MAX_POSITIONS` | Max concurrent positions | `5` |
-| `KELLY_FRACTION_MULTIPLIER` | Kelly scaling factor | `0.25` |
-| `ENABLE_COINBASE` | Coinbase feed | `false` |
-| `ENABLE_BINANCE_SPOT` | Binance spot feed | `false` |
-| `ENABLE_BINANCE_FUTURES` | Binance futures feed | `false` |
-| `ENABLE_DERIBIT` | Deribit DVOL feed | `false` |
-| `RTI_STALE_THRESHOLD_SECS` | Venue staleness cutoff | `5` |
-| `RTI_OUTLIER_THRESHOLD_PCT` | Outlier deviation cap | `0.5` |
-| `RTI_MIN_VENUES` | Min healthy venues for reliable RTI | `2` |
-| `DISCORD_WEBHOOK_URL` | Alert notifications | (optional) |
-
-## Development
-
-```bash
-just test-python     # Python tests (pytest, 236 tests)
-just test            # Rust tests (cargo test, 92 tests)
-just test-all        # Both (328 tests)
-just fmt             # Format Rust code
-just clippy          # Rust lints
-just health          # Check system health endpoint
-```
-
 ## Implementation Status
 
 | Phase | Description | Status |
@@ -312,14 +283,67 @@ just health          # Check system health endpoint
 | 4.5 | Station-specific calibration (sigma, HRRR bias/skill, weights) | Complete |
 | 4.6 | Source conflict and outage policy | Complete |
 | 4.7 | Rounding ambiguity hardening (boundary probability, safe zones) | Complete |
-| 5 | Calibration dashboard, P&L attribution, production readiness | Planned |
+| 5.1 | Per-strategy analytics & Brier scoring | Complete |
+| 5.2 | Calibration dashboard | Complete |
+| 5.3 | P&L attribution with model_components JSONB | Complete |
+| 5.4 | Reconciliation loop | Complete |
+| 5.5 | Clock discipline (HTTP Date header sync) | Complete |
+| 5.6 | Dead-letter handling (NATS + DB persistence) | Complete |
+| 5.7 | Integration tests (8 scenarios) | Complete |
+| 5.8 | Per-feed health scoring (granular 0.0-1.0) | Complete |
+| 6.1 | Parameter sweep framework, settlement summary, collector enhancements | Complete |
+
+### What's Next
+
+- **Phase 6.2** — Live paper trading validation with real Kalshi demo environment
+- **Phase 7** — Multi-station weather portfolio (concurrent contracts across stations)
+- **Phase 8** — Production deployment with monitoring and alerting
+- **Backtester improvements** — Longer walk-forward windows, cross-asset correlation
+
+## Development Commands
+
+```bash
+# Testing
+just test              # Rust tests (112 tests)
+just test-python       # Python tests (242 tests)
+just test-all          # Both (354 tests)
+
+# Code quality
+just fmt               # Format Rust code
+just fmt-check         # Check Rust formatting
+just clippy            # Rust lints
+
+# Contract sync
+just sync-contracts    # Sync active + settled contracts from Kalshi
+just sync-active       # Active contracts only
+just sync-loop         # Continuous sync every 5 minutes
+
+# Backtesting & optimization
+just sweep 2024-01-01 2024-06-30           # Parameter grid search
+just walk-forward 2024-01-01 2024-12-31    # Walk-forward optimization
+just leaderboard                            # Best backtest runs
+just settlement-summary                     # Aggregate settlement data
+
+# Database
+just db-shell          # Open psql shell
+just migrate           # Run SQL migrations
+
+# Diagnostics
+just health            # Check system health endpoint
+just logs              # Follow tradebot logs
+just ps                # Docker container status
+```
 
 ## Tech Stack
 
 - **Rust**: tokio, tokio-tungstenite, fred (Redis), async-nats, sqlx, rsa (pure-Rust signing), dashmap, axum, tracing
 - **Python**: asyncio, asyncpg, httpx, pydantic, FastAPI, structlog, pytest
-- **Infrastructure**: PostgreSQL 17/TimescaleDB, Redis 7, NATS 2 (JetStream), Docker Compose
+- **Infrastructure**: PostgreSQL 17/TimescaleDB, Redis 7, NATS 2 (JetStream), Docker Compose, just
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and guidelines.
 
 ## License
 
-Private repository. All rights reserved.
+Licensed under the [Apache License 2.0](LICENSE).

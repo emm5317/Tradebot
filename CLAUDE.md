@@ -37,9 +37,9 @@ Algorithmic trading bot for Kalshi prediction markets. Trades weather temperatur
 - Key tables: `contracts`, `signals`, `orders`, `observations`, `market_snapshots`, `station_calibration`
 
 ### Testing
-- `just test` — 92 Rust tests
-- `just test-python` — 236 Python tests
-- `just test-all` — both (328 total)
+- `just test` — 112 Rust tests
+- `just test-python` — 242 Python tests
+- `just test-all` — both (354 total)
 - Python tests that need DB (asyncpg) will show collection errors locally — this is expected
 
 ## Build & Run
@@ -70,6 +70,12 @@ just dashboard      # Start dashboard on :8050
 | `python/backtester/engine.py` | Full historical backtester |
 | `python/backtester/sweep.py` | Parameter sweep + walk-forward optimization |
 | `python/analytics/settlement_summary.py` | Daily settlement summary aggregation |
+| `python/analytics/aggregator.py` | Per-strategy analytics & Brier scoring |
+| `python/sync_contracts.py` | Kalshi contract sync (active + settled) |
+| `rust/src/clock.rs` | Clock discipline (HTTP Date header sync) |
+| `rust/src/dead_letter.rs` | Dead-letter handling (NATS + DB persistence) |
+| `rust/src/integration_tests.rs` | Integration test scenarios |
+| `rust/src/feed_health.rs` | Per-feed health scoring (0.0-1.0) |
 
 ## Common Pitfalls
 
@@ -81,4 +87,4 @@ just dashboard      # Start dashboard on :8050
 
 ## Implementation Phases
 
-Phases 0-5.8 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). Phase 6.1: parameter sweep framework, daily settlement summary, collector enhancements (crypto_ticks, settlement aggregation). See `docs/build-plans/` for detailed specs.
+Phases 0-6.1 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). Phase 6.1: parameter sweep framework, daily settlement summary, collector enhancements (crypto_ticks, settlement aggregation). See `docs/build-plans/` for detailed specs.
