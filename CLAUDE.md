@@ -87,4 +87,4 @@ just dashboard      # Start dashboard on :8050
 
 ## Implementation Phases
 
-Phases 0-6.1 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). Phase 6.1: parameter sweep framework, daily settlement summary, collector enhancements (crypto_ticks, settlement aggregation). See `docs/build-plans/` for detailed specs.
+Phases 0-6.1 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). Phase 6.1: parameter sweep framework, daily settlement summary, collector enhancements (crypto_ticks, settlement aggregation). Phase 7 (planned): calibration agent & prediction feedback loop — closes the loop between predictions and settlement outcomes. See `docs/build-plans/` for detailed specs.
