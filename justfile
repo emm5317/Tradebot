@@ -115,6 +115,28 @@ clean:
 backtest start end:
     cd python; python -m backtester.engine --start {{start}} --end {{end}}
 
+# Parameter sweep (grid search over model hyperparameters)
+sweep start end:
+    cd python; python -m backtester.sweep --start {{start}} --end {{end}}
+
+sweep-crypto start end:
+    cd python; python -m backtester.sweep --start {{start}} --end {{end}} --type crypto
+
+# Walk-forward optimization (train/validate splits)
+walk-forward start end window="14":
+    cd python; python -m backtester.sweep --start {{start}} --end {{end}} --walk-forward {{window}}
+
+# Print leaderboard of best backtest runs
+leaderboard type="weather":
+    cd python; python -m backtester.sweep --start 2000-01-01 --end 2099-01-01 --type {{type}} --leaderboard
+
+# Settlement summary aggregation
+settlement-summary:
+    cd python; python -m analytics.settlement_summary
+
+settlement-backfill days="30":
+    cd python; python -m analytics.settlement_summary --backfill {{days}}
+
 # ── Diagnostics ─────────────────────────────────────────────
 
 health:

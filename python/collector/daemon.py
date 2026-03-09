@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 import httpx
 import structlog
 
+from analytics.settlement_summary import aggregate_settlement_summary
 from config import Settings, get_settings
 from data.aviationweather import METARObservation, fetch_metar
 from data.binance_ws import BinanceFeed
@@ -54,8 +55,10 @@ class CollectorDaemon:
                 self.collect_asos_loop(),
                 self.collect_market_snapshots_loop(),
                 self.collect_btc_loop(),
+                self.collect_crypto_ticks_loop(),
                 self.collect_metar_loop(),
                 self.collect_hrrr_loop(),
+                self.settlement_summary_loop(),
                 self.btc_feed.connect(),
                 return_exceptions=True,
             )
@@ -158,6 +161,62 @@ class CollectorDaemon:
                     logger.info("hrrr_collected", count=len(forecasts))
             except Exception:
                 logger.exception("hrrr_collection_error")
+
+            await self._sleep_or_shutdown(interval)
+
+    async def collect_crypto_ticks_loop(self) -> None:
+        """Every 60s: write per-venue BTC tick to crypto_ticks for backtesting."""
+        interval = self.settings.collection_interval_seconds
+
+        # Wait for WS feed to establish
+        await self._sleep_or_shutdown(10)
+
+        while not self._shutdown.is_set():
+            try:
+                state = self.btc_feed.get_state()
+                if state.spot_price > 0:
+                    await self._insert_crypto_tick(state)
+            except Exception:
+                logger.exception("crypto_tick_error")
+
+            await self._sleep_or_shutdown(interval)
+
+    async def _insert_crypto_tick(self, state) -> None:
+        """Insert Binance spot tick into crypto_ticks table."""
+        assert self.pool is not None
+
+        now = datetime.now(timezone.utc)
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO crypto_ticks (source, symbol, price, observed_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (source, observed_at) DO NOTHING
+                """,
+                "binance_spot",
+                "BTCUSDT",
+                state.spot_price,
+                now,
+            )
+
+    async def settlement_summary_loop(self) -> None:
+        """Every hour: aggregate daily settlement summary for yesterday and today."""
+        interval = 3600  # 1 hour
+
+        # Initial delay to let other loops establish data
+        await self._sleep_or_shutdown(30)
+
+        while not self._shutdown.is_set():
+            try:
+                assert self.pool is not None
+                today = datetime.now(timezone.utc).date()
+                yesterday = today - timedelta(days=1)
+                # Aggregate both yesterday (catch stragglers) and today (running)
+                await aggregate_settlement_summary(self.pool, yesterday)
+                await aggregate_settlement_summary(self.pool, today)
+                logger.info("settlement_summary_aggregated", yesterday=str(yesterday), today=str(today))
+            except Exception:
+                logger.exception("settlement_summary_error")
 
             await self._sleep_or_shutdown(interval)
 

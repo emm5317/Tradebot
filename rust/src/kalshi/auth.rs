@@ -25,7 +25,11 @@ impl KalshiAuth {
         })?;
 
         use rsa::pkcs8::DecodePrivateKey;
-        let private_key = RsaPrivateKey::from_pkcs8_pem(&pem_bytes).map_err(|e| {
+        let private_key = RsaPrivateKey::from_pkcs8_pem(&pem_bytes).or_else(|_| {
+            // Fall back to PKCS#1 format (BEGIN RSA PRIVATE KEY)
+            use rsa::pkcs1::DecodeRsaPrivateKey;
+            RsaPrivateKey::from_pkcs1_pem(&pem_bytes)
+        }).map_err(|e| {
             KalshiError::SigningError(format!("failed to parse PEM private key: {e}"))
         })?;
 

@@ -32,7 +32,7 @@ Algorithmic trading bot for Kalshi prediction markets. Trades weather temperatur
 - Structlog for logging throughout
 
 ### Database
-- Migrations in `migrations/` (001-015), run via `just migrate` (sqlx-cli)
+- Migrations in `migrations/` (001-018), run via `just migrate` (sqlx-cli)
 - All use `IF NOT EXISTS` / `ON CONFLICT` — safe to re-run
 - Key tables: `contracts`, `signals`, `orders`, `observations`, `market_snapshots`, `station_calibration`
 
@@ -67,6 +67,9 @@ just dashboard      # Start dashboard on :8050
 | `python/models/rounding.py` | METAR C→F rounding ambiguity + boundary prob |
 | `python/evaluator/daemon.py` | Weather evaluation loop |
 | `python/rules/resolver.py` | Contract rules resolver |
+| `python/backtester/engine.py` | Full historical backtester |
+| `python/backtester/sweep.py` | Parameter sweep + walk-forward optimization |
+| `python/analytics/settlement_summary.py` | Daily settlement summary aggregation |
 
 ## Common Pitfalls
 
@@ -78,4 +81,4 @@ just dashboard      # Start dashboard on :8050
 
 ## Implementation Phases
 
-Phases 0-5.8 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). See `docs/build-plans/` for detailed specs.
+Phases 0-5.8 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). Phase 6.1: parameter sweep framework, daily settlement summary, collector enhancements (crypto_ticks, settlement aggregation). See `docs/build-plans/` for detailed specs.
