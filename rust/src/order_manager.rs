@@ -133,6 +133,10 @@ pub struct ManagedOrder {
     pub model_prob: f64,
     pub market_price: f64,
     pub entry_price: Option<f64>,
+    /// DB id of the originating signal (for Brier score JOINs).
+    pub signal_id: Option<i64>,
+    /// Measured submit latency in milliseconds.
+    pub latency_ms: Option<i64>,
 }
 
 impl ManagedOrder {
@@ -163,6 +167,8 @@ impl ManagedOrder {
             model_prob,
             market_price,
             entry_price: None,
+            signal_id: None,
+            latency_ms: None,
         }
     }
 
@@ -468,6 +474,7 @@ impl OrderManager {
         kalshi: &KalshiClient,
         pool: &sqlx::PgPool,
         signal: &Signal,
+        signal_id: Option<i64>,
         crypto_state: &CryptoState,
     ) -> Result<()> {
         let size_cents = compute_order_size(config, signal);
@@ -490,6 +497,7 @@ impl OrderManager {
             signal.market_price,
             snapshot,
         );
+        order.signal_id = signal_id;
 
         // Pending → Submitting
         order.transition(OrderState::Submitting);
@@ -534,6 +542,7 @@ impl OrderManager {
         match kalshi.place_order(order_req).await {
             Ok(resp) => {
                 let latency_ms = submit_start.elapsed().as_millis();
+                order.latency_ms = Some(latency_ms as i64);
                 order.kalshi_order_id = Some(resp.order.order_id.clone());
 
                 // Determine fill state from response
@@ -616,6 +625,7 @@ impl OrderManager {
         kalshi: &KalshiClient,
         pool: &sqlx::PgPool,
         signal: &Signal,
+        signal_id: Option<i64>,
         crypto_state: &CryptoState,
     ) -> Result<()> {
         // Find the entry order for this position
@@ -650,6 +660,7 @@ impl OrderManager {
             signal.market_price,
             snapshot,
         );
+        order.signal_id = signal_id;
 
         order.transition(OrderState::Submitting);
 
@@ -1080,10 +1091,11 @@ pub struct ReconciliationEntry {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Compute order size from Kelly fraction, capped by config.
+/// Compute order size from Kelly fraction, scaled by confidence, capped by config.
 fn compute_order_size(config: &Config, signal: &Signal) -> i64 {
     let kelly_adjusted = signal.kelly_fraction * config.kelly_fraction_multiplier;
-    let size = (kelly_adjusted * 10000.0) as i64; // Convert to cents
+    let confidence_scale = signal.confidence.clamp(0.3, 1.0);
+    let size = (kelly_adjusted * confidence_scale * 10000.0) as i64; // Convert to cents
     size.min(config.max_trade_size_cents).max(1)
 }
 
@@ -1132,11 +1144,11 @@ async fn persist_order(
             size_cents, requested_qty, filled_qty,
             fill_price, status, order_state, latency_ms,
             signal_type, model_prob, market_price_at_order,
-            transitions, crypto_snapshot
+            transitions, crypto_snapshot, signal_id
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
             $10, $11, $12, $13, $14, $15, $16,
-            $17::jsonb, $18::jsonb
+            $17::jsonb, $18::jsonb, $19
         )
         ON CONFLICT (idempotency_key) DO UPDATE SET
             order_state = EXCLUDED.order_state,
@@ -1157,17 +1169,46 @@ async fn persist_order(
     .bind(order.entry_price.map(|p| p as f32)) // fill_price
     .bind(order.state.to_string()) // status
     .bind(order.state.to_string()) // order_state
-    .bind(0i32) // latency_ms (set later if needed)
+    .bind(order.latency_ms.unwrap_or(0) as i32) // latency_ms
     .bind(&signal.signal_type)
     .bind(signal.model_prob as f32)
     .bind(signal.market_price as f32)
     .bind(&transitions_json)
     .bind(&crypto_snapshot_json)
+    .bind(order.signal_id) // signal_id
     .execute(pool)
     .await
     .context("Failed to persist order")?;
 
     Ok(())
+}
+
+/// Settle order outcomes by joining against contracts.settled_yes.
+/// Updates orders with outcome = 'win' or 'loss' for settled contracts.
+pub async fn settle_order_outcomes(pool: &sqlx::PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE orders SET outcome = CASE
+            WHEN (direction = 'yes' AND c.settled_yes = true)
+              OR (direction = 'no' AND c.settled_yes = false)
+            THEN 'win'
+            ELSE 'loss'
+        END
+        FROM contracts c
+        WHERE orders.ticker = c.ticker
+          AND c.settled_yes IS NOT NULL
+          AND orders.outcome = 'pending'
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to settle order outcomes")?;
+
+    let rows = result.rows_affected();
+    if rows > 0 {
+        info!(settled = rows, "order outcomes settled");
+    }
+    Ok(rows)
 }
 
 /// Record a paper trade with full signal parameters.
@@ -1387,6 +1428,7 @@ mod tests {
             spread: 0.03,
             order_imbalance: 0.5,
             priority: SignalPriority::default(),
+            confidence: 0.5,
         };
 
         assert!(!mgr.is_in_cooldown(&signal, None));
@@ -1435,6 +1477,7 @@ mod tests {
             spread: 0.03,
             order_imbalance: 0.5,
             priority: SignalPriority::default(),
+            confidence: 0.5,
         };
 
         let id1 = mgr.generate_client_order_id(&signal);
@@ -1471,5 +1514,130 @@ mod tests {
 
         pnl.record_pnl(500); // win $5 (net positive)
         assert_eq!(pnl.current_loss(), 0);
+    }
+
+    fn make_test_config() -> Config {
+        Config {
+            database_url: String::new(),
+            redis_url: String::new(),
+            nats_url: String::new(),
+            kalshi_api_key: String::new(),
+            kalshi_private_key_path: String::new(),
+            kalshi_base_url: String::new(),
+            kalshi_ws_url: String::new(),
+            binance_ws_url: String::new(),
+            mesonet_base_url: String::new(),
+            coinbase_ws_url: String::new(),
+            binance_futures_ws_url: String::new(),
+            deribit_ws_url: String::new(),
+            binance_spot_ws_url: String::new(),
+            enable_coinbase: false,
+            enable_binance_futures: false,
+            enable_binance_spot: false,
+            enable_deribit: false,
+            paper_mode: true,
+            max_trade_size_cents: 2500,
+            max_daily_loss_cents: 10000,
+            max_positions: 5,
+            max_exposure_cents: 15000,
+            kelly_fraction_multiplier: 0.25,
+            database_pool_size: 5,
+            log_level: "info".to_string(),
+            log_format: "pretty".to_string(),
+            discord_webhook_url: None,
+            http_port: 3030,
+            rti_stale_threshold_secs: 5,
+            rti_outlier_threshold_pct: 0.5,
+            rti_min_venues: 2,
+            kill_switch_all: false,
+            kill_switch_crypto: false,
+            kill_switch_weather: false,
+            crypto_entry_min_minutes: 3.0,
+            crypto_entry_max_minutes: 20.0,
+            crypto_min_edge: 0.06,
+            crypto_min_kelly: 0.04,
+            crypto_min_confidence: 0.50,
+            crypto_cooldown_secs: 30,
+            weather_cooldown_secs: 120,
+        }
+    }
+
+    #[test]
+    fn test_confidence_scaled_sizing() {
+        let config = make_test_config();
+
+        // High confidence (1.0) → full Kelly size
+        let signal_high = Signal {
+            ticker: "T".to_string(),
+            signal_type: "crypto".to_string(),
+            action: "entry".to_string(),
+            direction: "yes".to_string(),
+            model_prob: 0.7,
+            market_price: 0.5,
+            edge: 0.15,
+            kelly_fraction: 0.20,
+            minutes_remaining: 10.0,
+            spread: 0.03,
+            order_imbalance: 0.5,
+            priority: SignalPriority::default(),
+            confidence: 1.0,
+        };
+
+        // Low confidence (0.2 clamped to 0.3)
+        let signal_low = Signal {
+            ticker: "T".to_string(),
+            signal_type: "crypto".to_string(),
+            action: "entry".to_string(),
+            direction: "yes".to_string(),
+            model_prob: 0.7,
+            market_price: 0.5,
+            edge: 0.15,
+            kelly_fraction: 0.20,
+            minutes_remaining: 10.0,
+            spread: 0.03,
+            order_imbalance: 0.5,
+            priority: SignalPriority::default(),
+            confidence: 0.2,
+        };
+
+        let size_high = compute_order_size(&config, &signal_high);
+        let size_low = compute_order_size(&config, &signal_low);
+
+        // High confidence should give larger size
+        assert!(
+            size_high > size_low,
+            "high conf {} should be > low conf {}",
+            size_high,
+            size_low
+        );
+
+        // size_high = 0.20 * 0.25 * 1.0 * 10000 = 500
+        assert_eq!(size_high, 500);
+        // size_low = 0.20 * 0.25 * 0.3 * 10000 = 150
+        assert_eq!(size_low, 150);
+    }
+
+    #[test]
+    fn test_managed_order_signal_id_and_latency() {
+        let mut order = ManagedOrder::new(
+            "tb-test-1".to_string(),
+            "TICKER".to_string(),
+            "crypto".to_string(),
+            "yes".to_string(),
+            100,
+            0.65,
+            0.50,
+            None,
+        );
+
+        // Defaults
+        assert!(order.signal_id.is_none());
+        assert!(order.latency_ms.is_none());
+
+        // Set values
+        order.signal_id = Some(42);
+        order.latency_ms = Some(15);
+        assert_eq!(order.signal_id, Some(42));
+        assert_eq!(order.latency_ms, Some(15));
     }
 }

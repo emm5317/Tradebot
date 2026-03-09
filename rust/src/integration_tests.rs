@@ -26,6 +26,7 @@ mod tests {
             spread: 0.04,
             order_imbalance: 0.5,
             priority: SignalPriority::Timer,
+            confidence: 0.5,
         }
     }
 

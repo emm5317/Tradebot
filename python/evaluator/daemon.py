@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import time as time_mod
 from datetime import datetime, time, timezone
 
 import asyncpg
@@ -69,6 +70,12 @@ class EvaluationDaemon:
             station_calibration=station_calibration,
         )
 
+        self._sigma_table = sigma_table
+        self._climo_table = climo_table
+        self._station_calibration = station_calibration
+        self._weather_eval = weather_eval
+        self._last_cal_refresh = time_mod.monotonic()
+
         self.registry.register("weather", weather_eval)
 
         # Load contract rules
@@ -90,6 +97,19 @@ class EvaluationDaemon:
         finally:
             await self._cleanup()
 
+    async def _maybe_refresh_calibration(self) -> None:
+        """Reload calibration tables if stale (every 15 minutes)."""
+        if (time_mod.monotonic() - self._last_cal_refresh) > 900:
+            self._sigma_table = await build_sigma_table(self.pool)
+            self._climo_table = await build_climo_table(self.pool)
+            self._station_calibration = await build_station_calibration(self.pool)
+            # Update the weather evaluator with fresh tables
+            self._weather_eval.sigma_table = self._sigma_table
+            self._weather_eval.climo_table = self._climo_table
+            self._weather_eval.station_calibration = self._station_calibration
+            self._last_cal_refresh = time_mod.monotonic()
+            logger.info("calibration_tables_refreshed")
+
     async def _evaluation_loop(self) -> None:
         """Main loop: every N seconds, evaluate all near-settlement contracts."""
         interval = self.settings.evaluation_interval_seconds
@@ -100,6 +120,7 @@ class EvaluationDaemon:
 
         while not self._shutdown.is_set():
             try:
+                await self._maybe_refresh_calibration()
                 await self._evaluate_all()
             except Exception:
                 logger.exception("evaluation_cycle_error")

@@ -43,7 +43,9 @@ struct MicrostructureAdj {
     spread_regime: f64,
     /// Order book depth imbalance aligned with direction.
     depth_imbalance: f64,
-    /// Sum of components, clamped to [-0.04, +0.04].
+    /// VWAP-vs-mid signal (Phase 7.3b).
+    vwap_signal: f64,
+    /// Sum of components, clamped to [-0.06, +0.06].
     total: f64,
 }
 
@@ -52,6 +54,7 @@ fn compute_microstructure_adj(
     _ticker: &str,
     direction: &str,
     order_imbalance: f64,
+    mid_price: f64,
     spread: f64,
     tape: &TradeTape,
 ) -> MicrostructureAdj {
@@ -73,12 +76,23 @@ fn compute_microstructure_adj(
     // Align with trade direction
     let depth_imbalance = (order_imbalance - 0.5) * dir_sign * 0.02;
 
-    let total = (trade_imbalance + spread_regime + depth_imbalance).clamp(-0.04, 0.04);
+    // Phase 7.3b: VWAP-vs-mid signal
+    // VWAP above mid = buying pressure (bullish for YES), below = selling pressure
+    let vwap_signal = if spread > 0.0 {
+        tape.vwap(Duration::from_secs(60))
+            .map(|vwap| ((vwap - mid_price) / spread).clamp(-1.0, 1.0) * dir_sign * 0.02)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    let total = (trade_imbalance + spread_regime + depth_imbalance + vwap_signal).clamp(-0.06, 0.06);
 
     MicrostructureAdj {
         trade_imbalance,
         spread_regime,
         depth_imbalance,
+        vwap_signal,
         total,
     }
 }
@@ -289,10 +303,10 @@ async fn evaluate_entry(
     // 5. Effective edge (spread-adjusted)
     let effective_edge = crypto_fv::compute_effective_edge(raw_edge, spread);
 
-    // 5b. Phase 4.3: Microstructure adjustment
+    // 5b. Phase 4.3: Microstructure adjustment (Phase 7.3b: includes VWAP signal)
     let micro = {
         let tape = trade_tape.read().unwrap();
-        compute_microstructure_adj(&contract.ticker, direction, order_imbalance, spread, &tape)
+        compute_microstructure_adj(&contract.ticker, direction, order_imbalance, mid_price, spread, &tape)
     };
     let adjusted_edge = effective_edge + micro.total;
 
@@ -302,8 +316,18 @@ async fn evaluate_entry(
         return;
     }
 
-    // 7. Fill price estimate
-    let fill_price = crypto_fv::estimate_fill_price(direction, mid_price, spread);
+    // 7. Fill price estimate — use book-walking VWAP when available
+    let book_side = if direction == "yes" {
+        crate::kalshi::orderbook::Side::Bid
+    } else {
+        crate::kalshi::orderbook::Side::Ask
+    };
+    // Estimate fill for a typical order size (use max_trade_size as upper bound)
+    let est_size = config.max_trade_size_cents.min(100);
+    let fill_price = orderbooks
+        .estimated_fill_price(&contract.ticker, book_side, est_size)
+        .and_then(|d| d.to_f64())
+        .unwrap_or_else(|| crypto_fv::estimate_fill_price(direction, mid_price, spread));
 
     // 8. Kelly criterion
     let kelly = crypto_fv::compute_kelly(fv.probability, fill_price, direction);
@@ -328,6 +352,7 @@ async fn evaluate_entry(
         spread,
         order_imbalance,
         priority: SignalPriority::NewData,
+        confidence: fv.confidence,
     };
 
     info!(
@@ -343,8 +368,12 @@ async fn evaluate_entry(
         micro_trade = %format!("{:.4}", micro.trade_imbalance),
         micro_spread = %format!("{:.4}", micro.spread_regime),
         micro_depth = %format!("{:.4}", micro.depth_imbalance),
+        micro_vwap = %format!("{:.4}", micro.vwap_signal),
         "crypto eval: entry signal"
     );
+
+    // Persist signal first to get DB id for order linkage
+    let signal_id = persist_signal(pool, &signal).await;
 
     // 11. Risk check + submit
     {
@@ -360,7 +389,7 @@ async fn evaluate_entry(
         }
 
         if let Err(e) = mgr
-            .submit_entry(config, kalshi, pool, &signal, crypto_state)
+            .submit_entry(config, kalshi, pool, &signal, signal_id, crypto_state)
             .await
         {
             warn!(
@@ -372,8 +401,7 @@ async fn evaluate_entry(
         }
     }
 
-    // Persist signal and publish advisory (fire-and-forget)
-    persist_signal(pool, &signal).await;
+    // Publish advisory and model state (fire-and-forget)
     write_model_state(redis, &contract.ticker, &fv).await;
     publish_advisory(nats, &signal).await;
 }
@@ -459,11 +487,12 @@ async fn evaluate_exit(
         spread,
         order_imbalance: 0.5,
         priority: SignalPriority::NewData,
+        confidence: fv.confidence,
     };
 
     let mut mgr = order_mgr.lock().await;
     if let Err(e) = mgr
-        .submit_exit(config, kalshi, pool, &signal, crypto_state)
+        .submit_exit(config, kalshi, pool, &signal, None, crypto_state)
         .await
     {
         warn!(
@@ -474,15 +503,16 @@ async fn evaluate_exit(
     }
 }
 
-/// Persist signal to the signals table.
-async fn persist_signal(pool: &sqlx::PgPool, signal: &Signal) {
-    let result = sqlx::query(
+/// Persist signal to the signals table. Returns the DB-assigned signal id.
+async fn persist_signal(pool: &sqlx::PgPool, signal: &Signal) -> Option<i64> {
+    let result = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO signals (
             ticker, signal_type, action, direction,
             model_prob, market_price, edge, kelly_fraction,
             minutes_remaining, spread, order_imbalance, source
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'rust')
+        RETURNING id
         "#,
     )
     .bind(&signal.ticker)
@@ -496,11 +526,15 @@ async fn persist_signal(pool: &sqlx::PgPool, signal: &Signal) {
     .bind(signal.minutes_remaining as f32)
     .bind(signal.spread as f32)
     .bind(signal.order_imbalance as f32)
-    .execute(pool)
+    .fetch_one(pool)
     .await;
 
-    if let Err(e) = result {
-        warn!(error = %e, "failed to persist signal");
+    match result {
+        Ok(id) => Some(id),
+        Err(e) => {
+            warn!(error = %e, "failed to persist signal");
+            None
+        }
     }
 }
 

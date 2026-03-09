@@ -118,7 +118,7 @@ pub async fn run(
                 // Handle exit signals
                 if signal.action == "exit" {
                     if mgr.has_position(&signal.ticker) {
-                        match mgr.submit_exit(config, &kalshi, &pool, &signal, &crypto_state).await {
+                        match mgr.submit_exit(config, &kalshi, &pool, &signal, None, &crypto_state).await {
                             Ok(()) => {
                                 info!(
                                     ticker = %signal.ticker,
@@ -139,7 +139,7 @@ pub async fn run(
                 }
 
                 // Submit entry via order manager (Phase 2.1)
-                match mgr.submit_entry(config, &kalshi, &pool, &signal, &crypto_state).await {
+                match mgr.submit_entry(config, &kalshi, &pool, &signal, None, &crypto_state).await {
                     Ok(()) => {
                         info!(
                             ticker = %signal.ticker,

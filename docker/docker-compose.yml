@@ -170,6 +170,23 @@ services:
     command: ["python", "-m", "evaluator.daemon"]
     restart: unless-stopped
 
+  # Python calibration agent — hourly feedback loop
+  calibrator:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://tradebot:${POSTGRES_PASSWORD:-tradebot_dev}@postgres:5432/tradebot
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      LOG_LEVEL: info
+    command: ["python", "-m", "calibrator.daemon"]
+    restart: unless-stopped
+
   # Contract sync loop — refreshes active contracts from Kalshi every 5 minutes
   contract-sync:
     build:

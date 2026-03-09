@@ -42,4 +42,11 @@ pub struct Signal {
     pub order_imbalance: f64,
     #[serde(default)]
     pub priority: SignalPriority,
+    /// Model confidence (0.0-1.0). Defaults to 0.5 for backward compat.
+    #[serde(default = "default_confidence")]
+    pub confidence: f64,
+}
+
+fn default_confidence() -> f64 {
+    0.5
 }
