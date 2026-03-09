@@ -137,6 +137,12 @@ settlement-summary:
 settlement-backfill days="30":
     cd python; python -m analytics.settlement_summary --backfill {{days}}
 
+# ── Database shell ──────────────────────────────────────────
+
+# Open psql shell inside the postgres container
+db-shell:
+    docker exec -it docker-postgres-1 psql -U tradebot -d tradebot
+
 # ── Diagnostics ─────────────────────────────────────────────
 
 health:
