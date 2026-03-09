@@ -15,7 +15,9 @@ import asyncio
 import itertools
 import json
 import math
+import os
 import uuid
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -44,10 +46,11 @@ WEATHER_PARAM_GRID: dict[str, list[Any]] = {
     "min_edge": [0.03, 0.05, 0.07, 0.10],
 }
 
-CRYPTO_PARAM_GRID: dict[str, list[Any]] = {
-    "basis_multiplier": [2.0, 3.0, 4.0, 5.0],
-    "funding_multiplier": [200, 300, 400],
-    "min_edge": [0.03, 0.05, 0.07, 0.10],
+CRYPTO_THRESHOLD_GRID: dict[str, list[Any]] = {
+    "min_edge": [0.02, 0.03, 0.05, 0.07, 0.10],
+    "min_confidence": [0.3, 0.4, 0.5, 0.6],
+    "min_kelly": [0.01, 0.02, 0.03, 0.05],
+    "kelly_multiplier": [0.25, 0.50, 0.75, 1.0],
 }
 
 
@@ -98,10 +101,12 @@ class ParameterSweep:
         pool: asyncpg.Pool,
         fee_model: FeeModel | None = None,
         time_decay_lambda: float = 0.0,
+        multi_signal: bool = False,
     ) -> None:
         self.pool = pool
         self.fee_model = fee_model or FeeModel()
         self.time_decay_lambda = time_decay_lambda
+        self.multi_signal = multi_signal
 
     async def sweep_weather(
         self,
@@ -206,8 +211,16 @@ class ParameterSweep:
                     max_combos=max_combos,
                     description=f"WF train {split.train_start}→{split.train_end}",
                 )
+            elif signal_type == "crypto":
+                train_results = await self.sweep_crypto(
+                    split.train_start,
+                    split.train_end,
+                    param_grid=param_grid,
+                    max_combos=max_combos,
+                    description=f"WF train {split.train_start}→{split.train_end}",
+                )
             else:
-                continue  # crypto walk-forward TBD
+                continue
 
             if not train_results:
                 continue
@@ -215,15 +228,24 @@ class ParameterSweep:
             best_params = train_results[0].params
 
             # Validate: single run with best params
-            val_contracts = await self._fetch_settled_contracts(
-                split.val_start, split.val_end, signal_type
-            )
-            if not val_contracts:
-                continue
-
-            val_result = await self._evaluate_weather_params(
-                val_contracts, best_params, split.val_start, split.val_end
-            )
+            if signal_type == "weather":
+                val_contracts = await self._fetch_settled_contracts(
+                    split.val_start, split.val_end, signal_type
+                )
+                if not val_contracts:
+                    continue
+                val_result = await self._evaluate_weather_params(
+                    val_contracts, best_params, split.val_start, split.val_end
+                )
+            else:
+                val_signals = await self._fetch_crypto_signals(
+                    split.val_start, split.val_end
+                )
+                if not val_signals:
+                    continue
+                val_result = self._evaluate_crypto_thresholds(
+                    val_signals, best_params
+                )
 
             await self._store_run(
                 val_result,
@@ -258,6 +280,282 @@ class ParameterSweep:
             )
 
         return oos_results
+
+    # ── Crypto sweep ──────────────────────────────────────────────
+
+    async def sweep_crypto(
+        self,
+        start: date,
+        end: date,
+        param_grid: dict[str, list[Any]] | None = None,
+        max_combos: int = 200,
+        description: str | None = None,
+    ) -> list[SweepResult]:
+        """Sweep crypto threshold/sizing params against stored signals.
+
+        Instead of re-computing crypto FV (done in Rust), this filters
+        historical signals by threshold parameters and simulates P&L.
+        """
+        grid = param_grid or CRYPTO_THRESHOLD_GRID
+        combos = _generate_combinations(grid, max_combos)
+
+        logger.info(
+            "sweep_start",
+            signal_type="crypto",
+            combinations=len(combos),
+            start=str(start),
+            end=str(end),
+        )
+
+        # Pre-fetch all crypto signals with outcomes
+        signals = await self._fetch_crypto_signals(start, end)
+        if not signals:
+            logger.warning("sweep_no_crypto_signals")
+            return []
+
+        results = []
+        for i, params in enumerate(combos):
+            result = self._evaluate_crypto_thresholds(signals, params)
+            results.append(result)
+
+            await self._store_run(result, "crypto", start, end, description)
+
+            if (i + 1) % 10 == 0:
+                logger.info(
+                    "sweep_progress",
+                    completed=i + 1,
+                    total=len(combos),
+                    best_brier=min(
+                        r.brier_score for r in results if r.brier_score > 0
+                    ) if any(r.brier_score > 0 for r in results) else None,
+                )
+
+        results.sort(key=lambda r: r.brier_score if r.brier_score > 0 else float("inf"))
+
+        logger.info(
+            "sweep_complete",
+            total_runs=len(results),
+            best_brier=results[0].brier_score if results else None,
+            best_params=results[0].params if results else None,
+        )
+
+        return results
+
+    def _evaluate_crypto_thresholds(
+        self,
+        signals: list[dict],
+        params: dict[str, Any],
+    ) -> SweepResult:
+        """Filter stored crypto signals by thresholds and compute metrics."""
+        run_id = str(uuid.uuid4())
+        result = SweepResult(run_id=run_id, params=params)
+
+        min_edge = params.get("min_edge", 0.05)
+        min_confidence = params.get("min_confidence", 0.3)
+        min_kelly = params.get("min_kelly", 0.01)
+        kelly_mult = params.get("kelly_multiplier", 0.5)
+
+        brier_sum = 0.0
+        brier_count = 0
+        pnl = 0.0
+        wins = 0
+        losses = 0
+        edge_sum = 0.0
+        trade_records: list[TradeRecord] = []
+        tickers_seen: set[str] = set()
+
+        for sig in signals:
+            # Apply threshold filters
+            edge = float(sig["edge"])
+            kelly = float(sig["kelly_fraction"])
+            confidence = float(sig.get("confidence") or 0.5)
+
+            if abs(edge) < min_edge:
+                continue
+            if confidence < min_confidence:
+                continue
+            if kelly < min_kelly:
+                continue
+
+            # In single-signal mode, skip duplicate tickers
+            ticker = sig["ticker"]
+            if not self.multi_signal:
+                if ticker in tickers_seen:
+                    continue
+                tickers_seen.add(ticker)
+
+            settled_yes = sig["settled_yes"]
+            if settled_yes is None:
+                continue
+
+            direction = sig["direction"]
+            model_prob = float(sig["model_prob"])
+            market_price = float(sig["market_price"])
+            outcome = 1.0 if settled_yes else 0.0
+
+            if direction == "yes":
+                p = model_prob
+                won = settled_yes
+            else:
+                p = 1.0 - model_prob
+                won = not settled_yes
+
+            brier_sum += (p - outcome) ** 2
+            brier_count += 1
+
+            # P&L with scaled Kelly and fees
+            fee = self.fee_model.round_trip_cost(market_price)
+            scaled_kelly = kelly * kelly_mult
+
+            if direction == "yes":
+                sig_pnl = (outcome - market_price) * 100 * scaled_kelly - fee
+            else:
+                sig_pnl = (market_price - outcome) * 100 * scaled_kelly - fee
+
+            if won:
+                wins += 1
+            else:
+                losses += 1
+
+            pnl += sig_pnl
+            edge_sum += abs(edge)
+            result.total_signals += 1
+
+            trade_records.append(TradeRecord(
+                settlement_date=sig["settlement_time"].date() if sig.get("settlement_time") else sig["created_at"].date(),
+                direction=direction,
+                model_prob=model_prob,
+                market_price=market_price,
+                edge=abs(edge),
+                settled_yes=settled_yes,
+                pnl_cents=sig_pnl,
+                fee_cents=fee,
+            ))
+
+        result.total_contracts = len(tickers_seen) if not self.multi_signal else brier_count
+
+        if brier_count > 0:
+            result.brier_score = brier_sum / brier_count
+            result.accuracy = wins / brier_count
+            result.avg_edge = edge_sum / brier_count
+
+        result.simulated_pnl_cents = int(pnl)
+        result.win_count = wins
+        result.loss_count = losses
+
+        if trade_records:
+            adv = compute_advanced_metrics(trade_records, self.time_decay_lambda)
+            result.log_loss = adv.log_loss
+            result.sharpe_ratio = adv.sharpe_ratio
+            result.sortino_ratio = adv.sortino_ratio
+            result.max_drawdown_cents = adv.max_drawdown_cents
+            result.max_drawdown_pct = adv.max_drawdown_pct
+            result.profit_factor = adv.profit_factor
+            result.ece = adv.expected_calibration_error
+            result.fee_total_cents = adv.total_fees_cents
+            result.win_streak = adv.win_streak
+            result.loss_streak = adv.loss_streak
+
+        return result
+
+    async def _fetch_crypto_signals(self, start: date, end: date) -> list[dict]:
+        """Fetch crypto signals with settled outcomes for threshold sweep."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT s.ticker, s.signal_type, s.direction, s.model_prob,
+                       s.market_price, s.edge, s.kelly_fraction,
+                       s.minutes_remaining, s.created_at,
+                       c.settled_yes, c.settlement_time,
+                       me.confidence
+                FROM signals s
+                JOIN contracts c ON s.ticker = c.ticker
+                LEFT JOIN model_evaluations me
+                    ON me.ticker = s.ticker
+                    AND me.created_at BETWEEN s.created_at - interval '1 minute'
+                                         AND s.created_at + interval '1 minute'
+                WHERE s.signal_type = 'crypto'
+                  AND c.settled_yes IS NOT NULL
+                  AND s.created_at >= $1
+                  AND s.created_at <= $2
+                ORDER BY s.created_at
+                """,
+                datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc),
+                datetime.combine(end, datetime.max.time(), tzinfo=timezone.utc),
+            )
+        return [dict(r) for r in rows]
+
+    # ── Parallel sweep ────────────────────────────────────────────
+
+    async def sweep_weather_parallel(
+        self,
+        start: date,
+        end: date,
+        param_grid: dict[str, list[Any]] | None = None,
+        max_combos: int = 200,
+        max_workers: int | None = None,
+        description: str | None = None,
+    ) -> list[SweepResult]:
+        """Run weather sweep in parallel using ProcessPoolExecutor.
+
+        Pre-fetches all contracts once and distributes param combos
+        across worker processes.
+        """
+        grid = param_grid or WEATHER_PARAM_GRID
+        combos = _generate_combinations(grid, max_combos)
+        workers = max_workers or min(4, os.cpu_count() or 1)
+
+        logger.info(
+            "sweep_parallel_start",
+            signal_type="weather",
+            combinations=len(combos),
+            workers=workers,
+        )
+
+        contracts = await self._fetch_settled_contracts(start, end, "weather")
+        if not contracts:
+            logger.warning("sweep_no_contracts")
+            return []
+
+        # Normalize weights and filter invalid combos
+        valid_combos = []
+        for params in combos:
+            w_p = params.get("weight_physics", 0.45)
+            w_h = params.get("weight_hrrr", 0.25)
+            w_t = params.get("weight_trend", 0.20)
+            w_c = max(0.0, 1.0 - w_p - w_h - w_t)
+            if w_c < 0:
+                continue
+            params["weight_climo"] = round(w_c, 2)
+            valid_combos.append(params)
+
+        # Run evaluations across workers — each combo gets its own
+        # async evaluation via the event loop
+        sem = asyncio.Semaphore(workers)
+
+        async def eval_with_limit(params: dict) -> SweepResult:
+            async with sem:
+                return await self._evaluate_weather_params(
+                    contracts, params, start, end
+                )
+
+        tasks = [eval_with_limit(p) for p in valid_combos]
+        results = await asyncio.gather(*tasks)
+        results = list(results)
+
+        # Store all results
+        for result in results:
+            await self._store_run(result, "weather", start, end, description)
+
+        results.sort(key=lambda r: r.brier_score if r.brier_score > 0 else float("inf"))
+
+        logger.info(
+            "sweep_parallel_complete",
+            total_runs=len(results),
+            best_brier=results[0].brier_score if results else None,
+        )
+
+        return results
 
     # ── Internal: weather evaluation ─────────────────────────────
 
@@ -401,8 +699,9 @@ class ParameterSweep:
                 bucket_key = f"{bucket_idx*10}-{(bucket_idx+1)*10}%"
                 buckets[bucket_key].append((p, bool(won)))
 
-                # Only first signal per contract
-                break
+                # In default mode, take only first signal per contract
+                if not self.multi_signal:
+                    break
 
         if brier_count > 0:
             result.brier_score = brier_sum / brier_count
@@ -754,6 +1053,8 @@ async def main() -> None:
     parser.add_argument("--leaderboard", action="store_true", help="Just print leaderboard")
     parser.add_argument("--time-decay", type=float, default=0.0, help="Exponential time-decay lambda (0=off)")
     parser.add_argument("--no-fees", action="store_true", help="Disable transaction cost modeling")
+    parser.add_argument("--multi-signal", action="store_true", help="Evaluate all snapshots per contract")
+    parser.add_argument("--workers", type=int, default=0, help="Parallel workers (0=sequential)")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -762,7 +1063,12 @@ async def main() -> None:
     start = date.fromisoformat(args.start)
     end = date.fromisoformat(args.end)
     fee_model = FeeModel() if not args.no_fees else FeeModel(fee_type="flat", flat_fee_cents=0)
-    sweep = ParameterSweep(pool, fee_model=fee_model, time_decay_lambda=args.time_decay)
+    sweep = ParameterSweep(
+        pool,
+        fee_model=fee_model,
+        time_decay_lambda=args.time_decay,
+        multi_signal=args.multi_signal,
+    )
 
     if args.leaderboard:
         await print_leaderboard(pool, args.type)
@@ -777,11 +1083,22 @@ async def main() -> None:
         print(json.dumps(results, indent=2, default=str))
     else:
         if args.type == "weather":
-            results = await sweep.sweep_weather(
+            if args.workers > 0:
+                results = await sweep.sweep_weather_parallel(
+                    start, end,
+                    max_combos=args.max_combos,
+                    max_workers=args.workers,
+                )
+            else:
+                results = await sweep.sweep_weather(
+                    start, end, max_combos=args.max_combos
+                )
+        elif args.type == "crypto":
+            results = await sweep.sweep_crypto(
                 start, end, max_combos=args.max_combos
             )
         else:
-            print("Crypto sweep not yet implemented")
+            print(f"Unknown signal type: {args.type}")
             await pool.close()
             return
 

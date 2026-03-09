@@ -80,10 +80,12 @@ class Backtester:
         pool: asyncpg.Pool,
         registry: EvaluatorRegistry,
         fee_model: FeeModel | None = None,
+        multi_signal: bool = False,
     ) -> None:
         self.pool = pool
         self.registry = registry
         self.fee_model = fee_model or FeeModel()
+        self.multi_signal = multi_signal
 
     async def run(
         self,
@@ -169,8 +171,9 @@ class Backtester:
                         result.signals.append(record)
                         result.total_signals += 1
 
-                        # Only evaluate first signal per contract
-                        break
+                        # In default mode, take only first signal per contract
+                        if not self.multi_signal:
+                            break
                     elif rej is not None:
                         result.total_rejections += 1
 
