@@ -1,12 +1,13 @@
 """Calibration Agent Daemon — closes the feedback loop between predictions and outcomes.
 
-Runs an hourly cycle with six jobs:
+Runs an hourly cycle with seven jobs:
 1. Settle order outcomes (win/loss from contracts.settled_yes)
 2. Populate calibration hypertable
 3. Compute rolling metrics (Brier, slippage, edge realization)
 4. Update station calibration weights from sweep results
 5. HRRR skill recalculation
 6. Drift detection & Discord alerting
+7. Monthly source attribution report (via replay engine)
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ class CalibrationDaemon:
         self.settings = settings or get_settings()
         self.pool: asyncpg.Pool | None = None
         self._shutdown = asyncio.Event()
+        self._last_attribution_month: int | None = None
 
     async def run(self) -> None:
         """Initialize connections and run calibration loop."""
@@ -59,6 +61,7 @@ class CalibrationDaemon:
                 await self.update_station_weights()
                 await self.recalculate_hrrr_skill()
                 await self.check_drift()
+                await self.maybe_run_source_attribution()
                 logger.info("calibration_cycle_complete")
             except Exception:
                 logger.exception("calibration_cycle_failed")
@@ -370,6 +373,66 @@ class CalibrationDaemon:
             logger.info("discord_alert_sent", message=message)
         except Exception:
             logger.warning("discord_alert_failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Job 7: Monthly Source Attribution
+    # ------------------------------------------------------------------
+
+    async def maybe_run_source_attribution(self) -> None:
+        """Run source attribution once per month on the 1st."""
+        now = datetime.now(timezone.utc)
+        current_month = now.year * 12 + now.month
+
+        if self._last_attribution_month == current_month:
+            return
+        if now.day != 1:
+            return
+
+        assert self.pool is not None
+
+        try:
+            from backtester.replay import ReplayEngine
+
+            engine = ReplayEngine(self.pool)
+
+            # Attribute over the previous month
+            end = datetime.combine(
+                now.date(), datetime.min.time()
+            ).replace(tzinfo=timezone.utc)
+            start = end - timedelta(days=30)
+
+            for signal_type in ("weather", "crypto"):
+                attributions = await engine.run_full_attribution(
+                    start, end, signal_type
+                )
+                if not attributions:
+                    continue
+
+                # Log results
+                for attr in attributions:
+                    logger.info(
+                        "source_attribution",
+                        signal_type=signal_type,
+                        source=attr.source_name,
+                        brier_delta=f"{attr.brier_delta:.4f}",
+                        pnl_delta=attr.pnl_delta,
+                    )
+
+                # Alert on negative-lift sources
+                webhook_url = self.settings.discord_webhook_url
+                if webhook_url:
+                    for attr in attributions:
+                        if attr.brier_delta < -0.01:
+                            await self._send_discord_alert(
+                                webhook_url,
+                                f"Source '{attr.source_name}' has negative lift "
+                                f"for {signal_type}: Brier delta {attr.brier_delta:.4f}, "
+                                f"PnL delta ${attr.pnl_delta/100:.2f}",
+                            )
+
+            self._last_attribution_month = current_month
+        except Exception:
+            logger.exception("source_attribution_failed")
 
     # ------------------------------------------------------------------
     # Helpers
