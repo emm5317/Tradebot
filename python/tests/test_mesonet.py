@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from data.mesonet import ASOSObservation, _safe_float, fetch_observation
+from data.mesonet import ASOSObservation, _STATION_MAP, _first_key, _safe_float, fetch_observation
 
 
 def test_safe_float_valid():
@@ -66,3 +66,37 @@ def test_staleness_flag():
         is_stale=True,
     )
     assert ob_stale.is_stale is True
+
+
+def test_station_map_known_stations():
+    """Known ICAO stations should map to stripped ID + state network."""
+    assert _STATION_MAP["KORD"] == ("ORD", "IL_ASOS")
+    assert _STATION_MAP["KJFK"] == ("JFK", "NY_ASOS")
+    assert _STATION_MAP["KDEN"] == ("DEN", "CO_ASOS")
+    assert _STATION_MAP["KLAX"] == ("LAX", "CA_ASOS")
+    assert _STATION_MAP["KIAH"] == ("IAH", "TX_ASOS")
+
+
+def test_station_map_fallback():
+    """Unknown stations should strip K prefix and use generic ASOS network."""
+    mesonet_id, network = _STATION_MAP.get("KATL", ("KATL".lstrip("K"), "ASOS"))
+    assert mesonet_id == "ATL"
+    assert network == "ASOS"
+
+
+def test_new_field_names_fallback():
+    """The _first_key fallback should pick up new Mesonet field names."""
+    ob = {"airtemp[F]": 72.5, "windspeed[kt]": 12.0, "windgust[kt]": 18.0, "precip_today[in]": 0.05}
+    assert _safe_float(_first_key(ob, "tmpf", "airtemp[F]")) == 72.5
+    assert _safe_float(_first_key(ob, "sknt", "windspeed[kt]")) == 12.0
+    assert _safe_float(_first_key(ob, "gust", "windgust[kt]")) == 18.0
+    assert _safe_float(_first_key(ob, "p01i", "precip_today[in]")) == 0.05
+
+
+def test_old_field_names_still_work():
+    """Old-style field names should still be parsed correctly."""
+    ob = {"tmpf": 65.0, "sknt": 8.0, "gust": None, "p01i": 0.0}
+    assert _safe_float(_first_key(ob, "tmpf", "airtemp[F]")) == 65.0
+    assert _safe_float(_first_key(ob, "sknt", "windspeed[kt]")) == 8.0
+    assert _safe_float(_first_key(ob, "gust", "windgust[kt]")) is None
+    assert _safe_float(_first_key(ob, "p01i", "precip_today[in]")) == 0.0

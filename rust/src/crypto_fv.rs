@@ -74,8 +74,11 @@ pub fn compute_crypto_fair_value(
     };
 
     // Funding rate signal: positive funding = longs pay = bullish sentiment
+    // Use tanh mapping for smooth gradient across typical range (-0.05% to +0.05%).
+    // tanh(rate * 4000) gives: 0.01% → 0.38, 0.03% → 0.84, 0.05% → 0.96
+    // Scaled to ±0.03 max adjustment.
     let funding_signal = if state.funding_rate != 0.0 {
-        (state.funding_rate * 300.0).clamp(-0.03, 0.03)
+        (state.funding_rate * 4000.0).tanh() * 0.03
     } else {
         0.0
     };
@@ -84,23 +87,24 @@ pub fn compute_crypto_fair_value(
     let p_adjusted = p_core + basis_signal + funding_signal;
     let p_final = p_adjusted.clamp(0.01, 0.99);
 
-    // Confidence
-    let mut confidence: f64 = 0.5;
+    // Confidence — base 0.40, with additive bonuses per feed.
+    // Single healthy spot venue is sufficient to trade (0.40 + 0.15 = 0.55 > MIN_CONFIDENCE).
+    let mut confidence: f64 = 0.40;
     if state.coinbase_spot > 0.0 {
         confidence += 0.15;
     }
     if state.binance_spot > 0.0 {
-        confidence += 0.1;
+        confidence += 0.15;
     }
     if state.dvol > 0.0 {
-        confidence += 0.1;
+        confidence += 0.10;
     }
     if state.perp_price > 0.0 {
-        confidence += 0.1;
+        confidence += 0.10;
     }
-    // Phase 4.2: reduce confidence when RTI uses fewer than min_venues
-    if !state.rti_reliable {
-        confidence -= 0.15;
+    // Bonus for multi-venue agreement (RTI reliable)
+    if state.rti_reliable {
+        confidence += 0.10;
     }
     confidence = confidence.clamp(0.0, 1.0);
 
@@ -405,6 +409,30 @@ mod tests {
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
 
         assert!(fv.funding_signal > 0.0, "Positive funding should produce positive signal");
+        // tanh mapping: 0.001 * 4000 = 4.0, tanh(4.0) ≈ 0.9993 → 0.03 * 0.9993 ≈ 0.030
+        assert!(fv.funding_signal < 0.031, "Funding signal should be <= 0.03, got {}", fv.funding_signal);
+    }
+
+    #[test]
+    fn test_funding_signal_gradient() {
+        // Small funding rates should produce proportionally smaller signals (not saturated)
+        let cs1 = CryptoState::new();
+        cs1.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs1.update_binance_futures(0.0, 0.0, 0.00005, 0.5); // small funding
+
+        let cs2 = CryptoState::new();
+        cs2.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs2.update_binance_futures(0.0, 0.0, 0.0003, 0.5); // moderate funding
+
+        let fv1 = compute_crypto_fair_value(&cs1.snapshot(), 95000.0, 10.0);
+        let fv2 = compute_crypto_fair_value(&cs2.snapshot(), 95000.0, 10.0);
+
+        // tanh preserves gradient: moderate should be meaningfully larger than small
+        assert!(
+            fv2.funding_signal > fv1.funding_signal * 2.0,
+            "Funding signal should show gradient: small={}, moderate={}",
+            fv1.funding_signal, fv2.funding_signal
+        );
     }
 
     #[test]
@@ -412,8 +440,8 @@ mod tests {
         let cs = CryptoState::new();
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
-        // No data = base 0.5 - 0.15 unreliable = 0.35
-        assert!((fv.confidence - 0.35).abs() < 0.01, "No data = 0.35 confidence, got {}", fv.confidence);
+        // No data = base 0.40, no feeds, no RTI reliable bonus = 0.40
+        assert!((fv.confidence - 0.40).abs() < 0.01, "No data = 0.40 confidence, got {}", fv.confidence);
 
         cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
         cs.update_binance_spot(95000.0, None, None, 0, 10.0);
@@ -421,9 +449,25 @@ mod tests {
         cs.update_deribit(50.0);
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
+        // 0.40 + 0.15(CB) + 0.15(BN) + 0.10(DVOL) + 0.10(perp) + 0.10(reliable) = 1.0
         assert!(
-            fv.confidence > 0.8,
+            fv.confidence > 0.9,
             "All feeds = high confidence, got {}",
+            fv.confidence
+        );
+    }
+
+    #[test]
+    fn test_confidence_single_venue_passes() {
+        // Single Binance venue should produce confidence > 0.5 (MIN_CONFIDENCE)
+        let cs = CryptoState::new();
+        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        let snap = cs.snapshot();
+        let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
+        // 0.40 + 0.15(BN) = 0.55 (RTI not reliable with single venue)
+        assert!(
+            fv.confidence >= 0.50,
+            "Single Binance venue should pass MIN_CONFIDENCE, got {}",
             fv.confidence
         );
     }

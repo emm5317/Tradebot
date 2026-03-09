@@ -226,7 +226,14 @@ def compute_weather_fair_value(
             p_physics = 1.0 if delta <= 0 else 0.0
         else:
             z = delta / sigma_total
-            p_physics = 1.0 - fast_norm_cdf(z)
+            p_terminal = 1.0 - fast_norm_cdf(z)
+            # Reflection principle: for barrier options (max/min contracts),
+            # P(process ever crosses barrier) = 2 * P(terminal > barrier)
+            # when process hasn't yet crossed.
+            if delta > 0:
+                p_physics = min(2.0 * p_terminal, 1.0)
+            else:
+                p_physics = p_terminal
 
     components["physics"] = p_physics
 

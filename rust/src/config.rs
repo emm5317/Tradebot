@@ -62,6 +62,22 @@ pub struct Config {
     pub kill_switch_crypto: bool,
     #[serde(default)]
     pub kill_switch_weather: bool,
+
+    // Crypto evaluator tuning
+    #[serde(default = "default_crypto_entry_min_minutes")]
+    pub crypto_entry_min_minutes: f64,
+    #[serde(default = "default_crypto_entry_max_minutes")]
+    pub crypto_entry_max_minutes: f64,
+    #[serde(default = "default_crypto_min_edge")]
+    pub crypto_min_edge: f64,
+    #[serde(default = "default_crypto_min_kelly")]
+    pub crypto_min_kelly: f64,
+    #[serde(default = "default_crypto_min_confidence")]
+    pub crypto_min_confidence: f64,
+    #[serde(default = "default_crypto_cooldown_secs")]
+    pub crypto_cooldown_secs: u64,
+    #[serde(default = "default_weather_cooldown_secs")]
+    pub weather_cooldown_secs: u64,
 }
 
 fn default_db_pool_size() -> u32 {
@@ -82,6 +98,34 @@ fn default_binance_spot_ws_url() -> String {
 
 fn default_deribit_ws_url() -> String {
     "wss://www.deribit.com/ws/api/v2".to_string()
+}
+
+fn default_crypto_entry_min_minutes() -> f64 {
+    3.0
+}
+
+fn default_crypto_entry_max_minutes() -> f64 {
+    20.0
+}
+
+fn default_crypto_min_edge() -> f64 {
+    0.06
+}
+
+fn default_crypto_min_kelly() -> f64 {
+    0.04
+}
+
+fn default_crypto_min_confidence() -> f64 {
+    0.50
+}
+
+fn default_crypto_cooldown_secs() -> u64 {
+    30
+}
+
+fn default_weather_cooldown_secs() -> u64 {
+    120
 }
 
 fn default_rti_stale_threshold_secs() -> u64 {
@@ -110,6 +154,11 @@ impl Config {
             max_positions = self.max_positions,
             max_exposure_cents = self.max_exposure_cents,
             kelly_fraction = self.kelly_fraction_multiplier,
+            crypto_entry_window = %format!("{}-{} min", self.crypto_entry_min_minutes, self.crypto_entry_max_minutes),
+            crypto_min_edge = self.crypto_min_edge,
+            crypto_min_confidence = self.crypto_min_confidence,
+            crypto_cooldown_secs = self.crypto_cooldown_secs,
+            weather_cooldown_secs = self.weather_cooldown_secs,
             database_pool_size = self.database_pool_size,
             http_port = self.http_port,
             log_level = %self.log_level,

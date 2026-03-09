@@ -79,8 +79,8 @@ impl CoinbaseFeed {
 
             match self.connect_and_stream(&redis, &crypto_state).await {
                 Ok(()) => {
-                    info!("coinbase ws closed cleanly");
-                    return;
+                    warn!("coinbase ws closed by server, will reconnect");
+                    backoff_secs = 1;
                 }
                 Err(e) => {
                     error!(error = %e, "coinbase ws disconnected");

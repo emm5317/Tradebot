@@ -1,10 +1,13 @@
 """BE-4.3: Weather Signal Evaluator.
 
-Evaluates weather contracts for tradeable edge using the ensemble model.
+Evaluates weather contracts for tradeable edge using the settlement-aware
+fair-value engine (weather_fv). Computes HRRR-blended probability with
+lock detection, rounding correction, and station calibration.
+
 Improvements over spec:
 - Uses estimated fill price for Kelly, not mid-price
 - Tracks rejections for UI visibility
-- Signal cooldown prevents duplicate signals
+- Signal cooldown with priority bypass for high-edge signals
 - Supports exit signals for open positions
 - Exposes ModelState for real-time UI display
 """
@@ -16,7 +19,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from models.physics import compute_ensemble_probability
+from models.physics import StationCalibration, climatological_probability
+from models.weather_fv import WeatherFairValue, WeatherState, compute_weather_fair_value
 from signals.types import (
     Contract,
     ModelState,
@@ -37,9 +41,9 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# Entry window: only evaluate contracts 8-18 minutes from settlement
-_MIN_MINUTES = 8.0
-_MAX_MINUTES = 18.0
+# Entry window: only evaluate contracts 5-20 minutes from settlement
+_MIN_MINUTES = 5.0
+_MAX_MINUTES = 20.0
 
 # Minimum edge after spread adjustment
 _MIN_EDGE = 0.05
@@ -51,7 +55,10 @@ _MIN_KELLY = 0.04
 _WIDE_SPREAD_THRESHOLD = 0.10
 
 # Cooldown: ignore ticker if signaled within this many seconds
-_SIGNAL_COOLDOWN_SECONDS = 300  # 5 minutes
+_SIGNAL_COOLDOWN_SECONDS = 120  # 2 minutes (reduced from 5 min)
+
+# Edge threshold to bypass cooldown (strong signal override)
+_COOLDOWN_BYPASS_EDGE = 0.10
 
 # Edge threshold for exiting a position (negative = edge flipped)
 _EXIT_EDGE_THRESHOLD = -0.03
@@ -73,6 +80,27 @@ class WeatherSignalEvaluator:
         self.ensemble_weights = ensemble_weights
         self.station_calibration = station_calibration or {}
         self._recent_signals: dict[str, datetime] = {}
+        # Running state per contract for lock detection
+        self._weather_states: dict[str, WeatherState] = {}
+
+    def _get_weather_state(self, contract: Contract) -> WeatherState:
+        """Get or create running state for a contract."""
+        key = contract.ticker
+        if key not in self._weather_states:
+            # Infer contract type from category
+            cat = (contract.category or "").lower()
+            if "min" in cat:
+                contract_type = "weather_min"
+            else:
+                contract_type = "weather_max"
+
+            self._weather_states[key] = WeatherState(
+                station=contract.station or "KORD",
+                obs_date=datetime.now(timezone.utc).date().isoformat(),
+                contract_type=contract_type,
+                strike_f=contract.threshold or 0.0,
+            )
+        return self._weather_states[key]
 
     def evaluate(
         self,
@@ -80,6 +108,8 @@ class WeatherSignalEvaluator:
         observation: ASOSObservation,
         orderbook: OrderbookState,
         recent_temps: list[float] | None = None,
+        hrrr_forecast_temps_f: list[float] | None = None,
+        metar_temp_c: int | None = None,
     ) -> tuple[SignalSchema | None, RejectedSignal | None, ModelState]:
         """Evaluate a weather contract for entry signal.
 
@@ -137,43 +167,62 @@ class WeatherSignalEvaluator:
             model_state.rejection_reason = "missing_threshold"
             return None, rejection, model_state
 
-        # 4. Check signal cooldown
+        # 4. Check signal cooldown (with priority bypass for strong edge)
+        # We defer the bypass check until after we compute edge
+        cooldown_active = False
         last_signal = self._recent_signals.get(contract.ticker)
         if last_signal is not None:
             elapsed = (now - last_signal).total_seconds()
             if elapsed < _SIGNAL_COOLDOWN_SECONDS:
-                rejection = RejectedSignal(
-                    ticker=contract.ticker,
-                    signal_type="weather",
-                    rejection_reason=f"cooldown ({int(elapsed)}s/{_SIGNAL_COOLDOWN_SECONDS}s)",
-                    minutes_remaining=minutes,
-                )
-                model_state.rejection_reason = "cooldown"
-                return None, rejection, model_state
+                cooldown_active = True
 
-        # 5. Compute ensemble probability
+        # 5. Compute fair value using settlement-aware engine
         hour = now.hour
         month = now.month
         station = contract.station or "KORD"
 
-        p_ensemble, p_physics, p_climo, p_trend = compute_ensemble_probability(
-            current_temp_f=observation.temperature_f,
-            threshold_f=contract.threshold,
-            minutes_remaining=minutes,
-            station=station,
-            hour=hour,
-            month=month,
-            recent_temps=recent_temps,
-            sigma_table=self.sigma_table,
-            climo_table=self.climo_table,
-            weights=self.ensemble_weights,
+        # Look up station-specific sigma
+        sigma = 0.3
+        if self.sigma_table is not None:
+            sigma = self.sigma_table.get((station, hour, month), 0.3)
+
+        # Look up station calibration
+        station_cal = self.station_calibration.get((station, month, hour))
+
+        # Get running state for lock detection
+        weather_state = self._get_weather_state(contract)
+
+        # Compute climo probability for the fair value engine
+        p_climo = climatological_probability(
+            station, hour, month, contract.threshold,
+            observation.temperature_f, self.climo_table,
         )
+
+        # Infer contract type
+        cat = (contract.category or "").lower()
+        contract_type = "weather_min" if "min" in cat else "weather_max"
+
+        fv: WeatherFairValue = compute_weather_fair_value(
+            contract_type=contract_type,
+            strike_f=contract.threshold,
+            current_temp_f=observation.temperature_f,
+            minutes_remaining=minutes,
+            sigma_per_10min=sigma,
+            state=weather_state,
+            metar_temp_c=metar_temp_c,
+            hrrr_forecast_temps_f=hrrr_forecast_temps_f,
+            recent_temps=recent_temps,
+            climo_prob=p_climo,
+            station_cal=station_cal,
+        )
+
+        p_ensemble = fv.probability
 
         # Update model state with probabilities
         model_state.model_prob = p_ensemble
-        model_state.physics_prob = p_physics
-        model_state.climo_prob = p_climo
-        model_state.trend_prob = p_trend
+        model_state.physics_prob = fv.components.get("physics")
+        model_state.climo_prob = fv.components.get("climo")
+        model_state.trend_prob = fv.components.get("trend")
 
         # 6. Determine direction and raw edge
         market_price = orderbook.mid_price
@@ -186,6 +235,26 @@ class WeatherSignalEvaluator:
         effective_edge = compute_effective_edge(
             raw_edge, orderbook.spread, _WIDE_SPREAD_THRESHOLD
         )
+
+        # Now check cooldown with bypass for strong edge
+        if cooldown_active:
+            if effective_edge < _COOLDOWN_BYPASS_EDGE:
+                assert last_signal is not None
+                elapsed = (now - last_signal).total_seconds()
+                rejection = RejectedSignal(
+                    ticker=contract.ticker,
+                    signal_type="weather",
+                    rejection_reason=f"cooldown ({int(elapsed)}s/{_SIGNAL_COOLDOWN_SECONDS}s)",
+                    minutes_remaining=minutes,
+                )
+                model_state.rejection_reason = "cooldown"
+                return None, rejection, model_state
+            else:
+                logger.info(
+                    "weather_cooldown_bypassed",
+                    ticker=contract.ticker,
+                    edge=f"{effective_edge:.3f}",
+                )
 
         if effective_edge < _MIN_EDGE:
             rejection = RejectedSignal(
@@ -233,9 +302,10 @@ class WeatherSignalEvaluator:
             spread=orderbook.spread,
             order_imbalance=orderbook.imbalance,
             model_components={
-                "physics": round(p_physics, 4),
-                "climo": round(p_climo, 4),
-                "trend": round(p_trend, 4),
+                "locked": fv.already_locked,
+                "rounding_ambiguous": fv.rounding_ambiguous,
+                "confidence": round(fv.confidence, 4),
+                **{k: round(v, 4) for k, v in fv.components.items()},
                 "ensemble": round(p_ensemble, 4),
                 "station": station,
             },
@@ -249,6 +319,8 @@ class WeatherSignalEvaluator:
             kelly=f"{kelly:.3f}",
             model_prob=f"{p_ensemble:.3f}",
             market=f"{market_price:.3f}",
+            locked=fv.already_locked,
+            confidence=f"{fv.confidence:.2f}",
         )
 
         return signal, None, model_state
@@ -261,6 +333,8 @@ class WeatherSignalEvaluator:
         held_direction: str,
         entry_price: float,
         recent_temps: list[float] | None = None,
+        hrrr_forecast_temps_f: list[float] | None = None,
+        metar_temp_c: int | None = None,
     ) -> SignalSchema | None:
         """Re-evaluate an open position for exit.
 
@@ -279,19 +353,39 @@ class WeatherSignalEvaluator:
             return None
 
         station = contract.station or "KORD"
-        p_ensemble, _, _, _ = compute_ensemble_probability(
-            current_temp_f=observation.temperature_f,
-            threshold_f=contract.threshold,
-            minutes_remaining=minutes,
-            station=station,
-            hour=now.hour,
-            month=now.month,
-            recent_temps=recent_temps,
-            sigma_table=self.sigma_table,
-            climo_table=self.climo_table,
-            weights=self.ensemble_weights,
+        hour = now.hour
+        month = now.month
+
+        sigma = 0.3
+        if self.sigma_table is not None:
+            sigma = self.sigma_table.get((station, hour, month), 0.3)
+
+        station_cal = self.station_calibration.get((station, month, hour))
+        weather_state = self._get_weather_state(contract)
+
+        p_climo = climatological_probability(
+            station, hour, month, contract.threshold,
+            observation.temperature_f, self.climo_table,
         )
 
+        cat = (contract.category or "").lower()
+        contract_type = "weather_min" if "min" in cat else "weather_max"
+
+        fv = compute_weather_fair_value(
+            contract_type=contract_type,
+            strike_f=contract.threshold,
+            current_temp_f=observation.temperature_f,
+            minutes_remaining=minutes,
+            sigma_per_10min=sigma,
+            state=weather_state,
+            metar_temp_c=metar_temp_c,
+            hrrr_forecast_temps_f=hrrr_forecast_temps_f,
+            recent_temps=recent_temps,
+            climo_prob=p_climo,
+            station_cal=station_cal,
+        )
+
+        p_ensemble = fv.probability
         market_price = orderbook.mid_price
 
         # Check if edge has flipped against our position

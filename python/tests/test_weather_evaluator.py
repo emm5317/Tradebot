@@ -102,10 +102,11 @@ class TestWeatherEvaluator:
 
     def test_insufficient_edge_rejected(self):
         evaluator = WeatherSignalEvaluator()
-        # Temp at threshold → model_prob ~0.50, market at 0.50 → no edge
-        contract = _make_contract(threshold=72.0)
-        obs = _make_observation(temp=72.0)
-        book = _make_orderbook(mid=0.50, spread=0.04)
+        # Temp below threshold → not locked, physics prob ~0, blended ~0.28
+        # Market at 0.30 → tiny edge after spread → rejected
+        contract = _make_contract(threshold=80.0)
+        obs = _make_observation(temp=68.0)
+        book = _make_orderbook(mid=0.30, spread=0.04)
 
         signal, rejection, state = evaluator.evaluate(contract, obs, book)
         assert signal is None
@@ -114,15 +115,19 @@ class TestWeatherEvaluator:
 
     def test_cooldown_prevents_duplicate(self):
         evaluator = WeatherSignalEvaluator()
-        contract = _make_contract(threshold=60.0)
-        obs = _make_observation(temp=75.0)
-        book = _make_orderbook(mid=0.50, spread=0.04)
+        # Temp below threshold so not locked; physics gives moderate prob
+        # with blended model giving enough edge to signal but below
+        # the _COOLDOWN_BYPASS_EDGE (0.10) on second eval
+        contract = _make_contract(threshold=73.0)
+        obs = _make_observation(temp=72.0)
+        book = _make_orderbook(mid=0.20, spread=0.04)
 
-        # First eval should generate signal
+        # First eval should generate signal (model prob ~0.28, market 0.20,
+        # direction=no since 1-0.28=0.72 > 0.80=1-0.20... let's verify)
         signal1, _, _ = evaluator.evaluate(contract, obs, book)
         assert signal1 is not None
 
-        # Second eval should hit cooldown
+        # Second eval should hit cooldown (edge < 0.10 bypass threshold)
         signal2, rejection2, _ = evaluator.evaluate(contract, obs, book)
         assert signal2 is None
         assert rejection2 is not None
@@ -167,22 +172,19 @@ class TestWeatherEvaluator:
         assert state is not None
 
     def test_exit_signal_when_edge_flips(self):
-        # Use physics-only weights so ensemble reflects true physics model
-        evaluator = WeatherSignalEvaluator(
-            ensemble_weights=(1.0, 0.0, 0.0),
-        )
+        evaluator = WeatherSignalEvaluator()
         # Bought YES at 0.50 but now temp way below threshold
+        # Physics prob ≈ 0, blended ≈ 0.275 (climo+trend at 0.5)
+        # Market at 0.40 → current_edge = 0.275 - 0.40 = -0.125 < -0.03 → exit
         contract = _make_contract(threshold=90.0, minutes_ahead=10.0)
         obs = _make_observation(temp=60.0)
-        book = _make_orderbook(mid=0.10, spread=0.04)
+        book = _make_orderbook(mid=0.40, spread=0.04)
 
         exit_signal = evaluator.evaluate_exit(
             contract, obs, book,
             held_direction="yes",
             entry_price=0.50,
         )
-        # Physics model: P(60→90 in 10 min) ≈ 0, market=0.10
-        # Edge = 0 - 0.10 = -0.10 < -0.03 → exit
         assert exit_signal is not None
         assert exit_signal.action.value == "exit"
         assert exit_signal.direction == "no"  # selling the YES

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use rust_decimal::prelude::ToPrimitive;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::config::Config;
 use crate::contract_discovery::ContractDiscovery;
@@ -27,15 +27,6 @@ use crate::kalshi::trade_tape::TradeTape;
 use crate::kill_switch::KillSwitchState;
 use crate::order_manager::OrderManager;
 use crate::types::{Signal, SignalPriority};
-
-/// Minimum confidence from the fair-value model to generate a signal.
-const MIN_CONFIDENCE: f64 = 0.5;
-
-/// Minimum effective edge (spread-adjusted) to generate an entry signal.
-const MIN_EDGE: f64 = 0.06;
-
-/// Minimum Kelly fraction to generate an entry signal.
-const MIN_KELLY: f64 = 0.04;
 
 /// Exit edge threshold — if edge flips beyond this, exit.
 const EXIT_EDGE_THRESHOLD: f64 = -0.03;
@@ -94,18 +85,18 @@ fn compute_microstructure_adj(
 
 /// Contract lifecycle phase.
 enum ContractPhase {
-    /// 15–30 min to settlement: too early, skip.
+    /// Too early, skip.
     Eligible,
-    /// 5–15 min to settlement: generate entry signals.
+    /// In entry window: generate entry signals.
     InWindow,
-    /// <5 min to settlement: exit signals only.
+    /// Near settlement: exit signals only.
     ExitOnly,
 }
 
-fn contract_phase(minutes_remaining: f64) -> ContractPhase {
-    if minutes_remaining > 15.0 {
+fn contract_phase(minutes_remaining: f64, min_minutes: f64, max_minutes: f64) -> ContractPhase {
+    if minutes_remaining > max_minutes {
         ContractPhase::Eligible
-    } else if minutes_remaining >= 5.0 {
+    } else if minutes_remaining >= min_minutes {
         ContractPhase::InWindow
     } else {
         ContractPhase::ExitOnly
@@ -133,6 +124,7 @@ pub async fn run(
 ) {
     let mut rx = crypto_state.subscribe();
     let mut last_eval: HashMap<String, Instant> = HashMap::new();
+    let mut last_summary = Instant::now();
 
     info!("crypto evaluator started (event-driven)");
 
@@ -147,13 +139,28 @@ pub async fn run(
                 let eval_start = Instant::now();
                 let snap = crypto_state.snapshot();
 
+                // Periodic 60s summary
+                if last_summary.elapsed() >= Duration::from_secs(60) {
+                    let contracts = contract_discovery.active_contracts();
+                    info!(
+                        shadow_rti = %format!("{:.0}", snap.shadow_rti),
+                        rti_reliable = snap.rti_reliable,
+                        contract_count = contracts.len(),
+                        dvol = %format!("{:.1}", snap.dvol),
+                        "crypto eval: 60s summary"
+                    );
+                    last_summary = Instant::now();
+                }
+
                 // Skip if we don't have meaningful state yet
                 if snap.shadow_rti <= 0.0 {
+                    trace!(shadow_rti = %snap.shadow_rti, "crypto eval: skipping, shadow_rti <= 0");
                     continue;
                 }
 
                 let contracts = contract_discovery.active_contracts();
                 if contracts.is_empty() {
+                    trace!("crypto eval: skipping, no active contracts");
                     continue;
                 }
 
@@ -174,9 +181,9 @@ pub async fn run(
                         continue;
                     }
 
-                    match contract_phase(minutes_remaining) {
+                    match contract_phase(minutes_remaining, config.crypto_entry_min_minutes, config.crypto_entry_max_minutes) {
                         ContractPhase::Eligible => {
-                            // Too early — skip
+                            trace!(ticker = %contract.ticker, minutes = %format!("{:.1}", minutes_remaining), "crypto eval: eligible phase, too early");
                             continue;
                         }
                         ContractPhase::InWindow => {
@@ -254,7 +261,10 @@ async fn evaluate_entry(
     // 1. Read orderbook
     let mid_price = match orderbooks.mid_price(&contract.ticker) {
         Some(d) => d.to_f64().unwrap_or(0.5),
-        None => return, // no orderbook data
+        None => {
+            debug!(ticker = %contract.ticker, "crypto eval: no orderbook data");
+            return;
+        }
     };
     let spread = orderbooks
         .spread(&contract.ticker)
@@ -268,7 +278,8 @@ async fn evaluate_entry(
     let fv = crypto_fv::compute_crypto_fair_value(snap, contract.strike, minutes_remaining);
 
     // 3. Check confidence
-    if fv.confidence < MIN_CONFIDENCE {
+    if fv.confidence < config.crypto_min_confidence {
+        debug!(ticker = %contract.ticker, confidence = %format!("{:.2}", fv.confidence), "crypto eval: confidence below minimum");
         return;
     }
 
@@ -286,7 +297,8 @@ async fn evaluate_entry(
     let adjusted_edge = effective_edge + micro.total;
 
     // 6. Check minimum edge (using microstructure-adjusted edge)
-    if adjusted_edge < MIN_EDGE {
+    if adjusted_edge < config.crypto_min_edge {
+        debug!(ticker = %contract.ticker, edge = %format!("{:.4}", adjusted_edge), "crypto eval: edge below minimum");
         return;
     }
 
@@ -297,7 +309,8 @@ async fn evaluate_entry(
     let kelly = crypto_fv::compute_kelly(fv.probability, fill_price, direction);
 
     // 9. Check minimum Kelly
-    if kelly < MIN_KELLY {
+    if kelly < config.crypto_min_kelly {
+        debug!(ticker = %contract.ticker, kelly = %format!("{:.4}", kelly), "crypto eval: kelly below minimum");
         return;
     }
 

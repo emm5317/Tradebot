@@ -19,6 +19,7 @@ from config import Settings, get_settings
 from data.aviationweather import METARObservation, fetch_metar
 from data.binance_ws import BinanceFeed
 from data.mesonet import ASOSObservation, fetch_all_stations
+from data.nws import fetch_all_nws_stations
 from data.open_meteo import HRRRForecast, fetch_hrrr_forecasts
 
 logger = structlog.get_logger()
@@ -53,6 +54,7 @@ class CollectorDaemon:
         try:
             await asyncio.gather(
                 self.collect_asos_loop(),
+                self.collect_nws_loop(),
                 self.collect_market_snapshots_loop(),
                 self.collect_btc_loop(),
                 self.collect_crypto_ticks_loop(),
@@ -88,6 +90,29 @@ class CollectorDaemon:
 
             except Exception:
                 logger.exception("asos_collection_error")
+
+            await self._sleep_or_shutdown(interval)
+
+    async def collect_nws_loop(self) -> None:
+        """Every 60s: fetch all station observations from NWS API -> insert into observations table."""
+        interval = self.settings.collection_interval_seconds
+
+        while not self._shutdown.is_set():
+            try:
+                observations = await fetch_all_nws_stations(
+                    self.settings.asos_stations,
+                )
+
+                if observations:
+                    await self._insert_nws_observations(observations)
+                    logger.info(
+                        "nws_collected",
+                        count=len(observations),
+                        stale=[s for s, o in observations.items() if o.is_stale],
+                    )
+
+            except Exception:
+                logger.exception("nws_collection_error")
 
             await self._sleep_or_shutdown(interval)
 
@@ -231,6 +256,44 @@ class CollectorDaemon:
         records = [
             (
                 "asos",
+                ob.station,
+                ob.observed_at,
+                ob.temperature_f,
+                ob.wind_speed_kts,
+                ob.wind_gust_kts,
+                ob.precip_inch,
+                None,  # btc_spot
+                None,  # btc_vol_30m
+            )
+            for ob in observations.values()
+        ]
+
+        async with self.pool.acquire() as conn:
+            await conn.copy_records_to_table(
+                "observations",
+                records=records,
+                columns=[
+                    "source",
+                    "station",
+                    "observed_at",
+                    "temperature_f",
+                    "wind_speed_kts",
+                    "wind_gust_kts",
+                    "precip_inch",
+                    "btc_spot",
+                    "btc_vol_30m",
+                ],
+            )
+
+    async def _insert_nws_observations(
+        self, observations: dict[str, ASOSObservation]
+    ) -> None:
+        """Batch insert NWS observations using COPY for efficiency."""
+        assert self.pool is not None
+
+        records = [
+            (
+                "nws",
                 ob.station,
                 ob.observed_at,
                 ob.temperature_f,

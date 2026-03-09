@@ -13,6 +13,15 @@ logger = structlog.get_logger()
 
 _STALENESS_THRESHOLD_SECONDS = 300  # 5 minutes
 
+# Iowa State Mesonet requires ICAO prefix stripped and state-specific network
+_STATION_MAP: dict[str, tuple[str, str]] = {
+    "KORD": ("ORD", "IL_ASOS"),
+    "KJFK": ("JFK", "NY_ASOS"),
+    "KDEN": ("DEN", "CO_ASOS"),
+    "KLAX": ("LAX", "CA_ASOS"),
+    "KIAH": ("IAH", "TX_ASOS"),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ASOSObservation:
@@ -39,7 +48,8 @@ async def fetch_observation(
     Missing data fields return None rather than raising.
     """
     url = f"{mesonet_base_url}/json/current.py"
-    params = {"station": station, "network": "ASOS"}
+    mesonet_id, network = _STATION_MAP.get(station, (station.lstrip("K"), "ASOS"))
+    params = {"station": mesonet_id, "network": network}
 
     last_exc: Exception | None = None
     for attempt in range(3):
@@ -84,10 +94,10 @@ async def fetch_observation(
     return ASOSObservation(
         station=station,
         observed_at=observed_at,
-        temperature_f=_safe_float(ob.get("tmpf")),
-        wind_speed_kts=_safe_float(ob.get("sknt")),
-        wind_gust_kts=_safe_float(ob.get("gust")),
-        precip_inch=_safe_float(ob.get("p01i")),
+        temperature_f=_safe_float(_first_key(ob, "tmpf", "airtemp[F]")),
+        wind_speed_kts=_safe_float(_first_key(ob, "sknt", "windspeed[kt]")),
+        wind_gust_kts=_safe_float(_first_key(ob, "gust", "windgust[kt]")),
+        precip_inch=_safe_float(_first_key(ob, "p01i", "precip_today[in]")),
         raw=ob,
         staleness_seconds=staleness,
         is_stale=staleness > _STALENESS_THRESHOLD_SECONDS,
@@ -121,6 +131,14 @@ async def fetch_all_stations(
             except Exception:
                 logger.exception("mesonet_station_failed", station=station)
         return results
+
+
+def _first_key(d: dict, *keys: str) -> object:
+    """Return the value for the first key present in the dict (even if falsy)."""
+    for k in keys:
+        if k in d:
+            return d[k]
+    return None
 
 
 def _safe_float(value: object) -> float | None:

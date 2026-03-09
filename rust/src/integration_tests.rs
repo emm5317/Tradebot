@@ -208,6 +208,13 @@ mod tests {
             kill_switch_all: false,
             kill_switch_crypto: false,
             kill_switch_weather: false,
+            crypto_entry_min_minutes: 3.0,
+            crypto_entry_max_minutes: 20.0,
+            crypto_min_edge: 0.06,
+            crypto_min_kelly: 0.04,
+            crypto_min_confidence: 0.50,
+            crypto_cooldown_secs: 30,
+            weather_cooldown_secs: 120,
         }
     }
 }

@@ -86,8 +86,8 @@ impl BinanceFuturesFeed {
 
             match self.connect_and_stream(&redis, &crypto_state).await {
                 Ok(()) => {
-                    info!("binance futures ws closed cleanly");
-                    return;
+                    warn!("binance futures ws closed by server, will reconnect");
+                    backoff_secs = 1;
                 }
                 Err(e) => {
                     error!(error = %e, "binance futures ws disconnected");

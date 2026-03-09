@@ -306,9 +306,9 @@ impl OrderManager {
     // -----------------------------------------------------------------------
 
     /// Check if a signal is within its cooldown window.
-    fn is_in_cooldown(&self, signal: &Signal) -> bool {
+    fn is_in_cooldown(&self, signal: &Signal, config: Option<&Config>) -> bool {
         if let Some(last_time) = self.signal_cooldowns.get(&signal.ticker) {
-            let cooldown = cooldown_for_signal_type(&signal.signal_type);
+            let cooldown = cooldown_for_signal_type(&signal.signal_type, config);
             last_time.elapsed() < cooldown
         } else {
             false
@@ -387,18 +387,18 @@ impl OrderManager {
         }
 
         // Signal cooldown (Phase 2.6) with priority-based bypass (Phase 3)
-        if self.is_in_cooldown(signal) {
+        if self.is_in_cooldown(signal, Some(config)) {
             let bypass = match signal.priority {
                 // LockDetection always bypasses cooldown
                 SignalPriority::LockDetection => true,
-                // NewData with strong edge (2x MIN_EDGE = 0.12) bypasses cooldown
-                SignalPriority::NewData if signal.edge > 0.12 => true,
+                // NewData with strong edge (2x min_edge) bypasses cooldown
+                SignalPriority::NewData if signal.edge > config.crypto_min_edge * 2.0 => true,
                 _ => false,
             };
             if !bypass {
                 return Err(format!(
                     "signal cooldown ({:?} remaining)",
-                    cooldown_for_signal_type(&signal.signal_type)
+                    cooldown_for_signal_type(&signal.signal_type, Some(config))
                 ));
             }
             info!(
@@ -1087,11 +1087,13 @@ fn compute_order_size(config: &Config, signal: &Signal) -> i64 {
     size.min(config.max_trade_size_cents).max(1)
 }
 
-/// Signal-type-aware cooldown duration.
-fn cooldown_for_signal_type(signal_type: &str) -> std::time::Duration {
-    match signal_type {
-        "crypto" => std::time::Duration::from_secs(30),
-        "weather" => std::time::Duration::from_secs(120),
+/// Signal-type-aware cooldown duration, using config-driven values.
+fn cooldown_for_signal_type(signal_type: &str, config: Option<&Config>) -> std::time::Duration {
+    match (signal_type, config) {
+        ("crypto", Some(c)) => std::time::Duration::from_secs(c.crypto_cooldown_secs),
+        ("weather", Some(c)) => std::time::Duration::from_secs(c.weather_cooldown_secs),
+        ("crypto", None) => std::time::Duration::from_secs(30),
+        ("weather", None) => std::time::Duration::from_secs(120),
         _ => std::time::Duration::from_secs(60),
     }
 }
@@ -1332,15 +1334,15 @@ mod tests {
     #[test]
     fn test_cooldown_for_signal_type() {
         assert_eq!(
-            cooldown_for_signal_type("crypto"),
+            cooldown_for_signal_type("crypto", None),
             std::time::Duration::from_secs(30)
         );
         assert_eq!(
-            cooldown_for_signal_type("weather"),
+            cooldown_for_signal_type("weather", None),
             std::time::Duration::from_secs(120)
         );
         assert_eq!(
-            cooldown_for_signal_type("other"),
+            cooldown_for_signal_type("other", None),
             std::time::Duration::from_secs(60)
         );
     }
@@ -1387,9 +1389,9 @@ mod tests {
             priority: SignalPriority::default(),
         };
 
-        assert!(!mgr.is_in_cooldown(&signal));
+        assert!(!mgr.is_in_cooldown(&signal, None));
         mgr.record_signal_cooldown("TICKER-A");
-        assert!(mgr.is_in_cooldown(&signal));
+        assert!(mgr.is_in_cooldown(&signal, None));
     }
 
     #[test]

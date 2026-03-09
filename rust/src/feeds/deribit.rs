@@ -47,8 +47,8 @@ impl DeribitFeed {
 
             match self.connect_and_stream(&redis, &crypto_state).await {
                 Ok(()) => {
-                    info!("deribit ws closed cleanly");
-                    return;
+                    warn!("deribit ws closed by server, will reconnect");
+                    backoff_secs = 1;
                 }
                 Err(e) => {
                     error!(error = %e, "deribit ws disconnected");

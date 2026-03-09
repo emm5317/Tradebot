@@ -234,8 +234,8 @@ impl BinanceSpotFeed {
 
             match self.connect_and_stream(&redis, &crypto_state).await {
                 Ok(()) => {
-                    info!("binance spot ws closed cleanly");
-                    return;
+                    warn!("binance spot ws closed by server, will reconnect");
+                    backoff_secs = 1;
                 }
                 Err(e) => {
                     error!(error = %e, "binance spot ws disconnected");
