@@ -23,6 +23,8 @@ from typing import Any
 import asyncpg
 import structlog
 
+from backtester.costs import FeeModel
+from backtester.metrics import AdvancedMetrics, TradeRecord, compute_advanced_metrics
 from config import get_settings
 from data.mesonet import ASOSObservation
 from models.physics import StationCalibration, build_climo_table, build_sigma_table
@@ -65,6 +67,17 @@ class SweepResult:
     avg_edge: float = 0.0
     calibration: dict[str, dict] = field(default_factory=dict)
     signals_detail: list[dict] = field(default_factory=list)
+    # Advanced metrics (Phase 8.2/8.3)
+    log_loss: float = 0.0
+    sharpe_ratio: float = 0.0
+    sortino_ratio: float = 0.0
+    max_drawdown_cents: float = 0.0
+    max_drawdown_pct: float = 0.0
+    profit_factor: float = 0.0
+    ece: float = 0.0
+    fee_total_cents: float = 0.0
+    win_streak: int = 0
+    loss_streak: int = 0
 
 
 @dataclass
@@ -80,8 +93,15 @@ class WalkForwardSplit:
 class ParameterSweep:
     """Grid search over backtester hyperparameters."""
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        fee_model: FeeModel | None = None,
+        time_decay_lambda: float = 0.0,
+    ) -> None:
         self.pool = pool
+        self.fee_model = fee_model or FeeModel()
+        self.time_decay_lambda = time_decay_lambda
 
     async def sweep_weather(
         self,
@@ -273,6 +293,7 @@ class ParameterSweep:
         wins = 0
         losses = 0
         edge_sum = 0.0
+        trade_records: list[TradeRecord] = []
         buckets: dict[str, list[tuple[float, bool]]] = {
             f"{i*10}-{(i+1)*10}%": [] for i in range(10)
         }
@@ -347,10 +368,13 @@ class ParameterSweep:
                 brier_sum += (p - outcome) ** 2
                 brier_count += 1
 
+                # Transaction cost
+                fee = self.fee_model.round_trip_cost(market_price)
+
                 if direction == "yes":
-                    sig_pnl = int((outcome - market_price) * 100)
+                    sig_pnl = (outcome - market_price) * 100 - fee
                 else:
-                    sig_pnl = int((market_price - outcome) * 100)
+                    sig_pnl = (market_price - outcome) * 100 - fee
 
                 if won:
                     wins += 1
@@ -360,6 +384,17 @@ class ParameterSweep:
                 pnl += sig_pnl
                 edge_sum += abs_edge
                 result.total_signals += 1
+
+                trade_records.append(TradeRecord(
+                    settlement_date=contract["settlement_time"].date(),
+                    direction=direction,
+                    model_prob=fv.probability,
+                    market_price=market_price,
+                    edge=abs_edge,
+                    settled_yes=settled_yes,
+                    pnl_cents=sig_pnl,
+                    fee_cents=fee,
+                ))
 
                 # Calibration buckets on directional probability
                 bucket_idx = min(int(p * 10), 9)
@@ -374,7 +409,7 @@ class ParameterSweep:
             result.accuracy = wins / brier_count
             result.avg_edge = edge_sum / brier_count
 
-        result.simulated_pnl_cents = pnl
+        result.simulated_pnl_cents = int(pnl)
         result.win_count = wins
         result.loss_count = losses
 
@@ -387,6 +422,20 @@ class ParameterSweep:
                     "avg_predicted": round(avg_pred, 3),
                     "actual_win_rate": round(win_rate, 3),
                 }
+
+        # Compute advanced metrics from trade records
+        if trade_records:
+            adv = compute_advanced_metrics(trade_records, self.time_decay_lambda)
+            result.log_loss = adv.log_loss
+            result.sharpe_ratio = adv.sharpe_ratio
+            result.sortino_ratio = adv.sortino_ratio
+            result.max_drawdown_cents = adv.max_drawdown_cents
+            result.max_drawdown_pct = adv.max_drawdown_pct
+            result.profit_factor = adv.profit_factor
+            result.ece = adv.expected_calibration_error
+            result.fee_total_cents = adv.total_fees_cents
+            result.win_streak = adv.win_streak
+            result.loss_streak = adv.loss_streak
 
         return result
 
@@ -534,22 +583,30 @@ class ParameterSweep:
                     run_id, signal_type, start_date, end_date,
                     params, description,
                     total_contracts, total_signals, accuracy,
-                    brier_score, simulated_pnl_cents,
+                    brier_score, log_loss, simulated_pnl_cents,
                     win_count, loss_count, avg_edge,
                     calibration,
                     train_start, train_end,
                     validation_start, validation_end,
-                    baseline_run_id, station
+                    baseline_run_id, station,
+                    sharpe_ratio, sortino_ratio,
+                    max_drawdown_cents, profit_factor, ece,
+                    fee_total_cents, win_streak, loss_streak,
+                    time_decay_lambda
                 ) VALUES (
                     $1, $2, $3, $4,
                     $5, $6,
                     $7, $8, $9,
-                    $10, $11,
-                    $12, $13, $14,
-                    $15,
-                    $16, $17,
-                    $18, $19,
-                    $20, $21
+                    $10, $11, $12,
+                    $13, $14, $15,
+                    $16,
+                    $17, $18,
+                    $19, $20,
+                    $21, $22,
+                    $23, $24,
+                    $25, $26, $27,
+                    $28, $29, $30,
+                    $31
                 )
                 """,
                 uuid.UUID(result.run_id),
@@ -562,6 +619,7 @@ class ParameterSweep:
                 result.total_signals,
                 result.accuracy,
                 result.brier_score,
+                result.log_loss,
                 result.simulated_pnl_cents,
                 result.win_count,
                 result.loss_count,
@@ -573,6 +631,15 @@ class ParameterSweep:
                 end if train_start else None,
                 uuid.UUID(baseline_run_id) if baseline_run_id else None,
                 station,
+                result.sharpe_ratio,
+                result.sortino_ratio,
+                int(result.max_drawdown_cents),
+                result.profit_factor,
+                result.ece,
+                int(result.fee_total_cents),
+                result.win_streak,
+                result.loss_streak,
+                self.time_decay_lambda,
             )
 
 
@@ -629,7 +696,9 @@ async def print_leaderboard(pool: asyncpg.Pool, signal_type: str, top_n: int = 2
             """
             SELECT run_id, params, brier_score, accuracy, simulated_pnl_cents,
                    total_signals, win_count, loss_count, description,
-                   train_start, validation_start
+                   train_start, validation_start,
+                   sharpe_ratio, max_drawdown_cents, profit_factor,
+                   fee_total_cents, ece
             FROM backtest_runs
             WHERE signal_type = $1
               AND brier_score IS NOT NULL
@@ -641,23 +710,33 @@ async def print_leaderboard(pool: asyncpg.Pool, signal_type: str, top_n: int = 2
             top_n,
         )
 
-    print(f"\n{'='*80}")
+    print(f"\n{'='*100}")
     print(f"  Top {top_n} {signal_type} backtest runs (by Brier score)")
-    print(f"{'='*80}")
-    print(f"  {'Rank':>4}  {'Brier':>7}  {'Acc':>6}  {'PnL':>8}  {'Signals':>7}  {'W/L':>7}  Params")
-    print(f"  {'-'*4}  {'-'*7}  {'-'*6}  {'-'*8}  {'-'*7}  {'-'*7}  {'-'*30}")
+    print(f"{'='*100}")
+    print(
+        f"  {'Rank':>4}  {'Brier':>7}  {'Acc':>6}  {'PnL':>8}  {'Fees':>6}  "
+        f"{'Sharpe':>7}  {'MaxDD':>7}  {'PF':>5}  {'Signals':>7}  Params"
+    )
+    print(
+        f"  {'-'*4}  {'-'*7}  {'-'*6}  {'-'*8}  {'-'*6}  "
+        f"{'-'*7}  {'-'*7}  {'-'*5}  {'-'*7}  {'-'*30}"
+    )
 
     for i, row in enumerate(rows, 1):
         params = json.loads(row["params"]) if isinstance(row["params"], str) else row["params"]
         param_str = ", ".join(f"{k}={v}" for k, v in params.items())
-        wl = f"{row['win_count']}/{row['loss_count']}"
         desc = f" [{row['description']}]" if row["description"] else ""
         is_wf = " (WF)" if row["train_start"] else ""
+        sharpe = row["sharpe_ratio"] or 0.0
+        max_dd = (row["max_drawdown_cents"] or 0) / 100
+        pf = row["profit_factor"] or 0.0
+        fees = (row["fee_total_cents"] or 0) / 100
 
         print(
             f"  {i:>4}  {row['brier_score']:>7.4f}  {row['accuracy']:>5.1%}  "
-            f"${row['simulated_pnl_cents']/100:>7.2f}  {row['total_signals']:>7}  "
-            f"{wl:>7}  {param_str}{is_wf}{desc}"
+            f"${row['simulated_pnl_cents']/100:>7.2f}  ${fees:>5.2f}  "
+            f"{sharpe:>7.2f}  ${max_dd:>6.2f}  {pf:>5.2f}  "
+            f"{row['total_signals']:>7}  {param_str}{is_wf}{desc}"
         )
 
     print()
@@ -673,6 +752,8 @@ async def main() -> None:
     parser.add_argument("--walk-forward", type=int, default=0, help="Walk-forward window in days (0=disabled)")
     parser.add_argument("--max-combos", type=int, default=200, help="Max parameter combinations")
     parser.add_argument("--leaderboard", action="store_true", help="Just print leaderboard")
+    parser.add_argument("--time-decay", type=float, default=0.0, help="Exponential time-decay lambda (0=off)")
+    parser.add_argument("--no-fees", action="store_true", help="Disable transaction cost modeling")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -680,7 +761,8 @@ async def main() -> None:
 
     start = date.fromisoformat(args.start)
     end = date.fromisoformat(args.end)
-    sweep = ParameterSweep(pool)
+    fee_model = FeeModel() if not args.no_fees else FeeModel(fee_type="flat", flat_fee_cents=0)
+    sweep = ParameterSweep(pool, fee_model=fee_model, time_decay_lambda=args.time_decay)
 
     if args.leaderboard:
         await print_leaderboard(pool, args.type)

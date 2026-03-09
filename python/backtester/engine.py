@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import asyncpg
 import structlog
 
+from backtester.costs import FeeModel
 from config import Settings, get_settings
 from data.mesonet import ASOSObservation
 from models.physics import build_climo_table, build_sigma_table
@@ -74,9 +75,15 @@ class BacktestResult:
 class Backtester:
     """Replays historical data through registered evaluators."""
 
-    def __init__(self, pool: asyncpg.Pool, registry: EvaluatorRegistry) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        registry: EvaluatorRegistry,
+        fee_model: FeeModel | None = None,
+    ) -> None:
         self.pool = pool
         self.registry = registry
+        self.fee_model = fee_model or FeeModel()
 
     async def run(
         self,
@@ -205,11 +212,14 @@ class Backtester:
             # Brier score (lower is better)
             brier_sum += (p - outcome) ** 2
 
+            # Transaction cost
+            fee = self.fee_model.round_trip_cost(sig.market_price)
+
             if won:
                 correct += 1
-                pnl += sig.edge * sig.kelly_fraction * 10000  # cents
+                pnl += sig.edge * sig.kelly_fraction * 10000 - fee  # cents
             else:
-                pnl -= sig.kelly_fraction * 10000
+                pnl -= sig.kelly_fraction * 10000 + fee
 
             # Calibration bucket
             bucket_idx = min(int(p * 10), 9)
