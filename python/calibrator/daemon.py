@@ -161,7 +161,12 @@ class CalibrationDaemon:
                     AVG(o.fill_price - o.market_price_at_order) AS avg_slippage,
                     PERCENTILE_CONT(0.95) WITHIN GROUP (
                         ORDER BY ABS(COALESCE(o.fill_price - o.market_price_at_order, 0))
-                    ) AS p95_slippage
+                    ) AS p95_slippage,
+                    AVG(CASE
+                        WHEN o.outcome = 'win' THEN s.edge
+                        WHEN o.outcome = 'loss' THEN -s.edge
+                        ELSE NULL
+                    END) AS avg_edge_realized
                 FROM signals s
                 JOIN contracts c ON s.ticker = c.ticker
                 LEFT JOIN orders o ON o.signal_id = s.id
@@ -184,8 +189,9 @@ class CalibrationDaemon:
                     INSERT INTO calibration_metrics (
                         strategy, period_start, period_end,
                         brier_score, avg_predicted, avg_actual,
-                        signal_count, avg_slippage, p95_slippage
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        signal_count, avg_slippage, p95_slippage,
+                        avg_edge_realized
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     """,
                     row["strategy"],
                     period_start,
@@ -196,6 +202,7 @@ class CalibrationDaemon:
                     row["signal_count"],
                     row["avg_slippage"],
                     row["p95_slippage"],
+                    row["avg_edge_realized"],
                 )
 
         if rows:
@@ -210,7 +217,8 @@ class CalibrationDaemon:
         assert self.pool is not None
 
         async with self.pool.acquire() as conn:
-            # Get recent sweep results that beat current calibration
+            # Get recent sweep results that beat current calibration.
+            # Uses the station column (migration 020) on backtest_runs.
             sweeps = await conn.fetch(
                 """
                 SELECT DISTINCT ON (br.station)
@@ -218,8 +226,9 @@ class CalibrationDaemon:
                     br.brier_score AS sweep_brier,
                     br.params
                 FROM backtest_runs br
-                WHERE br.run_date > now() - interval '14 days'
+                WHERE br.created_at > now() - interval '14 days'
                   AND br.brier_score IS NOT NULL
+                  AND br.station IS NOT NULL
                 ORDER BY br.station, br.brier_score ASC
                 """
             )

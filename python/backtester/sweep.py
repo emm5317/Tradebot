@@ -262,14 +262,9 @@ class ParameterSweep:
         cal = StationCalibration(
             sigma_10min=0.3 * sigma_scale,
             hrrr_bias_f=0.0,
-            hrrr_rmse_f=2.0,
             hrrr_skill=0.7,
             rounding_bias=0.0,
-            weight_physics=w_p,
-            weight_hrrr=w_h,
-            weight_trend=w_t,
-            weight_climo=w_c,
-            sample_size=100,
+            weights=(w_p, w_h, w_t, w_c),
         )
 
         brier_sum = 0.0
@@ -337,11 +332,19 @@ class ParameterSweep:
                 if abs_edge < min_edge:
                     continue
 
-                # Record signal
+                # Record signal — use directional probability for Brier (8.0e)
                 direction = "yes" if edge > 0 else "no"
                 outcome = 1.0 if settled_yes else 0.0
 
-                brier_sum += (fv.probability - outcome) ** 2
+                # Directional probability: P(our bet wins)
+                if direction == "yes":
+                    p = fv.probability
+                    won = settled_yes
+                else:
+                    p = 1.0 - fv.probability
+                    won = not settled_yes
+
+                brier_sum += (p - outcome) ** 2
                 brier_count += 1
 
                 if direction == "yes":
@@ -349,7 +352,7 @@ class ParameterSweep:
                 else:
                     sig_pnl = int((market_price - outcome) * 100)
 
-                if sig_pnl > 0:
+                if won:
                     wins += 1
                 else:
                     losses += 1
@@ -358,9 +361,10 @@ class ParameterSweep:
                 edge_sum += abs_edge
                 result.total_signals += 1
 
-                bucket_idx = min(int(fv.probability * 10), 9)
+                # Calibration buckets on directional probability
+                bucket_idx = min(int(p * 10), 9)
                 bucket_key = f"{bucket_idx*10}-{(bucket_idx+1)*10}%"
-                buckets[bucket_key].append((fv.probability, sig_pnl > 0))
+                buckets[bucket_key].append((p, bool(won)))
 
                 # Only first signal per contract
                 break
@@ -521,6 +525,7 @@ class ParameterSweep:
         train_start: date | None = None,
         train_end: date | None = None,
         baseline_run_id: str | None = None,
+        station: str | None = None,
     ) -> None:
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -534,7 +539,7 @@ class ParameterSweep:
                     calibration,
                     train_start, train_end,
                     validation_start, validation_end,
-                    baseline_run_id
+                    baseline_run_id, station
                 ) VALUES (
                     $1, $2, $3, $4,
                     $5, $6,
@@ -544,7 +549,7 @@ class ParameterSweep:
                     $15,
                     $16, $17,
                     $18, $19,
-                    $20
+                    $20, $21
                 )
                 """,
                 uuid.UUID(result.run_id),
@@ -567,6 +572,7 @@ class ParameterSweep:
                 start if train_start else None,
                 end if train_start else None,
                 uuid.UUID(baseline_run_id) if baseline_run_id else None,
+                station,
             )
 
 

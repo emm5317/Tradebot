@@ -4,7 +4,7 @@
 //! and writes JSON summaries to Redis so the Python evaluator can
 //! use real-time data instead of stale DB snapshots.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,7 @@ use crate::kalshi::websocket::WsFeedMessage;
 struct TapeSnapshot {
     aggr_30s: f64,
     volume_60s: f64,
+    volume_300s: f64,
     last_trades: HashMap<String, Option<TradeRecord>>,
 }
 
@@ -32,6 +33,8 @@ struct TickerState {
     yes_ask_size: Option<i64>,
     volume: Option<i64>,
     open_interest: Option<i64>,
+    prev_open_interest: Option<i64>,
+    last_price_history: VecDeque<(Instant, i64)>,
     market_status: Option<String>,
 }
 
@@ -88,13 +91,31 @@ pub async fn run(
                     WsFeedMessage::TickerUpdate {
                         ticker, yes_bid_size, yes_ask_size,
                         volume, open_interest, market_status,
-                        ..
+                        last_price, ..
                     } => {
                         let state = ticker_states.entry(ticker.clone()).or_default();
                         if yes_bid_size.is_some() { state.yes_bid_size = yes_bid_size; }
                         if yes_ask_size.is_some() { state.yes_ask_size = yes_ask_size; }
                         if volume.is_some() { state.volume = volume; }
-                        if open_interest.is_some() { state.open_interest = open_interest; }
+                        // 7.3d: Track OI delta
+                        if let Some(oi) = open_interest {
+                            state.prev_open_interest = state.open_interest;
+                            state.open_interest = Some(oi);
+                        }
+                        // 7.3a: Track price history for momentum
+                        if let Some(price) = last_price {
+                            let now = Instant::now();
+                            state.last_price_history.push_back((now, price));
+                            // Keep only last 60 seconds
+                            let cutoff = now - Duration::from_secs(60);
+                            while let Some((ts, _)) = state.last_price_history.front() {
+                                if *ts < cutoff {
+                                    state.last_price_history.pop_front();
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
                         if market_status.is_some() {
                             // If market closed/settled, clear the orderbook
                             if let Some(ref status) = market_status {
@@ -124,6 +145,7 @@ pub async fn run(
                     TapeSnapshot {
                         aggr_30s: tape.aggressiveness(Duration::from_secs(30)),
                         volume_60s: tape.recent_volume(Duration::from_secs(60)) as f64,
+                        volume_300s: tape.recent_volume(Duration::from_secs(300)) as f64,
                         last_trades: dirty_tickers.iter().map(|t| (t.clone(), tape.last_trade(t).cloned())).collect(),
                     }
                 };
@@ -175,6 +197,11 @@ async fn flush_to_redis(
             "recent_volume_60s": recent_volume_60s,
         });
 
+        // Volume surge detection (7.3c): 60s volume vs 5-min baseline
+        let volume_300s_avg = tape.volume_300s / 5.0; // per-minute average
+        let volume_60s_rate = tape.volume_60s; // last minute
+        let volume_surge = volume_300s_avg > 0.0 && volume_60s_rate > volume_300s_avg * 3.0;
+
         // Add ticker channel fields if available
         if let Some(ts) = ts {
             if let Some(s) = ts.yes_bid_size { summary["best_bid_size"] = serde_json::json!(s); }
@@ -182,7 +209,19 @@ async fn flush_to_redis(
             if let Some(ref status) = ts.market_status { summary["market_status"] = serde_json::json!(status); }
             if let Some(v) = ts.volume { summary["volume"] = serde_json::json!(v); }
             if let Some(oi) = ts.open_interest { summary["open_interest"] = serde_json::json!(oi); }
+
+            // 7.3a: Price momentum (linear slope over last 30s)
+            let momentum = compute_price_momentum(&ts.last_price_history);
+            summary["price_momentum"] = serde_json::json!(momentum);
+
+            // 7.3d: Open interest delta
+            if let (Some(curr), Some(prev)) = (ts.open_interest, ts.prev_open_interest) {
+                summary["oi_delta"] = serde_json::json!(curr - prev);
+            }
         }
+
+        // 7.3c: Volume surge flag
+        summary["volume_surge"] = serde_json::json!(volume_surge);
 
         // Add last trade info
         if let Some(lt) = last_trade {
@@ -208,6 +247,36 @@ async fn flush_to_redis(
     }
 }
 
+/// Compute price momentum as linear regression slope over recent price history.
+///
+/// Returns slope in cents/second. Positive = price rising, negative = falling.
+fn compute_price_momentum(history: &VecDeque<(Instant, i64)>) -> f64 {
+    if history.len() < 2 {
+        return 0.0;
+    }
+    let anchor = history.front().unwrap().0;
+    let n = history.len() as f64;
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut sum_xy = 0.0;
+    let mut sum_x2 = 0.0;
+
+    for (ts, price) in history {
+        let x = ts.duration_since(anchor).as_secs_f64();
+        let y = *price as f64;
+        sum_x += x;
+        sum_y += y;
+        sum_xy += x * y;
+        sum_x2 += x * x;
+    }
+
+    let denom = n * sum_x2 - sum_x * sum_x;
+    if denom.abs() < 1e-12 {
+        return 0.0;
+    }
+    (n * sum_xy - sum_x * sum_y) / denom
+}
+
 /// Periodically check for stale feeds and write health status to Redis.
 async fn check_stale_feeds(
     orderbooks: &OrderbookManager,
@@ -229,5 +298,102 @@ async fn check_stale_feeds(
                 false,
             ).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_price_momentum_rising() {
+        let mut history = VecDeque::new();
+        let base = Instant::now() - Duration::from_secs(10);
+        // Prices rising: 50, 52, 54, 56, 58
+        for i in 0..5 {
+            history.push_back((base + Duration::from_secs(i * 2), 50 + i as i64 * 2));
+        }
+        let slope = compute_price_momentum(&history);
+        assert!(slope > 0.0, "slope should be positive for rising prices, got {slope}");
+        // ~1 cent/second
+        assert!((slope - 1.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_price_momentum_falling() {
+        let mut history = VecDeque::new();
+        let base = Instant::now() - Duration::from_secs(10);
+        for i in 0..5 {
+            history.push_back((base + Duration::from_secs(i * 2), 60 - i as i64 * 2));
+        }
+        let slope = compute_price_momentum(&history);
+        assert!(slope < 0.0, "slope should be negative for falling prices, got {slope}");
+    }
+
+    #[test]
+    fn test_price_momentum_flat() {
+        let mut history = VecDeque::new();
+        let base = Instant::now() - Duration::from_secs(10);
+        for i in 0..5 {
+            history.push_back((base + Duration::from_secs(i * 2), 50));
+        }
+        let slope = compute_price_momentum(&history);
+        assert!(slope.abs() < 0.001, "slope should be ~0 for flat prices, got {slope}");
+    }
+
+    #[test]
+    fn test_price_momentum_insufficient_data() {
+        let history = VecDeque::new();
+        assert_eq!(compute_price_momentum(&history), 0.0);
+
+        let mut history = VecDeque::new();
+        history.push_back((Instant::now(), 50));
+        assert_eq!(compute_price_momentum(&history), 0.0);
+    }
+
+    #[test]
+    fn test_ticker_state_oi_delta_tracking() {
+        let mut state = TickerState::default();
+        assert!(state.prev_open_interest.is_none());
+
+        // First OI update
+        state.prev_open_interest = state.open_interest;
+        state.open_interest = Some(100);
+        assert!(state.prev_open_interest.is_none());
+
+        // Second OI update — prev should now hold previous value
+        state.prev_open_interest = state.open_interest;
+        state.open_interest = Some(120);
+        assert_eq!(state.prev_open_interest, Some(100));
+        assert_eq!(state.open_interest.unwrap() - state.prev_open_interest.unwrap(), 20);
+    }
+
+    #[test]
+    fn test_ticker_state_price_history_pruning() {
+        let mut state = TickerState::default();
+        let old = Instant::now() - Duration::from_secs(120);
+
+        // Add old entries
+        for i in 0..5 {
+            state.last_price_history.push_back((old + Duration::from_secs(i), 50));
+        }
+        // Add recent entries
+        let now = Instant::now();
+        for i in 0..3 {
+            state.last_price_history.push_back((now - Duration::from_secs(i), 55));
+        }
+
+        // Prune (mimicking what the handler does)
+        let cutoff = Instant::now() - Duration::from_secs(60);
+        while let Some((ts, _)) = state.last_price_history.front() {
+            if *ts < cutoff {
+                state.last_price_history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Only recent entries should remain
+        assert_eq!(state.last_price_history.len(), 3);
     }
 }

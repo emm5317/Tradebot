@@ -229,6 +229,21 @@ class EvaluationDaemon:
 
                 # Publish results
                 await self.publisher.publish_model_state(state)
+
+                # Persist full evaluation for replay engine (8.0d)
+                await self.publisher.publish_model_evaluation(
+                    ticker=contract.ticker,
+                    signal_type=signal_type,
+                    model_prob=state.model_prob if state else None,
+                    market_price=orderbook.mid_price,
+                    edge=sig.edge if sig else (rej.edge if rej else None),
+                    direction=sig.direction if sig else None,
+                    inputs={"station": contract.station, "threshold": contract.threshold},
+                    components=sig.model_components if (sig and hasattr(sig, "model_components")) else None,
+                    confidence=state.confidence if state else None,
+                    acted_on=sig is not None,
+                )
+
                 if sig is not None:
                     await self.publisher.publish(sig)
                     await self.notifier.notify_signal(sig)

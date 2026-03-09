@@ -7,7 +7,7 @@
 //! Replaces the Python 10-second polling loop for crypto contracts,
 //! targeting sub-500ms signal generation from price update to order submission.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -45,11 +45,92 @@ struct MicrostructureAdj {
     depth_imbalance: f64,
     /// VWAP-vs-mid signal (Phase 7.3b).
     vwap_signal: f64,
+    /// Price momentum signal (Phase 7.3a).
+    momentum_signal: f64,
+    /// Volume surge confidence boost (Phase 7.3c).
+    volume_surge_signal: f64,
     /// Sum of components, clamped to [-0.06, +0.06].
     total: f64,
 }
 
+/// Phase 7.5: Edge trajectory tracker — determines whether edge is growing or shrinking.
+struct EdgeTracker {
+    /// Rolling window of (timestamp, adjusted_edge) per ticker.
+    history: HashMap<String, VecDeque<(Instant, f64)>>,
+}
+
+impl EdgeTracker {
+    fn new() -> Self {
+        Self {
+            history: HashMap::new(),
+        }
+    }
+
+    /// Record an edge measurement for a ticker.
+    fn record(&mut self, ticker: &str, edge: f64) {
+        let entries = self.history.entry(ticker.to_string()).or_default();
+        let now = Instant::now();
+        entries.push_back((now, edge));
+        // Prune entries older than 60 seconds
+        let cutoff = now - Duration::from_secs(60);
+        while let Some((ts, _)) = entries.front() {
+            if *ts < cutoff {
+                entries.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Compute linear regression slope of edge over the last `window_secs`.
+    /// Returns cents-of-edge per second. Positive = edge growing.
+    fn trend(&self, ticker: &str, window_secs: u64) -> Option<f64> {
+        let entries = self.history.get(ticker)?;
+        if entries.len() < 3 {
+            return None;
+        }
+        let cutoff = Instant::now() - Duration::from_secs(window_secs);
+        let recent: Vec<_> = entries.iter().filter(|(ts, _)| *ts >= cutoff).collect();
+        if recent.len() < 3 {
+            return None;
+        }
+        let anchor = recent[0].0;
+        let n = recent.len() as f64;
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+
+        for (ts, edge) in &recent {
+            let x = ts.duration_since(anchor).as_secs_f64();
+            let y = *edge;
+            sum_x += x;
+            sum_y += y;
+            sum_xy += x * y;
+            sum_x2 += x * x;
+        }
+        let denom = n * sum_x2 - sum_x * sum_x;
+        if denom.abs() < 1e-12 {
+            return None;
+        }
+        Some((n * sum_xy - sum_x * sum_y) / denom)
+    }
+
+    /// Returns true if the edge is growing fast enough that we should wait for a better entry.
+    fn should_wait(&self, ticker: &str) -> bool {
+        if let Some(slope) = self.trend(ticker, 30) {
+            // Edge growing > 0.1% per second — wait for better terms
+            slope > 0.001
+        } else {
+            false
+        }
+    }
+}
+
 /// Compute microstructure adjustment from trade tape and orderbook state.
+///
+/// `price_momentum` is cents/second from linear regression on last_price history (7.3a).
+/// `volume_surge` indicates 60s volume > 3x the 5-minute average rate (7.3c).
 fn compute_microstructure_adj(
     _ticker: &str,
     direction: &str,
@@ -57,6 +138,8 @@ fn compute_microstructure_adj(
     mid_price: f64,
     spread: f64,
     tape: &TradeTape,
+    price_momentum: f64,
+    volume_surge: bool,
 ) -> MicrostructureAdj {
     // Trade tape aggressiveness over last 30 seconds
     let aggr = tape.aggressiveness(Duration::from_secs(30));
@@ -86,13 +169,31 @@ fn compute_microstructure_adj(
         0.0
     };
 
-    let total = (trade_imbalance + spread_regime + depth_imbalance + vwap_signal).clamp(-0.06, 0.06);
+    // Phase 7.3a: Price momentum signal
+    // Positive momentum aligned with direction = market converging toward our view = bonus
+    let momentum_signal = (price_momentum * dir_sign).clamp(-1.0, 1.0) * 0.02;
+
+    // Phase 7.3c: Volume surge confidence boost
+    // Unusual volume suggests informed trading — small bonus when aligned with direction
+    let volume_surge_signal = if volume_surge {
+        // Use trade aggressiveness to determine alignment
+        let aligned = (aggr * dir_sign) > 0.0;
+        if aligned { 0.01 } else { -0.01 }
+    } else {
+        0.0
+    };
+
+    let total = (trade_imbalance + spread_regime + depth_imbalance
+        + vwap_signal + momentum_signal + volume_surge_signal)
+        .clamp(-0.06, 0.06);
 
     MicrostructureAdj {
         trade_imbalance,
         spread_regime,
         depth_imbalance,
         vwap_signal,
+        momentum_signal,
+        volume_surge_signal,
         total,
     }
 }
@@ -139,6 +240,7 @@ pub async fn run(
     let mut rx = crypto_state.subscribe();
     let mut last_eval: HashMap<String, Instant> = HashMap::new();
     let mut last_summary = Instant::now();
+    let mut edge_tracker = EdgeTracker::new();
 
     info!("crypto evaluator started (event-driven)");
 
@@ -216,6 +318,7 @@ pub async fn run(
                                 &redis,
                                 &nats,
                                 &crypto_state,
+                                &mut edge_tracker,
                             )
                             .await;
                         }
@@ -271,6 +374,7 @@ async fn evaluate_entry(
     redis: &fred::clients::Client,
     nats: &async_nats::Client,
     crypto_state: &CryptoState,
+    edge_tracker: &mut EdgeTracker,
 ) {
     // 1. Read orderbook
     let mid_price = match orderbooks.mid_price(&contract.ticker) {
@@ -303,16 +407,36 @@ async fn evaluate_entry(
     // 5. Effective edge (spread-adjusted)
     let effective_edge = crypto_fv::compute_effective_edge(raw_edge, spread);
 
-    // 5b. Phase 4.3: Microstructure adjustment (Phase 7.3b: includes VWAP signal)
+    // 5b. Read per-ticker microstructure data from Redis (7.3a momentum, 7.3c volume surge)
+    let (price_momentum, volume_surge) = read_ticker_signals(redis, &contract.ticker).await;
+
+    // Phase 4.3: Microstructure adjustment (includes VWAP, momentum, volume surge)
     let micro = {
         let tape = trade_tape.read().unwrap();
-        compute_microstructure_adj(&contract.ticker, direction, order_imbalance, mid_price, spread, &tape)
+        compute_microstructure_adj(
+            &contract.ticker, direction, order_imbalance,
+            mid_price, spread, &tape,
+            price_momentum, volume_surge,
+        )
     };
     let adjusted_edge = effective_edge + micro.total;
+
+    // 7.5: Track edge trajectory
+    edge_tracker.record(&contract.ticker, adjusted_edge);
 
     // 6. Check minimum edge (using microstructure-adjusted edge)
     if adjusted_edge < config.crypto_min_edge {
         debug!(ticker = %contract.ticker, edge = %format!("{:.4}", adjusted_edge), "crypto eval: edge below minimum");
+        return;
+    }
+
+    // 7.5: If edge is growing rapidly, defer firing to capture better entry
+    if edge_tracker.should_wait(&contract.ticker) {
+        debug!(
+            ticker = %contract.ticker,
+            edge = %format!("{:.4}", adjusted_edge),
+            "crypto eval: edge growing, deferring entry"
+        );
         return;
     }
 
@@ -369,6 +493,8 @@ async fn evaluate_entry(
         micro_spread = %format!("{:.4}", micro.spread_regime),
         micro_depth = %format!("{:.4}", micro.depth_imbalance),
         micro_vwap = %format!("{:.4}", micro.vwap_signal),
+        micro_momentum = %format!("{:.4}", micro.momentum_signal),
+        micro_vol_surge = %format!("{:.4}", micro.volume_surge_signal),
         "crypto eval: entry signal"
     );
 
@@ -503,6 +629,32 @@ async fn evaluate_exit(
     }
 }
 
+/// Read per-ticker momentum and volume surge from Redis orderbook summary.
+///
+/// Returns (price_momentum, volume_surge). Falls back to (0.0, false) on error.
+async fn read_ticker_signals(redis: &fred::clients::Client, ticker: &str) -> (f64, bool) {
+    use fred::interfaces::KeysInterface;
+
+    let key = format!("orderbook:{ticker}");
+    let result: Result<Option<String>, _> = redis.get(&key).await;
+    match result {
+        Ok(Some(json_str)) => {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                let momentum = v.get("price_momentum")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let surge = v.get("volume_surge")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                (momentum, surge)
+            } else {
+                (0.0, false)
+            }
+        }
+        _ => (0.0, false),
+    }
+}
+
 /// Persist signal to the signals table. Returns the DB-assigned signal id.
 async fn persist_signal(pool: &sqlx::PgPool, signal: &Signal) -> Option<i64> {
     let result = sqlx::query_scalar::<_, i64>(
@@ -583,5 +735,151 @@ async fn publish_advisory(nats: &async_nats::Client, signal: &Signal) {
         .await
     {
         warn!(error = %e, "failed to publish advisory signal");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kalshi::trade_tape::TradeRecord;
+
+    fn empty_tape() -> TradeTape {
+        TradeTape::new(100)
+    }
+
+    fn tape_with_trades(yes_count: i64, no_count: i64) -> TradeTape {
+        let mut tape = TradeTape::new(100);
+        if yes_count > 0 {
+            tape.record(TradeRecord {
+                ticker: "TEST".to_string(),
+                price_cents: 50,
+                count: yes_count,
+                taker_side: "yes".to_string(),
+                timestamp: Instant::now(),
+            });
+        }
+        if no_count > 0 {
+            tape.record(TradeRecord {
+                ticker: "TEST".to_string(),
+                price_cents: 50,
+                count: no_count,
+                taker_side: "no".to_string(),
+                timestamp: Instant::now(),
+            });
+        }
+        tape
+    }
+
+    #[test]
+    fn test_microstructure_momentum_aligned_yes() {
+        let tape = empty_tape();
+        // Positive momentum + yes direction = positive signal
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.5, false);
+        assert!(adj.momentum_signal > 0.0, "momentum should be positive when aligned");
+    }
+
+    #[test]
+    fn test_microstructure_momentum_opposed_yes() {
+        let tape = empty_tape();
+        // Negative momentum + yes direction = negative signal
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, -0.5, false);
+        assert!(adj.momentum_signal < 0.0, "momentum should be negative when opposed");
+    }
+
+    #[test]
+    fn test_microstructure_volume_surge_aligned() {
+        // Bullish aggression (yes trades) + yes direction + surge
+        let tape = tape_with_trades(30, 10);
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.0, true);
+        assert_eq!(adj.volume_surge_signal, 0.01);
+    }
+
+    #[test]
+    fn test_microstructure_volume_surge_opposed() {
+        // Bearish aggression (no trades) + yes direction + surge
+        let tape = tape_with_trades(10, 30);
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.0, true);
+        assert_eq!(adj.volume_surge_signal, -0.01);
+    }
+
+    #[test]
+    fn test_microstructure_no_volume_surge() {
+        let tape = empty_tape();
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.0, false);
+        assert_eq!(adj.volume_surge_signal, 0.0);
+    }
+
+    #[test]
+    fn test_microstructure_total_clamped() {
+        let tape = empty_tape();
+        // Extreme momentum should still be clamped to [-0.06, 0.06]
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 100.0, true);
+        assert!(adj.total <= 0.06);
+        assert!(adj.total >= -0.06);
+    }
+
+    #[test]
+    fn test_edge_tracker_no_data() {
+        let tracker = EdgeTracker::new();
+        assert!(tracker.trend("TICKER", 30).is_none());
+        assert!(!tracker.should_wait("TICKER"));
+    }
+
+    #[test]
+    fn test_edge_tracker_growing_edge() {
+        let mut tracker = EdgeTracker::new();
+        let base = Instant::now() - Duration::from_secs(30);
+
+        // Simulate edge growing over 30 seconds
+        let entries = tracker.history.entry("TICKER".to_string()).or_default();
+        for i in 0..20 {
+            entries.push_back((base + Duration::from_secs(i), 0.01 + i as f64 * 0.005));
+        }
+
+        let slope = tracker.trend("TICKER", 30).unwrap();
+        assert!(slope > 0.001, "growing edge should have positive slope > 0.001, got {slope}");
+        assert!(tracker.should_wait("TICKER"), "should wait when edge is growing fast");
+    }
+
+    #[test]
+    fn test_edge_tracker_shrinking_edge() {
+        let mut tracker = EdgeTracker::new();
+        let base = Instant::now() - Duration::from_secs(30);
+
+        let entries = tracker.history.entry("TICKER".to_string()).or_default();
+        for i in 0..20 {
+            entries.push_back((base + Duration::from_secs(i), 0.10 - i as f64 * 0.005));
+        }
+
+        let slope = tracker.trend("TICKER", 30).unwrap();
+        assert!(slope < 0.0, "shrinking edge should have negative slope, got {slope}");
+        assert!(!tracker.should_wait("TICKER"), "should NOT wait when edge is shrinking");
+    }
+
+    #[test]
+    fn test_edge_tracker_stable_edge() {
+        let mut tracker = EdgeTracker::new();
+        let base = Instant::now() - Duration::from_secs(30);
+
+        let entries = tracker.history.entry("TICKER".to_string()).or_default();
+        for i in 0..20 {
+            entries.push_back((base + Duration::from_secs(i), 0.05));
+        }
+
+        let slope = tracker.trend("TICKER", 30).unwrap();
+        assert!(slope.abs() < 0.001, "stable edge should have ~0 slope, got {slope}");
+        assert!(!tracker.should_wait("TICKER"), "should NOT wait when edge is stable");
+    }
+
+    #[test]
+    fn test_edge_tracker_pruning() {
+        let mut tracker = EdgeTracker::new();
+        // Record old edge (will be pruned)
+        let entries = tracker.history.entry("T".to_string()).or_default();
+        entries.push_back((Instant::now() - Duration::from_secs(120), 0.05));
+
+        // Record via public method — should prune old entry
+        tracker.record("T", 0.06);
+        assert_eq!(tracker.history["T"].len(), 1);
     }
 }
