@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::crypto_state::CryptoState;
+use crate::feed_health::FeedHealth;
 
 /// Maximum number of 1-minute bars to retain (60 minutes of history).
 const MAX_BARS: usize = 60;
@@ -222,7 +223,7 @@ impl BinanceSpotFeed {
     }
 
     /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
-    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>) {
+    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>, feed_health: Arc<FeedHealth>) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -232,7 +233,7 @@ impl BinanceSpotFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis, &crypto_state).await {
+            match self.connect_and_stream(&redis, &crypto_state, &feed_health).await {
                 Ok(()) => {
                     warn!("binance spot ws closed by server, will reconnect");
                     backoff_secs = 1;
@@ -256,6 +257,7 @@ impl BinanceSpotFeed {
         &self,
         redis: &RedisClient,
         crypto_state: &CryptoState,
+        feed_health: &FeedHealth,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let request = self.ws_url.as_str().into_client_request()?;
         let (ws_stream, _) = tokio_tungstenite::connect_async(request).await?;
@@ -275,6 +277,7 @@ impl BinanceSpotFeed {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             parse_binance_spot_message(&text, &mut state);
+                            feed_health.record_update("binance_spot");
                         }
                         Some(Ok(Message::Close(_))) => return Ok(()),
                         Some(Err(e)) => return Err(Box::new(e)),

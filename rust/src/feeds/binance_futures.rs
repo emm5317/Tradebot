@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::crypto_state::CryptoState;
+use crate::feed_health::FeedHealth;
 
 /// Binance futures state written to Redis.
 #[derive(Debug, Clone)]
@@ -74,7 +75,7 @@ impl BinanceFuturesFeed {
     }
 
     /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
-    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>) {
+    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>, feed_health: Arc<FeedHealth>) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -84,7 +85,7 @@ impl BinanceFuturesFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis, &crypto_state).await {
+            match self.connect_and_stream(&redis, &crypto_state, &feed_health).await {
                 Ok(()) => {
                     warn!("binance futures ws closed by server, will reconnect");
                     backoff_secs = 1;
@@ -108,6 +109,7 @@ impl BinanceFuturesFeed {
         &self,
         redis: &RedisClient,
         crypto_state: &CryptoState,
+        feed_health: &FeedHealth,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Combined stream URL: aggTrade + depth@100ms + markPrice@1s
         let url = format!(
@@ -132,6 +134,7 @@ impl BinanceFuturesFeed {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             parse_binance_futures_message(&text, &mut state);
+                            feed_health.record_update("binance_futures");
                         }
                         Some(Ok(Message::Close(_))) => return Ok(()),
                         Some(Err(e)) => return Err(Box::new(e)),

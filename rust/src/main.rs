@@ -136,6 +136,9 @@ async fn main() -> Result<()> {
         ws_feed.run(ws_tx).await;
     });
 
+    // Initialize feed health tracker (before feeds so they can report health)
+    let feed_health = Arc::new(feed_health::FeedHealth::new());
+
     // Shared trade tape for orderbook feed + crypto evaluator (Phase 4.3)
     let trade_tape = Arc::new(std::sync::RwLock::new(
         kalshi::trade_tape::TradeTape::new(10_000),
@@ -144,10 +147,11 @@ async fn main() -> Result<()> {
     let orderbook_handle = tokio::spawn({
         let orderbooks = Arc::clone(&orderbooks);
         let trade_tape = Arc::clone(&trade_tape);
+        let fh = Arc::clone(&feed_health);
         let redis = redis.clone();
         let cancel = cancel.clone();
         async move {
-            orderbook_feed::run(ws_rx, orderbooks, trade_tape, redis.clone(), cancel).await;
+            orderbook_feed::run(ws_rx, orderbooks, trade_tape, fh, redis.clone(), cancel).await;
         }
     });
 
@@ -167,7 +171,8 @@ async fn main() -> Result<()> {
         );
         let redis_clone = redis.clone();
         let cs = Arc::clone(&crypto_state);
-        tokio::spawn(async move { feed.run(redis_clone, cs).await });
+        let fh = Arc::clone(&feed_health);
+        tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
         tracing::info!("coinbase feed enabled");
     }
 
@@ -178,7 +183,8 @@ async fn main() -> Result<()> {
         );
         let redis_clone = redis.clone();
         let cs = Arc::clone(&crypto_state);
-        tokio::spawn(async move { feed.run(redis_clone, cs).await });
+        let fh = Arc::clone(&feed_health);
+        tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
         tracing::info!("binance spot feed enabled");
     }
 
@@ -189,7 +195,8 @@ async fn main() -> Result<()> {
         );
         let redis_clone = redis.clone();
         let cs = Arc::clone(&crypto_state);
-        tokio::spawn(async move { feed.run(redis_clone, cs).await });
+        let fh = Arc::clone(&feed_health);
+        tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
         tracing::info!("binance futures feed enabled");
     }
 
@@ -200,7 +207,8 @@ async fn main() -> Result<()> {
         );
         let redis_clone = redis.clone();
         let cs = Arc::clone(&crypto_state);
-        tokio::spawn(async move { feed.run(redis_clone, cs).await });
+        let fh = Arc::clone(&feed_health);
+        tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
         tracing::info!("deribit dvol feed enabled");
     }
 
@@ -210,9 +218,6 @@ async fn main() -> Result<()> {
         config.kill_switch_crypto,
         config.kill_switch_weather,
     ));
-
-    // Initialize feed health tracker
-    let feed_health = Arc::new(feed_health::FeedHealth::new());
 
     // Phase 3: Contract discovery for crypto evaluator (with WS subscription wiring)
     let contract_discovery = Arc::new(contract_discovery::ContractDiscovery::with_ws_handle(ws_sub_handle));

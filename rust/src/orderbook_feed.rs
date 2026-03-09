@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::feed_health::FeedHealth;
 use crate::kalshi::orderbook::{OrderbookManager, Side};
 use crate::kalshi::trade_tape::{TradeTape, TradeRecord};
 use crate::kalshi::websocket::WsFeedMessage;
@@ -46,6 +47,7 @@ pub async fn run(
     mut rx: mpsc::Receiver<WsFeedMessage>,
     orderbooks: Arc<OrderbookManager>,
     trade_tape: Arc<RwLock<TradeTape>>,
+    feed_health: Arc<FeedHealth>,
     redis: RedisClient,
     cancel: CancellationToken,
 ) {
@@ -69,11 +71,13 @@ pub async fn run(
                     WsFeedMessage::OrderbookSnapshot { ticker, yes_bids, yes_asks } => {
                         orderbooks.apply_snapshot(&ticker, yes_bids, yes_asks);
                         dirty_tickers.insert(ticker);
+                        feed_health.record_update("kalshi_ws");
                     }
                     WsFeedMessage::OrderbookDelta { ticker, side, price_cents, delta } => {
                         let side = if side == "yes" { Side::Bid } else { Side::Ask };
                         orderbooks.apply_delta(&ticker, side, price_cents, delta);
                         dirty_tickers.insert(ticker);
+                        feed_health.record_update("kalshi_ws");
                     }
                     WsFeedMessage::Trade { ticker, price_cents, count, taker_side } => {
                         {

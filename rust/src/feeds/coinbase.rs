@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::crypto_state::CryptoState;
+use crate::feed_health::FeedHealth;
 
 /// 5-minute rolling window for trade volume accumulation.
 const VOLUME_WINDOW: Duration = Duration::from_secs(300);
@@ -67,7 +68,7 @@ impl CoinbaseFeed {
     }
 
     /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
-    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>) {
+    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>, feed_health: Arc<FeedHealth>) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -77,7 +78,7 @@ impl CoinbaseFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis, &crypto_state).await {
+            match self.connect_and_stream(&redis, &crypto_state, &feed_health).await {
                 Ok(()) => {
                     warn!("coinbase ws closed by server, will reconnect");
                     backoff_secs = 1;
@@ -101,6 +102,7 @@ impl CoinbaseFeed {
         &self,
         redis: &RedisClient,
         crypto_state: &CryptoState,
+        feed_health: &FeedHealth,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let request = self.ws_url.as_str().into_client_request()?;
         let (ws_stream, _) = tokio_tungstenite::connect_async(request).await?;
@@ -140,6 +142,7 @@ impl CoinbaseFeed {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             parse_coinbase_message(&text, &mut state);
+                            feed_health.record_update("coinbase");
                         }
                         Some(Ok(Message::Close(_))) => return Ok(()),
                         Some(Err(e)) => return Err(Box::new(e)),
