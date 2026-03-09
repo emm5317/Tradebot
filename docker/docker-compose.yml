@@ -112,6 +112,48 @@ services:
       HTTP_PORT: 3030
     restart: unless-stopped
 
+  # Python data collector (weather + market snapshots)
+  collector:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://tradebot:${POSTGRES_PASSWORD:-tradebot_dev}@postgres:5432/tradebot
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      KALSHI_BASE_URL: ${KALSHI_BASE_URL:-https://demo-api.kalshi.co}
+      KALSHI_API_KEY: ${KALSHI_API_KEY:-39843d6e-c7e5-4106-85b4-c8457fc07125}
+      MESONET_BASE_URL: https://mesonet.agron.iastate.edu
+      LOG_LEVEL: info
+    command: ["python", "-m", "collector.daemon"]
+    restart: unless-stopped
+
+  # Contract sync loop — refreshes active contracts from Kalshi every 5 minutes
+  contract-sync:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://tradebot:${POSTGRES_PASSWORD:-tradebot_dev}@postgres:5432/tradebot
+      KALSHI_BASE_URL: ${KALSHI_BASE_URL:-https://demo-api.kalshi.co}
+      KALSHI_API_KEY: ${KALSHI_API_KEY:-39843d6e-c7e5-4106-85b4-c8457fc07125}
+    command: ["python", "-m", "sync_contracts", "--active", "--loop", "300"]
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:
