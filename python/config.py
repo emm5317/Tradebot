@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgres://tradebot:tradebot_dev@localhost:5432/tradebot"
+    database_url: str = "postgres://tradebot:tradebot_dev@localhost:15432/tradebot"
     kalshi_api_key: str = ""
     kalshi_private_key_path: str = ""
     kalshi_base_url: str = "https://demo-api.kalshi.co"

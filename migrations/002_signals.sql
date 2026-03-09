@@ -16,5 +16,3 @@ CREATE TABLE signals (
 
 CREATE INDEX idx_signals_created ON signals(created_at);
 CREATE INDEX idx_signals_ticker ON signals(ticker);
-
-SELECT create_hypertable('signals', 'created_at', if_not_exists => TRUE);

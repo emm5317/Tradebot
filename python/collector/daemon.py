@@ -388,9 +388,8 @@ async def main() -> None:
     settings = get_settings()
     daemon = CollectorDaemon(settings)
 
-    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, daemon.shutdown)
+        signal.signal(sig, lambda s, f: daemon.shutdown())
 
     await daemon.run()
 

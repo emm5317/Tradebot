@@ -14,22 +14,15 @@ CREATE TABLE calibration (
 SELECT create_hypertable('calibration', 'settled_at', if_not_exists => TRUE);
 CREATE INDEX idx_cal_type_bucket ON calibration(signal_type, prob_bucket);
 
-CREATE MATERIALIZED VIEW calibration_rolling
-WITH (timescaledb.continuous) AS
+-- Calibration rolling view (regular, not continuous aggregate to avoid txn issues)
+CREATE VIEW calibration_rolling AS
 SELECT
     signal_type,
     prob_bucket,
-    time_bucket('1 day', settled_at) AS day,
+    date_trunc('day', settled_at) AS day,
     COUNT(*) AS total,
     SUM(CASE WHEN actual_outcome THEN 1 ELSE 0 END) AS wins,
     AVG(model_prob) AS avg_model_prob,
     AVG(CASE WHEN actual_outcome THEN 1.0 ELSE 0.0 END) AS actual_win_rate
 FROM calibration
-GROUP BY signal_type, prob_bucket, time_bucket('1 day', settled_at);
-
--- Refresh policy: update daily, covering the last 2 days, with a 1-hour lag
-SELECT add_continuous_aggregate_policy('calibration_rolling',
-    start_offset    => INTERVAL '2 days',
-    end_offset      => INTERVAL '1 hour',
-    schedule_interval => INTERVAL '1 day'
-);
+GROUP BY signal_type, prob_bucket, date_trunc('day', settled_at);
