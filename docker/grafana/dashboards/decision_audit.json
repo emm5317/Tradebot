@@ -1,0 +1,94 @@
+{
+  "uid": "tradebot-decision-audit",
+  "title": "Decision Audit",
+  "tags": ["tradebot"],
+  "timezone": "utc",
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Rejection Reasons (count)",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT rejection_reason, signal_type, COUNT(*) AS count FROM decision_log WHERE $__timeFilter(created_at) AND outcome = 'rejected' AND rejection_reason IS NOT NULL GROUP BY rejection_reason, signal_type ORDER BY count DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 2,
+      "title": "Rejection Reasons Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(created_at, '15m') AS time, rejection_reason, COUNT(*) AS count FROM decision_log WHERE $__timeFilter(created_at) AND outcome = 'rejected' GROUP BY 1, rejection_reason ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Edge Distribution at Rejection",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT width_bucket(edge, 0, 0.20, 20) AS bucket, ROUND(((width_bucket(edge, 0, 0.20, 20) - 1) * 0.01)::numeric, 2) AS edge_range, COUNT(*) AS count FROM decision_log WHERE $__timeFilter(created_at) AND outcome = 'rejected' AND rejection_reason = 'edge_below_minimum' AND edge IS NOT NULL GROUP BY bucket ORDER BY bucket",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 4,
+      "title": "Model Prob vs Market Price",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT $__timeGroup(created_at, '5m') AS time, AVG(model_prob) AS avg_model_prob, AVG(market_price) AS avg_market_price FROM decision_log WHERE $__timeFilter(created_at) AND model_prob IS NOT NULL AND market_price IS NOT NULL GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Detailed Decision Log",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT created_at, ticker, signal_type, source, outcome, rejection_reason, ROUND(model_prob::numeric, 3) AS model_prob, ROUND(market_price::numeric, 3) AS mkt_price, ROUND(edge::numeric, 4) AS edge, ROUND(adjusted_edge::numeric, 4) AS adj_edge, direction, ROUND(confidence::numeric, 2) AS confidence, ROUND(minutes_remaining::numeric, 1) AS mins_left, ROUND(micro_total::numeric, 4) AS micro FROM decision_log WHERE $__timeFilter(created_at) ORDER BY created_at DESC LIMIT 200",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "outcome" },
+            "properties": [{
+              "id": "custom.displayMode",
+              "value": "color-text"
+            }, {
+              "id": "mappings",
+              "value": [
+                { "type": "value", "options": { "signal": { "color": "green", "text": "signal" }, "rejected": { "color": "orange", "text": "rejected" }, "skipped": { "color": "blue", "text": "skipped" } } }
+              ]
+            }]
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 39
+}

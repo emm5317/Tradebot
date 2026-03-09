@@ -1,0 +1,118 @@
+{
+  "uid": "tradebot-trading-overview",
+  "title": "Trading Overview",
+  "tags": ["tradebot"],
+  "timezone": "utc",
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Signals Fired Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(created_at, '5m') AS time, signal_type, COUNT(*) AS signals FROM signals WHERE $__timeFilter(created_at) AND acted_on = true GROUP BY 1, signal_type ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Rejection Rate %",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(created_at, '5m') AS time, ROUND(100.0 * SUM(CASE WHEN acted_on = false THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS rejection_pct FROM signals WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Cumulative P&L ($)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT filled_at AS time, SUM(pnl_cents) OVER (ORDER BY filled_at) / 100.0 AS cumulative_pnl FROM orders WHERE $__timeFilter(filled_at) AND status = 'filled' AND pnl_cents IS NOT NULL ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": { "fillOpacity": 10, "gradientMode": "scheme" },
+          "color": { "mode": "continuous-GrYlRd" }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Orders by Status (24h)",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT status, COUNT(*) AS count FROM orders WHERE created_at > now() - interval '24 hours' GROUP BY status ORDER BY count DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Brier Score Trend",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT date::timestamptz AS time, strategy, brier_score FROM strategy_performance WHERE $__timeFilter(date::timestamptz) AND brier_score IS NOT NULL ORDER BY date",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "red", "value": 0.4 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Recent Signals",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT created_at, ticker, signal_type, direction, ROUND(model_prob::numeric, 3) AS model_prob, ROUND(market_price::numeric, 3) AS market_price, ROUND(edge::numeric, 4) AS edge, ROUND(kelly_fraction::numeric, 4) AS kelly, acted_on, rejection_reason FROM signals WHERE $__timeFilter(created_at) ORDER BY created_at DESC LIMIT 50",
+        "format": "table",
+        "refId": "A"
+      }]
+    }
+  ],
+  "schemaVersion": 39
+}

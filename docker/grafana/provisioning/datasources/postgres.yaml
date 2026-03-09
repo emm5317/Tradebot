@@ -1,0 +1,20 @@
+apiVersion: 1
+
+datasources:
+  - name: Tradebot-DB
+    type: postgres
+    uid: tradebot_pg
+    url: postgres:5432
+    database: tradebot
+    user: tradebot
+    secureJsonData:
+      password: ${POSTGRES_PASSWORD}
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+      postgresVersion: 1700
+      timescaledb: true
+    isDefault: true
+    editable: false

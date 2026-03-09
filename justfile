@@ -157,6 +157,16 @@ settlement-backfill days="30":
 db-shell:
     docker exec -it docker-postgres-1 psql -U tradebot -d tradebot
 
+# ── Observability ──────────────────────────────────────────
+
+# Start Grafana dashboards on :3033
+grafana:
+    {{compose}} up -d grafana
+
+# Restart Grafana (picks up dashboard changes)
+grafana-restart:
+    {{compose}} restart grafana
+
 # ── Diagnostics ─────────────────────────────────────────────
 
 health:

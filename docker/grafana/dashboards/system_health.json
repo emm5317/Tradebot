@@ -1,0 +1,106 @@
+{
+  "uid": "tradebot-system-health",
+  "title": "System Health",
+  "tags": ["tradebot"],
+  "timezone": "utc",
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Evaluator Cycle Latency (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(created_at, '1m') AS time, source, AVG(eval_latency_ms) AS avg_ms, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY eval_latency_ms) AS p95_ms FROM decision_log WHERE $__timeFilter(created_at) AND eval_latency_ms IS NOT NULL GROUP BY 1, source ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Contracts Evaluated / min",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(created_at, '1m') AS time, source, COUNT(DISTINCT ticker) AS contracts FROM decision_log WHERE $__timeFilter(created_at) GROUP BY 1, source ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 3,
+      "title": "Decision Outcomes Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(created_at, '10m') AS time, outcome, COUNT(*) AS count FROM decision_log WHERE $__timeFilter(created_at) GROUP BY 1, outcome ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Calibrator Status",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT strategy, MAX(created_at) AS last_run, ROUND(EXTRACT(EPOCH FROM (now() - MAX(created_at))) / 3600, 1) AS hours_ago, COUNT(*) FILTER (WHERE created_at > now() - interval '25 hours') AS runs_24h FROM calibration_metrics GROUP BY strategy ORDER BY strategy",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Service Activity (decision_log gap = downtime)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(created_at, '5m', 0) AS time, source, COUNT(*) AS entries FROM decision_log WHERE $__timeFilter(created_at) GROUP BY 1, source ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 15 },
+          "noValue": "0"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Dead Letters",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT subject, error, source, created_at FROM dead_letters WHERE $__timeFilter(created_at) ORDER BY created_at DESC LIMIT 50",
+        "format": "table",
+        "refId": "A"
+      }]
+    }
+  ],
+  "schemaVersion": 39
+}

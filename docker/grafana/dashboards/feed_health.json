@@ -1,0 +1,100 @@
+{
+  "uid": "tradebot-feed-health",
+  "title": "Feed Health",
+  "tags": ["tradebot"],
+  "timezone": "utc",
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Feed Score Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(created_at, '1m') AS time, feed_name, AVG(score) AS avg_score FROM feed_health_log WHERE $__timeFilter(created_at) GROUP BY 1, feed_name ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.25 },
+              { "color": "green", "value": 0.75 }
+            ]
+          },
+          "custom": { "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Current Feed Status",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT DISTINCT ON (feed_name) feed_name, score, ROUND(last_msg_age_ms::numeric, 0) AS age_ms, is_stale, created_at AS last_update FROM feed_health_log WHERE created_at > now() - interval '5 minutes' ORDER BY feed_name, created_at DESC",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "score" },
+            "properties": [{
+              "id": "thresholds",
+              "value": {
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 0.25 },
+                  { "color": "green", "value": 0.75 }
+                ]
+              }
+            }, {
+              "id": "custom.displayMode",
+              "value": "color-background"
+            }]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "title": "Stale Feed Events",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(created_at, '5m') AS time, feed_name, COUNT(*) AS stale_events FROM feed_health_log WHERE $__timeFilter(created_at) AND is_stale = true GROUP BY 1, feed_name ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } },
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Feed Score Heatmap (Hourly)",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT date_trunc('hour', created_at) AS hour, feed_name, ROUND(AVG(score)::numeric, 2) AS avg_score, COUNT(*) FILTER (WHERE is_stale) AS stale_count FROM feed_health_log WHERE $__timeFilter(created_at) GROUP BY 1, feed_name ORDER BY 1 DESC, feed_name LIMIT 100",
+        "format": "table",
+        "refId": "A"
+      }]
+    }
+  ],
+  "schemaVersion": 39
+}

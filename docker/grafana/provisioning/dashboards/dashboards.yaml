@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: Tradebot
+    orgId: 1
+    folder: Tradebot
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 60
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards

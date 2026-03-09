@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::contract_discovery::ContractDiscovery;
 use crate::crypto_fv;
 use crate::crypto_state::CryptoState;
+use crate::decision_log::{self, DecisionEntry};
 use crate::feed_health::FeedHealth;
 use crate::kalshi::client::KalshiClient;
 use crate::kalshi::orderbook::OrderbookManager;
@@ -266,6 +267,21 @@ pub async fn run(
                         "crypto eval: 60s summary"
                     );
                     last_summary = Instant::now();
+
+                    // Write feed health snapshot to DB for Grafana
+                    let details = feed_health.health_detail();
+                    let pool_snap = pool.clone();
+                    tokio::spawn(async move {
+                        for d in &details {
+                            decision_log::write_feed_health(
+                                &pool_snap,
+                                &d.feed,
+                                d.score,
+                                d.age_ms.map(|ms| ms as f64),
+                                !d.healthy,
+                            ).await;
+                        }
+                    });
                 }
 
                 // Skip if we don't have meaningful state yet
@@ -376,11 +392,25 @@ async fn evaluate_entry(
     crypto_state: &CryptoState,
     edge_tracker: &mut EdgeTracker,
 ) {
+    let eval_start = Instant::now();
+
     // 1. Read orderbook
     let mid_price = match orderbooks.mid_price(&contract.ticker) {
         Some(d) => d.to_f64().unwrap_or(0.5),
         None => {
             debug!(ticker = %contract.ticker, "crypto eval: no orderbook data");
+            let pool_c = pool.clone();
+            let ticker_c = contract.ticker.clone();
+            tokio::spawn(async move {
+                decision_log::write(&pool_c, DecisionEntry {
+                    ticker: ticker_c,
+                    signal_type: "crypto".into(),
+                    outcome: "skipped".into(),
+                    rejection_reason: Some("no_orderbook_data".into()),
+                    minutes_remaining: Some(minutes_remaining),
+                    ..Default::default()
+                }).await;
+            });
             return;
         }
     };
@@ -398,6 +428,24 @@ async fn evaluate_entry(
     // 3. Check confidence
     if fv.confidence < config.crypto_min_confidence {
         debug!(ticker = %contract.ticker, confidence = %format!("{:.2}", fv.confidence), "crypto eval: confidence below minimum");
+        let pool_c = pool.clone();
+        let ticker_c = contract.ticker.clone();
+        let conf = fv.confidence;
+        let prob = fv.probability;
+        tokio::spawn(async move {
+            decision_log::write(&pool_c, DecisionEntry {
+                ticker: ticker_c,
+                signal_type: "crypto".into(),
+                outcome: "rejected".into(),
+                rejection_reason: Some("confidence_below_minimum".into()),
+                model_prob: Some(prob),
+                market_price: Some(mid_price),
+                confidence: Some(conf),
+                minutes_remaining: Some(minutes_remaining),
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            }).await;
+        });
         return;
     }
 
@@ -427,6 +475,32 @@ async fn evaluate_entry(
     // 6. Check minimum edge (using microstructure-adjusted edge)
     if adjusted_edge < config.crypto_min_edge {
         debug!(ticker = %contract.ticker, edge = %format!("{:.4}", adjusted_edge), "crypto eval: edge below minimum");
+        let pool_c = pool.clone();
+        let ticker_c = contract.ticker.clone();
+        tokio::spawn(async move {
+            decision_log::write(&pool_c, DecisionEntry {
+                ticker: ticker_c,
+                signal_type: "crypto".into(),
+                outcome: "rejected".into(),
+                rejection_reason: Some("edge_below_minimum".into()),
+                model_prob: Some(fv.probability),
+                market_price: Some(mid_price),
+                edge: Some(effective_edge),
+                adjusted_edge: Some(adjusted_edge),
+                direction: Some(direction.to_string()),
+                minutes_remaining: Some(minutes_remaining),
+                confidence: Some(fv.confidence),
+                micro_total: Some(micro.total),
+                micro_trade: Some(micro.trade_imbalance),
+                micro_spread: Some(micro.spread_regime),
+                micro_depth: Some(micro.depth_imbalance),
+                micro_vwap: Some(micro.vwap_signal),
+                micro_momentum: Some(micro.momentum_signal),
+                micro_vol_surge: Some(micro.volume_surge_signal),
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            }).await;
+        });
         return;
     }
 
@@ -437,6 +511,25 @@ async fn evaluate_entry(
             edge = %format!("{:.4}", adjusted_edge),
             "crypto eval: edge growing, deferring entry"
         );
+        let pool_c = pool.clone();
+        let ticker_c = contract.ticker.clone();
+        tokio::spawn(async move {
+            decision_log::write(&pool_c, DecisionEntry {
+                ticker: ticker_c,
+                signal_type: "crypto".into(),
+                outcome: "rejected".into(),
+                rejection_reason: Some("edge_growing_defer".into()),
+                model_prob: Some(fv.probability),
+                market_price: Some(mid_price),
+                edge: Some(effective_edge),
+                adjusted_edge: Some(adjusted_edge),
+                direction: Some(direction.to_string()),
+                minutes_remaining: Some(minutes_remaining),
+                confidence: Some(fv.confidence),
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            }).await;
+        });
         return;
     }
 
@@ -459,6 +552,32 @@ async fn evaluate_entry(
     // 9. Check minimum Kelly
     if kelly < config.crypto_min_kelly {
         debug!(ticker = %contract.ticker, kelly = %format!("{:.4}", kelly), "crypto eval: kelly below minimum");
+        let pool_c = pool.clone();
+        let ticker_c = contract.ticker.clone();
+        tokio::spawn(async move {
+            decision_log::write(&pool_c, DecisionEntry {
+                ticker: ticker_c,
+                signal_type: "crypto".into(),
+                outcome: "rejected".into(),
+                rejection_reason: Some("kelly_below_minimum".into()),
+                model_prob: Some(fv.probability),
+                market_price: Some(mid_price),
+                edge: Some(effective_edge),
+                adjusted_edge: Some(adjusted_edge),
+                direction: Some(direction.to_string()),
+                minutes_remaining: Some(minutes_remaining),
+                confidence: Some(fv.confidence),
+                micro_total: Some(micro.total),
+                micro_trade: Some(micro.trade_imbalance),
+                micro_spread: Some(micro.spread_regime),
+                micro_depth: Some(micro.depth_imbalance),
+                micro_vwap: Some(micro.vwap_signal),
+                micro_momentum: Some(micro.momentum_signal),
+                micro_vol_surge: Some(micro.volume_surge_signal),
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            }).await;
+        });
         return;
     }
 
@@ -511,6 +630,27 @@ async fn evaluate_entry(
                 reason = %reason,
                 "crypto eval: signal rejected"
             );
+            let pool_c = pool.clone();
+            let ticker_c = signal.ticker.clone();
+            let reason_c = reason.clone();
+            tokio::spawn(async move {
+                decision_log::write(&pool_c, DecisionEntry {
+                    ticker: ticker_c,
+                    signal_type: "crypto".into(),
+                    outcome: "rejected".into(),
+                    rejection_reason: Some(reason_c),
+                    model_prob: Some(fv.probability),
+                    market_price: Some(mid_price),
+                    edge: Some(effective_edge),
+                    adjusted_edge: Some(adjusted_edge),
+                    direction: Some(direction.to_string()),
+                    minutes_remaining: Some(minutes_remaining),
+                    confidence: Some(fv.confidence),
+                    signal_id,
+                    eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                    ..Default::default()
+                }).await;
+            });
             return;
         }
 
@@ -525,6 +665,36 @@ async fn evaluate_entry(
             );
             return;
         }
+    }
+
+    // Decision log: successful signal
+    {
+        let pool_c = pool.clone();
+        let ticker_c = signal.ticker.clone();
+        tokio::spawn(async move {
+            decision_log::write(&pool_c, DecisionEntry {
+                ticker: ticker_c,
+                signal_type: "crypto".into(),
+                outcome: "signal".into(),
+                model_prob: Some(fv.probability),
+                market_price: Some(mid_price),
+                edge: Some(effective_edge),
+                adjusted_edge: Some(adjusted_edge),
+                direction: Some(direction.to_string()),
+                minutes_remaining: Some(minutes_remaining),
+                confidence: Some(fv.confidence),
+                micro_total: Some(micro.total),
+                micro_trade: Some(micro.trade_imbalance),
+                micro_spread: Some(micro.spread_regime),
+                micro_depth: Some(micro.depth_imbalance),
+                micro_vwap: Some(micro.vwap_signal),
+                micro_momentum: Some(micro.momentum_signal),
+                micro_vol_surge: Some(micro.volume_surge_signal),
+                signal_id,
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            }).await;
+        });
     }
 
     // Publish advisory and model state (fire-and-forget)

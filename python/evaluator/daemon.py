@@ -217,6 +217,10 @@ class EvaluationDaemon:
                     station = contract.station or "KORD"
                     obs = asos_obs.get(station) if asos_obs else None
                     if obs is None:
+                        asyncio.create_task(self._write_decision_log(
+                            ticker=ticker, outcome="skipped",
+                            rejection_reason="no_observation_data",
+                        ))
                         continue
                     sig, rej, state = evaluator.evaluate(
                         contract=contract,
@@ -250,11 +254,73 @@ class EvaluationDaemon:
                 elif rej is not None:
                     await self.publisher.publish_rejection(rej)
 
+                # Decision audit log
+                mins_left = (contract.settlement_time - datetime.now(timezone.utc)).total_seconds() / 60.0
+                if sig is not None:
+                    asyncio.create_task(self._write_decision_log(
+                        ticker=ticker, outcome="signal",
+                        model_prob=state.model_prob if state else None,
+                        market_price=orderbook.mid_price,
+                        edge=sig.edge,
+                        direction=sig.direction,
+                        minutes_remaining=mins_left,
+                        confidence=state.confidence if state else None,
+                    ))
+                elif rej is not None:
+                    asyncio.create_task(self._write_decision_log(
+                        ticker=ticker, outcome="rejected",
+                        rejection_reason=rej.rejection_reason if hasattr(rej, "rejection_reason") else None,
+                        model_prob=state.model_prob if state else None,
+                        market_price=orderbook.mid_price,
+                        edge=rej.edge if hasattr(rej, "edge") else None,
+                        minutes_remaining=mins_left,
+                        confidence=state.confidence if state else None,
+                    ))
+                else:
+                    asyncio.create_task(self._write_decision_log(
+                        ticker=ticker, outcome="skipped",
+                        minutes_remaining=mins_left,
+                    ))
+
             except Exception:
                 logger.exception("evaluate_contract_error", ticker=ticker)
                 await self.notifier.notify_error(
                     "evaluate_contract_error", {"ticker": ticker}
                 )
+
+    async def _write_decision_log(
+        self,
+        ticker: str,
+        outcome: str,
+        rejection_reason: str | None = None,
+        model_prob: float | None = None,
+        market_price: float | None = None,
+        edge: float | None = None,
+        direction: str | None = None,
+        minutes_remaining: float | None = None,
+        confidence: float | None = None,
+        signal_id: int | None = None,
+    ) -> None:
+        """Fire-and-forget write to decision_log for Grafana observability."""
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO decision_log (
+                        ticker, signal_type, source, outcome, rejection_reason,
+                        model_prob, market_price, edge, direction,
+                        minutes_remaining, confidence, signal_id
+                    ) VALUES ($1, 'weather', 'python', $2, $3,
+                              $4, $5, $6, $7, $8, $9, $10)
+                    """,
+                    ticker, outcome, rejection_reason,
+                    model_prob, market_price, edge, direction,
+                    minutes_remaining, confidence, signal_id,
+                )
+        except Exception:
+            logger.debug("decision_log_write_failed", ticker=ticker)
 
     def _infer_signal_type(self, contract: Contract) -> str:
         """Infer signal type from contract category."""

@@ -6,6 +6,7 @@ mod crypto_fv;
 mod crypto_state;
 mod dashboard;
 mod dead_letter;
+mod decision_log;
 mod execution;
 mod feed_health;
 #[cfg(test)]

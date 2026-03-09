@@ -1,0 +1,188 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: tradebot_alerts
+    folder: Tradebot Alerts
+    interval: 5m
+    rules:
+
+      - uid: alert_no_signals_2h
+        title: No Signals in 2 Hours
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 7200
+              to: 0
+            datasourceUid: tradebot_pg
+            model:
+              rawSql: "SELECT COUNT(*) AS value FROM signals WHERE created_at > now() - interval '2 hours' AND acted_on = true"
+              format: table
+          - refId: C
+            queryType: ""
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    params: [1]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "No acted-on signals in the last 2 hours. Evaluator may be down or no contracts in window."
+        labels:
+          severity: warning
+
+      - uid: alert_daily_loss
+        title: Daily Loss Exceeds $50
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            datasourceUid: tradebot_pg
+            model:
+              rawSql: "SELECT COALESCE(SUM(pnl_cents), 0) AS value FROM orders WHERE filled_at > date_trunc('day', now() AT TIME ZONE 'UTC') AND status = 'filled' AND pnl_cents IS NOT NULL"
+              format: table
+          - refId: C
+            queryType: ""
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    params: [-5000]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "Daily P&L has exceeded -$50."
+        labels:
+          severity: critical
+
+      - uid: alert_feed_stale
+        title: Exchange Feed Stale
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: tradebot_pg
+            model:
+              rawSql: "SELECT COUNT(*) AS value FROM feed_health_log WHERE created_at > now() - interval '10 minutes' AND is_stale = true AND score < 0.25"
+              format: table
+          - refId: C
+            queryType: ""
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    params: [3]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "An exchange feed has been stale (score < 0.25) for over 10 minutes."
+        labels:
+          severity: warning
+
+      - uid: alert_high_rejection_rate
+        title: High Signal Rejection Rate
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: tradebot_pg
+            model:
+              rawSql: "SELECT ROUND(100.0 * SUM(CASE WHEN acted_on = false THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS value FROM signals WHERE created_at > now() - interval '1 hour'"
+              format: table
+          - refId: C
+            queryType: ""
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    params: [90]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "Signal rejection rate is over 90% in the last hour."
+        labels:
+          severity: warning
+
+      - uid: alert_calibrator_stale
+        title: Calibrator Not Running
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 14400
+              to: 0
+            datasourceUid: tradebot_pg
+            model:
+              rawSql: "SELECT EXTRACT(EPOCH FROM (now() - MAX(created_at))) / 3600 AS value FROM calibration_metrics"
+              format: table
+          - refId: C
+            queryType: ""
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    params: [4]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+        noDataState: Alerting
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "Calibration agent has not run in over 4 hours."
+        labels:
+          severity: warning

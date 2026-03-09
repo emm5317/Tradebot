@@ -10,7 +10,8 @@ Algorithmic trading bot for Kalshi prediction markets. Trades weather temperatur
 - **Python evaluator** (`python/evaluator/daemon.py`): Weather-only signal evaluation on 10s cycle, reads METAR/HRRR/ASOS data, publishes signals via NATS
 - **Python collector** (`python/collector/daemon.py`): Data collection daemon (ASOS, METAR, HRRR, market snapshots)
 - **Python dashboard** (`python/dashboard/app.py`): FastAPI + htmx + SSE on port 8050
-- **Infrastructure**: PostgreSQL/TimescaleDB, Redis, NATS, Docker Compose
+- **Grafana** (`docker/grafana/`): Observability dashboards on port 3033, reads from Postgres directly
+- **Infrastructure**: PostgreSQL/TimescaleDB, Redis, NATS, Grafana, Docker Compose
 
 ## Key Conventions
 
@@ -51,6 +52,7 @@ just dev            # Start Rust binary (all feeds + execution)
 just evaluator      # Start Python weather evaluator
 just collector      # Start data collection
 just dashboard      # Start dashboard on :8050
+just grafana        # Start Grafana on :3033
 ```
 
 ## Important Files
@@ -77,6 +79,7 @@ just dashboard      # Start dashboard on :8050
 | `rust/src/dead_letter.rs` | Dead-letter handling (NATS + DB persistence) |
 | `rust/src/integration_tests.rs` | Integration test scenarios |
 | `rust/src/feed_health.rs` | Per-feed health scoring (0.0-1.0) |
+| `rust/src/decision_log.rs` | Decision audit + feed health DB writes |
 
 ## Common Pitfalls
 
@@ -88,4 +91,4 @@ just dashboard      # Start dashboard on :8050
 
 ## Implementation Phases
 
-Phases 0-8 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). Phase 6.1: parameter sweep framework, daily settlement summary, collector enhancements (crypto_ticks, settlement aggregation). Phase 7: calibration agent & prediction feedback loop — fixes signal_id/outcome/latency_ms data plumbing, adds calibration daemon with 6 hourly jobs, confidence-scaled order sizing, book-walking fill estimation, VWAP microstructure signal, evaluator hot-reload, price momentum (7.3a), volume surge detection (7.3c), OI delta tracking (7.3d), edge trajectory tracking (7.5). Phase 8: advanced backtesting & adaptive calibration — foundation fixes (8.0a-e), transaction costs (8.2), advanced metrics (8.3), crypto threshold sweep (8.1), multi-signal eval (8.4), parallel sweep (8.5), replay engine with source ablation (8.6), comprehensive tests (8.7). See `docs/build-plans/phase-8-backtesting.md`.
+Phases 0-9.0 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). Phase 6.1: parameter sweep framework, daily settlement summary, collector enhancements (crypto_ticks, settlement aggregation). Phase 7: calibration agent & prediction feedback loop — fixes signal_id/outcome/latency_ms data plumbing, adds calibration daemon with 6 hourly jobs, confidence-scaled order sizing, book-walking fill estimation, VWAP microstructure signal, evaluator hot-reload, price momentum (7.3a), volume surge detection (7.3c), OI delta tracking (7.3d), edge trajectory tracking (7.5). Phase 8: advanced backtesting & adaptive calibration — foundation fixes (8.0a-e), transaction costs (8.2), advanced metrics (8.3), crypto threshold sweep (8.1), multi-signal eval (8.4), parallel sweep (8.5), replay engine with source ablation (8.6), comprehensive tests (8.7). Phase 9.0: Grafana observability — decision_log + feed_health_log tables, 4 auto-provisioned dashboards, 5 alert rules (Discord), Rust + Python decision trace instrumentation. See `docs/build-plans/phase-8-backtesting.md`.
