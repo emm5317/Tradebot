@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
         &config.kalshi_private_key_path,
     ).context("Failed to create WS auth")?;
 
-    let ws_feed = kalshi::websocket::KalshiWsFeed::new(
+    let (ws_feed, ws_sub_handle) = kalshi::websocket::KalshiWsFeed::new(
         config.kalshi_ws_url.clone(),
         ws_auth,
         cancel.clone(),
@@ -213,8 +213,8 @@ async fn main() -> Result<()> {
     // Initialize feed health tracker
     let feed_health = Arc::new(feed_health::FeedHealth::new());
 
-    // Phase 3: Contract discovery for crypto evaluator
-    let contract_discovery = Arc::new(contract_discovery::ContractDiscovery::new());
+    // Phase 3: Contract discovery for crypto evaluator (with WS subscription wiring)
+    let contract_discovery = Arc::new(contract_discovery::ContractDiscovery::with_ws_handle(ws_sub_handle));
     let discovery_handle = tokio::spawn({
         let cd = Arc::clone(&contract_discovery);
         let pool = pool.clone();

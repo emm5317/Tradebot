@@ -230,6 +230,97 @@ async def _upsert_contracts(pool: asyncpg.Pool, markets: list[dict]) -> None:
             )
 
 
+async def pull_active_contracts(
+    settings: Settings | None = None,
+    categories: list[str] | None = None,
+) -> int:
+    """Pull all active (open/trading) weather + crypto contracts from Kalshi.
+
+    Seeds the contracts table so the evaluator and contract discovery
+    can find contracts to trade. Safe to re-run (upserts by ticker).
+    """
+    if settings is None:
+        settings = get_settings()
+    if categories is None:
+        categories = ["weather", "crypto"]
+
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    total = 0
+
+    try:
+        transport = httpx.AsyncHTTPTransport(retries=2)
+        async with httpx.AsyncClient(
+            transport=transport,
+            timeout=httpx.Timeout(30.0),
+            base_url=settings.kalshi_base_url,
+        ) as client:
+            for status in ("open", "active"):
+                cursor: str | None = None
+                while True:
+                    params: dict[str, Any] = {
+                        "status": status,
+                        "limit": _PAGE_SIZE,
+                    }
+                    if cursor:
+                        params["cursor"] = cursor
+
+                    await asyncio.sleep(_REQUEST_INTERVAL)
+
+                    try:
+                        resp = await client.get(
+                            "/trade-api/v2/markets",
+                            params=params,
+                        )
+                    except httpx.HTTPError as exc:
+                        logger.warning("active_fetch_error", status=status, error=str(exc))
+                        break
+
+                    if resp.status_code == 429:
+                        retry_after = float(resp.headers.get("Retry-After", "5"))
+                        logger.warning("active_rate_limited", retry_after=retry_after)
+                        await asyncio.sleep(retry_after)
+                        continue
+
+                    if resp.status_code != 200:
+                        logger.warning(
+                            "active_fetch_failed",
+                            status_code=resp.status_code,
+                            status_filter=status,
+                        )
+                        break
+
+                    data = resp.json()
+                    markets = data.get("markets", [])
+
+                    if not markets:
+                        break
+
+                    relevant = [
+                        m for m in markets
+                        if any(_matches_category(m, cat) for cat in categories)
+                    ]
+
+                    if relevant:
+                        await _upsert_contracts(pool, relevant)
+                        total += len(relevant)
+                        logger.info(
+                            "active_contracts_ingested",
+                            status=status,
+                            batch=len(relevant),
+                            total=total,
+                        )
+
+                    cursor = data.get("cursor")
+                    if not cursor or len(markets) < _PAGE_SIZE:
+                        break
+
+    finally:
+        await pool.close()
+
+    logger.info("active_pull_complete", total=total)
+    return total
+
+
 async def pull_historical_prices(
     ticker: str,
     settings: Settings | None = None,

@@ -10,6 +10,8 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::kalshi::websocket::WsSubscriptionHandle;
+
 /// A crypto binary contract nearing settlement.
 #[derive(Debug, Clone)]
 pub struct CryptoContract {
@@ -21,12 +23,22 @@ pub struct CryptoContract {
 /// Cached discovery of active crypto contracts from the database.
 pub struct ContractDiscovery {
     contracts: RwLock<Vec<CryptoContract>>,
+    ws_handle: Option<WsSubscriptionHandle>,
 }
 
 impl ContractDiscovery {
     pub fn new() -> Self {
         Self {
             contracts: RwLock::new(Vec::new()),
+            ws_handle: None,
+        }
+    }
+
+    /// Create with a WS subscription handle for dynamic orderbook subscriptions.
+    pub fn with_ws_handle(ws_handle: WsSubscriptionHandle) -> Self {
+        Self {
+            contracts: RwLock::new(Vec::new()),
+            ws_handle: Some(ws_handle),
         }
     }
 
@@ -34,7 +46,9 @@ impl ContractDiscovery {
     pub async fn refresh(&self, pool: &PgPool) {
         let result: Result<Vec<(String, Option<f64>, DateTime<Utc>)>, _> = sqlx::query_as(
             r#"
-            SELECT c.ticker, cr.strike, c.settlement_time
+            SELECT c.ticker,
+                   COALESCE(cr.strike::float8, c.threshold::float8) AS strike,
+                   c.settlement_time
             FROM contracts c
             LEFT JOIN contract_rules cr ON cr.market_ticker = c.ticker
             WHERE c.status = 'active'
@@ -67,6 +81,16 @@ impl ContractDiscovery {
                     .collect();
 
                 let count = contracts.len();
+
+                // Subscribe new tickers to the Kalshi WS feed for orderbook data
+                if let Some(ref handle) = self.ws_handle {
+                    let tickers: Vec<String> =
+                        contracts.iter().map(|c| c.ticker.clone()).collect();
+                    if !tickers.is_empty() {
+                        handle.subscribe(tickers);
+                    }
+                }
+
                 let mut cache = self.contracts.write().unwrap();
                 let prev_count = cache.len();
                 *cache = contracts;

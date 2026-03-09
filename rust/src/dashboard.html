@@ -54,12 +54,12 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 .kill-btn.active{background:var(--red);color:#000;box-shadow:0 0 20px var(--red);animation:pulse .5s infinite alternate}
 
 /* ── GRID ── */
-.grid{display:grid;grid-template-columns:1fr 1fr 1fr;grid-template-rows:auto auto auto;gap:1px;background:var(--border);min-height:calc(100vh - 40px)}
-.panel{background:var(--bg);display:flex;flex-direction:column;overflow:hidden}
+.grid{display:grid;grid-template-columns:1fr 1fr 1fr;grid-template-rows:minmax(200px,1fr) minmax(180px,1fr) minmax(120px,auto);gap:1px;background:var(--border);height:calc(100vh - 40px)}
+.panel{background:var(--bg);display:flex;flex-direction:column;overflow:hidden;min-height:0}
 .panel-hd{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;border-bottom:1px solid var(--border);background:var(--bg2);flex-shrink:0}
 .panel-title{font-size:9px;letter-spacing:2.5px;color:var(--text);font-weight:600}
 .panel-badge{font-size:8px;letter-spacing:1px;color:var(--text);opacity:.5}
-.panel-body{padding:10px 12px;flex:1;overflow-y:auto}
+.panel-body{padding:10px 12px;flex:1;overflow-y:auto;min-height:0}
 .panel-body::-webkit-scrollbar{width:3px}
 .panel-body::-webkit-scrollbar-thumb{background:var(--border-hi);border-radius:2px}
 
@@ -104,19 +104,27 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 .rcard-val.white{color:var(--white)}
 
 /* ── CONTRACTS (panel 3) ── */
-.contract-row{border:1px solid var(--border);border-radius:3px;padding:6px 8px;margin-bottom:5px;position:relative;overflow:hidden}
+.contracts-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;gap:6px}
+.contracts-filter{display:flex;gap:4px}
+.contracts-filter button{background:none;border:1px solid var(--border);color:var(--text);font-family:var(--font);font-size:8px;letter-spacing:1px;padding:2px 6px;cursor:pointer;border-radius:2px;transition:.15s}
+.contracts-filter button:hover{border-color:var(--border-hi);color:var(--text-hi)}
+.contracts-filter button.active{border-color:var(--cyan);color:var(--cyan);background:rgba(34,211,238,.06)}
+.contracts-count{font-size:8px;color:var(--text);letter-spacing:1px}
+.contract-row{border:1px solid var(--border);border-radius:3px;padding:4px 8px;margin-bottom:3px;position:relative;overflow:hidden}
+.contract-row.atm{border-color:var(--border-hi);background:rgba(34,211,238,.03)}
 .contract-row::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;border-radius:2px 0 0 2px}
 .contract-row.inwindow::before{background:var(--green)}
 .contract-row.exitonly::before{background:var(--amber)}
 .contract-row.eligible::before{background:var(--border-hi)}
 .cr-top{display:flex;justify-content:space-between;align-items:baseline}
-.cr-ticker{font-size:11px;font-weight:600;color:var(--cyan);letter-spacing:.5px}
-.cr-time{font-size:10px;font-weight:700}
+.cr-ticker{font-size:10px;font-weight:600;color:var(--cyan);letter-spacing:.5px}
+.cr-time{font-size:9px;font-weight:700}
 .cr-time.urgent{color:var(--red);text-shadow:0 0 6px rgba(255,71,87,.4)}
 .cr-time.warn{color:var(--amber)}
 .cr-time.safe{color:var(--text)}
-.cr-meta{font-size:9px;color:var(--text);margin-top:2px}
+.cr-meta{font-size:8px;color:var(--text);margin-top:1px}
 .cr-meta b{color:var(--text-hi)}
+.cr-meta .atm-tag{color:var(--cyan);font-weight:600;margin-left:6px}
 .empty-state{color:var(--text);opacity:.4;font-size:10px;text-align:center;padding:20px 0;letter-spacing:1px}
 
 /* ── SIGNALS TABLE (panel 4, spans 2 cols) ── */
@@ -157,7 +165,7 @@ tr:hover td{background:var(--bg3)}
 
 /* ── Log (bottom row, full width) ── */
 .span3{grid-column:span 3}
-.log-body{font-size:10px;max-height:160px;overflow-y:auto}
+.log-body{font-size:10px;overflow-y:auto}
 .log-line{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid rgba(28,39,54,.3)}
 .log-time{color:var(--text);opacity:.5;width:55px;flex-shrink:0}
 .log-level{width:44px;flex-shrink:0;font-weight:600}
@@ -169,7 +177,7 @@ tr:hover td{background:var(--bg3)}
 @keyframes slideIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
 .log-line{animation:slideIn .2s ease}
 
-@media(max-width:1000px){.grid{grid-template-columns:1fr}.span2,.span3{grid-column:span 1}}
+@media(max-width:1000px){.grid{grid-template-columns:1fr;height:auto;grid-template-rows:auto}.span2,.span3{grid-column:span 1}}
 </style>
 </head>
 <body>
@@ -409,14 +417,64 @@ function renderRisk(risk, ks) {
 }
 
 // ── Contracts Panel ─────────────────────────────────────
+let contractFilter = 'near'; // 'near' | 'all' | 'active'
+const NEAR_MONEY_RANGE = 5000; // $5000 above/below spot
+
+function setContractFilter(f) {
+  contractFilter = f;
+  document.querySelectorAll('.contracts-filter button').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === f);
+  });
+  if (lastContracts) renderContracts(lastContracts);
+}
+
+let lastContracts = null;
+
 function renderContracts(contracts) {
-  document.getElementById('contractBadge').textContent = contracts.length;
+  lastContracts = contracts;
+  const total = contracts.length;
+  document.getElementById('contractBadge').textContent = total;
+
   if (!contracts.length) {
     document.getElementById('contractsBody').innerHTML =
       '<div class="empty-state">NO CONTRACTS IN WINDOW</div>';
     return;
   }
-  document.getElementById('contractsBody').innerHTML = contracts.map(c => {
+
+  // Sort by proximity to current price (ATM first)
+  const spot = prevPrice || 0;
+  const sorted = [...contracts].sort((a, b) => {
+    const da = Math.abs(a.strike - spot);
+    const db = Math.abs(b.strike - spot);
+    return da - db;
+  });
+
+  // Filter
+  let filtered;
+  if (contractFilter === 'near' && spot > 0) {
+    filtered = sorted.filter(c => Math.abs(c.strike - spot) <= NEAR_MONEY_RANGE);
+    if (filtered.length < 5) filtered = sorted.slice(0, 10); // fallback if too few
+  } else if (contractFilter === 'active') {
+    filtered = sorted.filter(c => c.minutes_remaining <= 15);
+    if (!filtered.length) filtered = sorted.slice(0, 10);
+  } else {
+    filtered = sorted;
+  }
+
+  const countText = filtered.length < total
+    ? `${filtered.length} / ${total}`
+    : `${total}`;
+
+  let html = `<div class="contracts-toolbar">
+    <div class="contracts-filter">
+      <button data-filter="near" class="${contractFilter==='near'?'active':''}" onclick="setContractFilter('near')">NEAR $</button>
+      <button data-filter="active" class="${contractFilter==='active'?'active':''}" onclick="setContractFilter('active')">IN WINDOW</button>
+      <button data-filter="all" class="${contractFilter==='all'?'active':''}" onclick="setContractFilter('all')">ALL</button>
+    </div>
+    <div class="contracts-count">${countText}</div>
+  </div>`;
+
+  html += filtered.map(c => {
     const m = c.minutes_remaining;
     let phase, timeCls;
     if (m > 15) { phase = 'eligible'; timeCls = 'safe'; }
@@ -424,14 +482,17 @@ function renderContracts(contracts) {
     else { phase = 'exitonly'; timeCls = 'urgent'; }
     const mm = Math.floor(m);
     const ss = Math.floor((m % 1) * 60);
-    return `<div class="contract-row ${phase}">
+    const isAtm = spot > 0 && Math.abs(c.strike - spot) <= 1000;
+    return `<div class="contract-row ${phase}${isAtm ? ' atm' : ''}">
       <div class="cr-top">
         <span class="cr-ticker">${c.ticker}</span>
         <span class="cr-time ${timeCls}">${mm}m ${ss}s</span>
       </div>
-      <div class="cr-meta">Strike: <b>$${fmt(c.strike, 0)}</b></div>
+      <div class="cr-meta">Strike: <b>$${fmt(c.strike, 0)}</b>${isAtm ? '<span class="atm-tag">ATM</span>' : ''}</div>
     </div>`;
   }).join('');
+
+  document.getElementById('contractsBody').innerHTML = html;
 }
 
 // ── Signals Table ───────────────────────────────────────

@@ -110,6 +110,20 @@ clippy:
 clean:
     cd rust; cargo clean
 
+# ── Contract sync ───────────────────────────────────────────
+
+# Sync active + settled contracts from Kalshi API into DB
+sync-contracts:
+    cd python; python -m sync_contracts
+
+# Sync active contracts only (for paper trading)
+sync-active:
+    cd python; python -m sync_contracts --active
+
+# Continuous contract sync every 5 minutes
+sync-loop:
+    cd python; python -m sync_contracts --active --loop 300
+
 # ── Backtesting ─────────────────────────────────────────────
 
 backtest start end:

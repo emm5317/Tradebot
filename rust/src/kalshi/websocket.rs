@@ -13,6 +13,19 @@ use tracing::{error, info, warn};
 
 use crate::kalshi::auth::KalshiAuth;
 
+/// Handle for dynamically subscribing tickers to the live WS connection.
+#[derive(Clone)]
+pub struct WsSubscriptionHandle {
+    tx: mpsc::UnboundedSender<Vec<String>>,
+}
+
+impl WsSubscriptionHandle {
+    /// Subscribe to orderbook/trade/ticker data for the given tickers.
+    pub fn subscribe(&self, tickers: Vec<String>) {
+        let _ = self.tx.send(tickers);
+    }
+}
+
 /// Messages emitted by the WebSocket feed to downstream consumers.
 #[derive(Debug, Clone)]
 pub enum WsFeedMessage {
@@ -84,38 +97,28 @@ pub struct KalshiWsFeed {
     ws_url: String,
     auth: KalshiAuth,
     subscriptions: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    sub_rx: mpsc::UnboundedReceiver<Vec<String>>,
     cancel: CancellationToken,
 }
 
 impl KalshiWsFeed {
-    pub fn new(ws_url: String, auth: KalshiAuth, cancel: CancellationToken) -> Self {
-        Self {
+    /// Create a new WS feed and return a subscription handle for dynamic subscriptions.
+    pub fn new(ws_url: String, auth: KalshiAuth, cancel: CancellationToken) -> (Self, WsSubscriptionHandle) {
+        let (sub_tx, sub_rx) = mpsc::unbounded_channel();
+        let feed = Self {
             ws_url,
             auth,
             subscriptions: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            sub_rx,
             cancel,
-        }
-    }
-
-    /// Add tickers to subscribe to. If already connected, sends subscribe command.
-    pub async fn subscribe(&self, tickers: Vec<String>) {
-        let mut subs = self.subscriptions.lock().await;
-        for t in &tickers {
-            subs.insert(t.clone());
-        }
-    }
-
-    /// Remove tickers from subscriptions.
-    pub async fn unsubscribe(&self, tickers: &[String]) {
-        let mut subs = self.subscriptions.lock().await;
-        for t in tickers {
-            subs.remove(t);
-        }
+        };
+        let handle = WsSubscriptionHandle { tx: sub_tx };
+        (feed, handle)
     }
 
     /// Run the WebSocket feed loop with auto-reconnect.
     /// Returns when cancelled or the channel is closed.
-    pub async fn run(&self, tx: mpsc::Sender<WsFeedMessage>) {
+    pub async fn run(mut self, tx: mpsc::Sender<WsFeedMessage>) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -155,7 +158,7 @@ impl KalshiWsFeed {
 
     /// Connect, authenticate via headers, subscribe, and stream until error.
     async fn connect_and_stream(
-        &self,
+        &mut self,
         tx: &mpsc::Sender<WsFeedMessage>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let auth_headers = self.auth.sign_request("GET", "/trade-api/ws/v2")?;
@@ -173,21 +176,23 @@ impl KalshiWsFeed {
         }
 
         let (mut write, mut read) = ws_stream.split();
+        let mut cmd_id: u64 = 1;
 
         // Subscribe to current ticker set
         let subs: Vec<String> = self.subscriptions.lock().await.iter().cloned().collect();
         if !subs.is_empty() {
             let cmd = SubscribeCmd {
-                id: 1,
+                id: cmd_id,
                 cmd: "subscribe".into(),
                 params: SubscribeParams {
                     channels: vec!["orderbook_delta".into(), "trade".into(), "ticker".into()],
-                    market_tickers: subs,
+                    market_tickers: subs.clone(),
                 },
             };
+            cmd_id += 1;
             let msg = serde_json::to_string(&cmd)?;
             write.send(Message::Text(msg.into())).await?;
-            info!("kalshi ws subscribed");
+            info!(count = subs.len(), "kalshi ws subscribed (initial)");
         }
 
         let mut ping_interval = interval(Duration::from_secs(30));
@@ -199,6 +204,37 @@ impl KalshiWsFeed {
                     info!("kalshi ws feed cancelled, closing connection");
                     let _ = write.send(Message::Close(None)).await;
                     return Ok(());
+                }
+                // Handle dynamic subscription requests
+                sub_msg = self.sub_rx.recv() => {
+                    match sub_msg {
+                        Some(new_tickers) => {
+                            // Filter to only truly new tickers
+                            let mut subs = self.subscriptions.lock().await;
+                            let new: Vec<String> = new_tickers
+                                .into_iter()
+                                .filter(|t| subs.insert(t.clone()))
+                                .collect();
+
+                            if !new.is_empty() {
+                                let cmd = SubscribeCmd {
+                                    id: cmd_id,
+                                    cmd: "subscribe".into(),
+                                    params: SubscribeParams {
+                                        channels: vec!["orderbook_delta".into(), "trade".into(), "ticker".into()],
+                                        market_tickers: new.clone(),
+                                    },
+                                };
+                                cmd_id += 1;
+                                let msg = serde_json::to_string(&cmd)?;
+                                write.send(Message::Text(msg.into())).await?;
+                                info!(count = new.len(), total = subs.len(), "kalshi ws subscribed (dynamic)");
+                            }
+                        }
+                        None => {
+                            // Subscription handle dropped — continue without dynamic subs
+                        }
+                    }
                 }
                 msg = read.next() => {
                     match msg {

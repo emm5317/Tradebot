@@ -65,7 +65,6 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3030:3030"
-      - "8050:8050"
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,10 +80,10 @@ services:
       REDIS_URL: redis://redis:6379
       NATS_URL: nats://nats:4222
 
-      KALSHI_API_KEY: ${KALSHI_API_KEY:-dev-placeholder}
+      KALSHI_API_KEY: ${KALSHI_API_KEY:-39843d6e-c7e5-4106-85b4-c8457fc07125}
       KALSHI_PRIVATE_KEY_PATH: /app/config/kalshi_dev.pem
-      KALSHI_BASE_URL: ${KALSHI_BASE_URL:-https://api.elections.kalshi.com}
-      KALSHI_WS_URL: ${KALSHI_WS_URL:-wss://api.elections.kalshi.com/trade-api/ws/v2}
+      KALSHI_BASE_URL: ${KALSHI_BASE_URL:-https://demo-api.kalshi.co}
+      KALSHI_WS_URL: ${KALSHI_WS_URL:-wss://demo-api.kalshi.co/trade-api/ws/v2}
 
       BINANCE_WS_URL: ${BINANCE_WS_URL:-wss://stream.binance.us:9443/ws/btcusd@trade}
       BINANCE_SPOT_WS_URL: ${BINANCE_SPOT_WS_URL:-wss://stream.binance.us:9443/ws/btcusd@trade}
