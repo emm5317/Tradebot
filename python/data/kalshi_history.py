@@ -144,18 +144,23 @@ async def _pull_category(
 
 
 def _matches_category(market: dict, category: str) -> bool:
-    """Check if a market belongs to the target category."""
-    cat = market.get("category", "").lower()
-    title = market.get("title", "").lower()
+    """Check if a market belongs to the target category.
+
+    Kalshi API often returns category=None, so we also match on
+    ticker prefix and title keywords.
+    """
+    cat = (market.get("category") or "").lower()
+    title = (market.get("title") or "").lower()
+    ticker = (market.get("ticker") or "").upper()
 
     if category == "weather":
         return cat == "weather" or any(
             kw in title for kw in ["temperature", "wind", "rain", "snow", "weather"]
-        )
+        ) or ticker.startswith(("KXTEMP", "KXWIND", "KXRAIN", "KXSNOW"))
     elif category == "crypto":
         return cat == "crypto" or any(
             kw in title for kw in ["bitcoin", "btc", "crypto"]
-        )
+        ) or ticker.startswith(("KXBTC", "KXETH", "KXCRYPTO"))
     return cat == category
 
 
@@ -247,6 +252,10 @@ async def pull_active_contracts(
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     total = 0
 
+    # Known series tickers for targeted pulls (Kalshi category field is often None)
+    _CRYPTO_SERIES = ["KXBTC", "KXBTCD", "KXBTC15M", "KXETH"]
+    _WEATHER_SERIES = ["KXTEMP", "KXTEMPHI", "KXTEMPLO"]
+
     try:
         transport = httpx.AsyncHTTPTransport(retries=2)
         async with httpx.AsyncClient(
@@ -254,6 +263,18 @@ async def pull_active_contracts(
             timeout=httpx.Timeout(30.0),
             base_url=settings.kalshi_base_url,
         ) as client:
+            # Phase 1: Targeted series-based pulls (fast, reliable)
+            series_to_pull = []
+            if "crypto" in categories:
+                series_to_pull.extend(_CRYPTO_SERIES)
+            if "weather" in categories:
+                series_to_pull.extend(_WEATHER_SERIES)
+
+            for series in series_to_pull:
+                count = await _pull_series(client, pool, series)
+                total += count
+
+            # Phase 2: Generic paginated pull (catches anything series pull missed)
             for status in ("open", "active"):
                 cursor: str | None = None
                 while True:
@@ -319,6 +340,58 @@ async def pull_active_contracts(
 
     logger.info("active_pull_complete", total=total)
     return total
+
+
+async def _pull_series(
+    client: httpx.AsyncClient,
+    pool: asyncpg.Pool,
+    series_ticker: str,
+) -> int:
+    """Pull all non-settled markets for a specific series ticker."""
+    cursor: str | None = None
+    count = 0
+
+    while True:
+        params: dict[str, Any] = {
+            "series_ticker": series_ticker,
+            "limit": _PAGE_SIZE,
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        await asyncio.sleep(_REQUEST_INTERVAL)
+
+        try:
+            resp = await client.get("/trade-api/v2/markets", params=params)
+        except httpx.HTTPError as exc:
+            logger.warning("series_fetch_error", series=series_ticker, error=str(exc))
+            break
+
+        if resp.status_code == 429:
+            retry_after = float(resp.headers.get("Retry-After", "5"))
+            await asyncio.sleep(retry_after)
+            continue
+
+        if resp.status_code != 200:
+            logger.warning("series_fetch_failed", series=series_ticker, status=resp.status_code)
+            break
+
+        data = resp.json()
+        markets = data.get("markets", [])
+
+        if not markets:
+            break
+
+        await _upsert_contracts(pool, markets)
+        count += len(markets)
+
+        cursor = data.get("cursor")
+        if not cursor or len(markets) < _PAGE_SIZE:
+            break
+
+    if count > 0:
+        logger.info("series_pull_done", series=series_ticker, count=count)
+    return count
 
 
 async def pull_historical_prices(

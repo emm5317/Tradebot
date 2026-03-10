@@ -78,6 +78,12 @@ pub struct Config {
     pub crypto_cooldown_secs: u64,
     #[serde(default = "default_weather_cooldown_secs")]
     pub weather_cooldown_secs: u64,
+
+    // Phase 10: Directional model guards
+    #[serde(default = "default_crypto_max_market_disagreement")]
+    pub crypto_max_market_disagreement: f64,
+    #[serde(default = "default_crypto_directional_min_conviction")]
+    pub crypto_directional_min_conviction: f64,
 }
 
 fn default_db_pool_size() -> u32 {
@@ -126,6 +132,14 @@ fn default_crypto_cooldown_secs() -> u64 {
 
 fn default_weather_cooldown_secs() -> u64 {
     120
+}
+
+fn default_crypto_max_market_disagreement() -> f64 {
+    0.25
+}
+
+fn default_crypto_directional_min_conviction() -> f64 {
+    0.05
 }
 
 fn default_rti_stale_threshold_secs() -> u64 {

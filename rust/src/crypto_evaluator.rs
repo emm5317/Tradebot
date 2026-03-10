@@ -345,9 +345,11 @@ pub async fn run(
                                 contract,
                                 minutes_remaining,
                                 &orderbooks,
+                                &trade_tape,
                                 &order_mgr,
                                 &kalshi,
                                 &pool,
+                                &redis,
                                 &crypto_state,
                             )
                             .await;
@@ -452,13 +454,40 @@ async fn evaluate_entry(
         .unwrap_or(0.5);
 
     // 2. Compute fair value
-    // For directional "price up?" contracts, use current BTC price as strike
-    let effective_strike = if contract.directional {
-        snap.shadow_rti
+    // Read microstructure signals early — directional model needs them for FV
+    let (price_momentum, volume_surge) = read_ticker_signals(redis, &contract.ticker).await;
+
+    let fv = if contract.directional {
+        // Directional "Will BTC go up?" — momentum/order-flow model
+        let tape_data = {
+            let tape = trade_tape.read().unwrap();
+            let aggr = tape.aggressiveness(Duration::from_secs(30));
+            let vwap_dev = if spread > 0.0 {
+                tape.vwap(Duration::from_secs(60))
+                    .map(|vwap| ((vwap - mid_price) / spread).clamp(-1.0, 1.0))
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            (aggr, vwap_dev)
+        };
+        // Volume surge is aligned if trade aggression and momentum agree
+        let dir_sign = if price_momentum >= 0.0 { 1.0 } else { -1.0 };
+        let surge_aligned = volume_surge && (tape_data.0 * dir_sign) > 0.0;
+
+        crypto_fv::compute_directional_fair_value(
+            snap,
+            minutes_remaining,
+            price_momentum,
+            tape_data.0,     // trade_imbalance (aggressiveness)
+            tape_data.1,     // vwap_deviation
+            order_imbalance, // depth_imbalance
+            surge_aligned,
+        )
     } else {
-        contract.strike
+        // Strike-based contracts — standard N(d2) model
+        crypto_fv::compute_crypto_fair_value(snap, contract.strike, minutes_remaining)
     };
-    let fv = crypto_fv::compute_crypto_fair_value(snap, effective_strike, minutes_remaining);
 
     // 3. Check confidence
     if fv.confidence < config.crypto_min_confidence {
@@ -487,14 +516,88 @@ async fn evaluate_entry(
     // 4. Direction and raw edge
     let (direction, raw_edge) = crypto_fv::determine_direction(fv.probability, mid_price);
 
+    // 4a. Guard: ATM directional no-opinion — N(d2) at ATM is ~0.50 by necessity, not signal
+    if contract.directional && (fv.probability - 0.50).abs() < config.crypto_directional_min_conviction {
+        debug!(
+            ticker = %contract.ticker,
+            model_prob = %format!("{:.4}", fv.probability),
+            "crypto eval: directional ATM flatness — no opinion"
+        );
+        let pool_c = pool.clone();
+        let ticker_c = contract.ticker.clone();
+        tokio::spawn(async move {
+            decision_log::write(&pool_c, DecisionEntry {
+                ticker: ticker_c,
+                signal_type: "crypto".into(),
+                outcome: "rejected".into(),
+                rejection_reason: Some("directional_atm_no_opinion".into()),
+                model_prob: Some(fv.probability),
+                market_price: Some(mid_price),
+                edge: Some(raw_edge),
+                direction: Some(direction.to_string()),
+                minutes_remaining: Some(minutes_remaining),
+                confidence: Some(fv.confidence),
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            }).await;
+        });
+        return;
+    }
+
+    // 4b. Guard: market disagreement — model shouldn't disagree with market by >25%
+    if raw_edge > config.crypto_max_market_disagreement {
+        debug!(
+            ticker = %contract.ticker,
+            raw_edge = %format!("{:.4}", raw_edge),
+            model_prob = %format!("{:.4}", fv.probability),
+            market_price = %format!("{:.4}", mid_price),
+            "crypto eval: market disagreement too large"
+        );
+        let pool_c = pool.clone();
+        let ticker_c = contract.ticker.clone();
+        tokio::spawn(async move {
+            decision_log::write(&pool_c, DecisionEntry {
+                ticker: ticker_c,
+                signal_type: "crypto".into(),
+                outcome: "rejected".into(),
+                rejection_reason: Some("market_disagreement".into()),
+                model_prob: Some(fv.probability),
+                market_price: Some(mid_price),
+                edge: Some(raw_edge),
+                direction: Some(direction.to_string()),
+                minutes_remaining: Some(minutes_remaining),
+                confidence: Some(fv.confidence),
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            }).await;
+        });
+        return;
+    }
+
     // 5. Effective edge (spread-adjusted)
     let effective_edge = crypto_fv::compute_effective_edge(raw_edge, spread);
 
-    // 5b. Read per-ticker microstructure data from Redis (7.3a momentum, 7.3c volume surge)
-    let (price_momentum, volume_surge) = read_ticker_signals(redis, &contract.ticker).await;
-
-    // Phase 4.3: Microstructure adjustment (includes VWAP, momentum, volume surge)
-    let micro = {
+    // Phase 4.3: Microstructure adjustment
+    // For directional contracts, momentum/VWAP/depth/volume are already model inputs
+    // — only apply spread_regime to avoid double-counting.
+    let micro = if contract.directional {
+        let spread_regime = if spread < 0.04 {
+            0.01
+        } else if spread > 0.10 {
+            -0.02
+        } else {
+            0.0
+        };
+        MicrostructureAdj {
+            trade_imbalance: 0.0,
+            spread_regime,
+            depth_imbalance: 0.0,
+            vwap_signal: 0.0,
+            momentum_signal: 0.0,
+            volume_surge_signal: 0.0,
+            total: spread_regime,
+        }
+    } else {
         let tape = trade_tape.read().unwrap();
         compute_microstructure_adj(
             &contract.ticker, direction, order_imbalance,
@@ -641,7 +744,7 @@ async fn evaluate_entry(
         model_prob = %format!("{:.4}", fv.probability),
         confidence = %format!("{:.2}", fv.confidence),
         shadow_rti = %format!("{:.0}", snap.shadow_rti),
-        strike = %format!("{:.0}", effective_strike),
+        strike = %format!("{:.0}", contract.strike),
         micro_total = %format!("{:.4}", micro.total),
         micro_trade = %format!("{:.4}", micro.trade_imbalance),
         micro_spread = %format!("{:.4}", micro.spread_regime),
@@ -653,7 +756,7 @@ async fn evaluate_entry(
     );
 
     // Persist signal first to get DB id for order linkage
-    let signal_id = persist_signal(pool, &signal).await;
+    let signal_id = persist_signal(pool, &signal, contract.settlement_time).await;
 
     // 11. Risk check + submit
     {
@@ -745,9 +848,11 @@ async fn evaluate_exit(
     contract: &crate::contract_discovery::CryptoContract,
     minutes_remaining: f64,
     orderbooks: &OrderbookManager,
+    trade_tape: &Arc<RwLock<TradeTape>>,
     order_mgr: &Arc<tokio::sync::Mutex<OrderManager>>,
     kalshi: &Arc<KalshiClient>,
     pool: &sqlx::PgPool,
+    redis: &fred::clients::Client,
     crypto_state: &CryptoState,
 ) {
     // Check if we hold a position on this ticker
@@ -787,8 +892,30 @@ async fn evaluate_exit(
                 .unwrap_or(0.10)
         });
 
-    let effective_strike = if contract.directional { snap.shadow_rti } else { contract.strike };
-    let fv = crypto_fv::compute_crypto_fair_value(snap, effective_strike, minutes_remaining);
+    let fv = if contract.directional {
+        let (price_momentum, volume_surge) = read_ticker_signals(redis, &contract.ticker).await;
+        let order_imbalance = orderbooks.order_imbalance(&contract.ticker).unwrap_or(0.5);
+        let tape_data = {
+            let tape = trade_tape.read().unwrap();
+            let aggr = tape.aggressiveness(Duration::from_secs(30));
+            let vwap_dev = if spread > 0.0 {
+                tape.vwap(Duration::from_secs(60))
+                    .map(|vwap| ((vwap - mid_price) / spread).clamp(-1.0, 1.0))
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            (aggr, vwap_dev)
+        };
+        let dir_sign = if price_momentum >= 0.0 { 1.0 } else { -1.0 };
+        let surge_aligned = volume_surge && (tape_data.0 * dir_sign) > 0.0;
+        crypto_fv::compute_directional_fair_value(
+            snap, minutes_remaining, price_momentum,
+            tape_data.0, tape_data.1, order_imbalance, surge_aligned,
+        )
+    } else {
+        crypto_fv::compute_crypto_fair_value(snap, contract.strike, minutes_remaining)
+    };
 
     // Check if edge has flipped
     let current_edge = if held_direction == "yes" {
@@ -870,7 +997,25 @@ async fn read_ticker_signals(redis: &fred::clients::Client, ticker: &str) -> (f6
 }
 
 /// Persist signal to the signals table. Returns the DB-assigned signal id.
-async fn persist_signal(pool: &sqlx::PgPool, signal: &Signal) -> Option<i64> {
+///
+/// Ensures the contract row exists first (lightweight upsert) to avoid FK violation
+/// when a new contract ticker hasn't been synced yet.
+async fn persist_signal(
+    pool: &sqlx::PgPool,
+    signal: &Signal,
+    settlement_time: chrono::DateTime<Utc>,
+) -> Option<i64> {
+    // Ensure contract row exists to satisfy FK constraint
+    let _ = sqlx::query(
+        r#"INSERT INTO contracts (ticker, title, category, settlement_time, status)
+           VALUES ($1, '', 'crypto', $2, 'active')
+           ON CONFLICT (ticker) DO NOTHING"#,
+    )
+    .bind(&signal.ticker)
+    .bind(settlement_time)
+    .execute(pool)
+    .await;
+
     let result = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO signals (
@@ -901,7 +1046,7 @@ async fn persist_signal(pool: &sqlx::PgPool, signal: &Signal) -> Option<i64> {
     match result {
         Ok(id) => Some(id),
         Err(e) => {
-            warn!(error = %e, "failed to persist signal");
+            warn!(error = %e, ticker = %signal.ticker, "failed to persist signal");
             None
         }
     }
@@ -1086,6 +1231,59 @@ mod tests {
         let slope = tracker.trend("TICKER", 30).unwrap();
         assert!(slope.abs() < 0.001, "stable edge should have ~0 slope, got {slope}");
         assert!(!tracker.should_wait("TICKER"), "should NOT wait when edge is stable");
+    }
+
+    #[test]
+    fn test_market_disagreement_guard_logic() {
+        // When raw_edge > threshold, trade should be rejected
+        let threshold = 0.25;
+
+        // Model says 0.50, market says 0.99 → raw_edge = 0.49 > 0.25 → REJECT
+        let (_, raw_edge) = crypto_fv::determine_direction(0.50, 0.99);
+        assert!(raw_edge > threshold, "0.49 edge should exceed 0.25 threshold");
+
+        // Model says 0.60, market says 0.55 → raw_edge = 0.05 < 0.25 → PASS
+        let (_, raw_edge) = crypto_fv::determine_direction(0.60, 0.55);
+        assert!(raw_edge < threshold, "0.05 edge should be below 0.25 threshold");
+
+        // Model says 0.30, market says 0.55 → raw_edge = 0.25, at boundary → PASS (not >)
+        let (_, raw_edge) = crypto_fv::determine_direction(0.30, 0.55);
+        assert!((raw_edge - 0.25).abs() < 1e-10, "boundary case");
+    }
+
+    #[test]
+    fn test_atm_directional_flatness_guard_logic() {
+        // ATM directional: model_prob near 0.50 → no opinion → REJECT
+        let conviction_threshold: f64 = 0.05;
+
+        // model_prob = 0.50 → |0.50 - 0.50| = 0.0 < 0.05 → REJECT
+        let model_prob: f64 = 0.50;
+        assert!((model_prob - 0.50).abs() < conviction_threshold);
+
+        // model_prob = 0.52 → |0.52 - 0.50| = 0.02 < 0.05 → REJECT
+        let model_prob: f64 = 0.52;
+        assert!((model_prob - 0.50).abs() < conviction_threshold);
+
+        // model_prob = 0.56 → |0.56 - 0.50| = 0.06 > 0.05 → PASS
+        let model_prob: f64 = 0.56;
+        assert!((model_prob - 0.50).abs() >= conviction_threshold);
+    }
+
+    #[test]
+    fn test_directional_microstructure_skip() {
+        // For directional contracts, only spread_regime should apply
+        // (other components are already in the directional FV model)
+        let spread = 0.03; // tight → bonus 0.01
+        let spread_regime = if spread < 0.04 { 0.01 } else if spread > 0.10 { -0.02 } else { 0.0 };
+        assert_eq!(spread_regime, 0.01);
+
+        let spread = 0.15; // wide → penalty -0.02
+        let spread_regime = if spread < 0.04 { 0.01 } else if spread > 0.10 { -0.02 } else { 0.0 };
+        assert_eq!(spread_regime, -0.02);
+
+        let spread = 0.06; // normal → 0
+        let spread_regime = if spread < 0.04 { 0.01 } else if spread > 0.10 { -0.02 } else { 0.0 };
+        assert_eq!(spread_regime, 0.0);
     }
 
     #[test]

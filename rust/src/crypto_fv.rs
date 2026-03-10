@@ -119,6 +119,81 @@ pub fn compute_crypto_fair_value(
     }
 }
 
+/// Compute fair value for directional "Will BTC go up?" contracts.
+///
+/// Unlike strike-based contracts where N(d2) provides meaningful probabilities,
+/// directional contracts are ATM by definition (strike = current price), making
+/// N(d2) ≈ 0.50 always — zero predictive power. Instead, use a momentum/order-flow
+/// model that aggregates microstructure signals into a directional probability.
+///
+/// Returns probability in [0.35, 0.65] — deliberately constrained since short-term
+/// directional prediction is inherently low-conviction.
+pub fn compute_directional_fair_value(
+    state: &CryptoStateInner,
+    _minutes_remaining: f64,
+    price_momentum: f64,
+    trade_imbalance: f64,
+    vwap_deviation: f64,
+    depth_imbalance: f64,
+    volume_surge_aligned: bool,
+) -> CryptoFairValue {
+    let vol = estimate_volatility(state);
+
+    // Weights for signal combination
+    const W_MOMENTUM: f64 = 0.40;
+    const W_TRADE_IMB: f64 = 0.25;
+    const W_VWAP: f64 = 0.15;
+    const W_DEPTH: f64 = 0.10;
+    const W_VOL_SURGE: f64 = 0.10;
+    const MAX_SHIFT: f64 = 0.15;
+
+    // Normalize price momentum to [-1, 1] using 60s scale
+    let momentum_norm = price_momentum.clamp(-1.0, 1.0);
+
+    // Combine signals
+    let vol_surge_signal = if volume_surge_aligned { 1.0 } else { 0.0 };
+    let momentum_score = W_MOMENTUM * momentum_norm
+        + W_TRADE_IMB * trade_imbalance.clamp(-1.0, 1.0)
+        + W_VWAP * vwap_deviation.clamp(-1.0, 1.0)
+        + W_DEPTH * ((depth_imbalance - 0.5) * 2.0).clamp(-1.0, 1.0)
+        + W_VOL_SURGE * vol_surge_signal;
+
+    // Scale by inverse volatility — higher vol = larger moves plausible
+    let vol_scale = (0.50 / vol).clamp(0.5, 2.0);
+
+    let p = (0.50 + momentum_score * vol_scale * MAX_SHIFT).clamp(0.35, 0.65);
+
+    // Confidence: much lower than strike-based contracts
+    let mut confidence: f64 = 0.25;
+    // Bonus for aligned signals (momentum and trade imbalance same direction)
+    if momentum_norm.signum() == trade_imbalance.signum() && momentum_norm.abs() > 0.1 {
+        confidence += 0.05;
+    }
+    // Bonus for RTI reliability
+    if state.rti_reliable {
+        confidence += 0.05;
+    }
+    // Bonus for volume surge
+    if volume_surge_aligned {
+        confidence += 0.05;
+    }
+    // Bonus for VWAP alignment with momentum
+    if vwap_deviation.signum() == momentum_norm.signum() && vwap_deviation.abs() > 0.1 {
+        confidence += 0.05;
+    }
+    confidence = confidence.clamp(0.0, 0.45);
+
+    CryptoFairValue {
+        probability: p,
+        shadow_rti: state.shadow_rti,
+        vol_used: vol,
+        basis: state.basis,
+        basis_signal: 0.0,
+        funding_signal: 0.0,
+        confidence,
+    }
+}
+
 /// Determine trade direction and raw edge.
 pub fn determine_direction(model_prob: f64, market_price: f64) -> (&'static str, f64) {
     if model_prob > market_price {
@@ -620,6 +695,103 @@ mod tests {
         // OTM at expiry → ~0.0
         let p = compute_settlement_probability(spot, 96000.0, 0.001, 0.50);
         assert!(p < 0.05, "OTM at expiry should be ~0.0, got {}", p);
+    }
+
+    // --- Directional model tests ---
+
+    #[test]
+    fn test_directional_base_neutral() {
+        // Zero inputs → P = 0.50
+        let cs = CryptoState::new();
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        let snap = cs.snapshot();
+
+        let fv = compute_directional_fair_value(&snap, 10.0, 0.0, 0.0, 0.0, 0.5, false);
+        assert!(
+            (fv.probability - 0.50).abs() < 0.01,
+            "Zero inputs should give P ≈ 0.50, got {}",
+            fv.probability
+        );
+    }
+
+    #[test]
+    fn test_directional_bullish_momentum() {
+        let cs = CryptoState::new();
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        let snap = cs.snapshot();
+
+        let fv = compute_directional_fair_value(&snap, 10.0, 0.8, 0.6, 0.5, 0.7, true);
+        assert!(
+            fv.probability > 0.55,
+            "Strong bullish signals should give P > 0.55, got {}",
+            fv.probability
+        );
+    }
+
+    #[test]
+    fn test_directional_bearish_momentum() {
+        let cs = CryptoState::new();
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        let snap = cs.snapshot();
+
+        let fv = compute_directional_fair_value(&snap, 10.0, -0.8, -0.6, -0.5, 0.3, false);
+        assert!(
+            fv.probability < 0.45,
+            "Strong bearish signals should give P < 0.45, got {}",
+            fv.probability
+        );
+    }
+
+    #[test]
+    fn test_directional_clamped_range() {
+        let cs = CryptoState::new();
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        let snap = cs.snapshot();
+
+        // Extreme bullish
+        let fv = compute_directional_fair_value(&snap, 10.0, 10.0, 10.0, 10.0, 1.0, true);
+        assert!(fv.probability >= 0.35 && fv.probability <= 0.65,
+            "P should be in [0.35, 0.65], got {}", fv.probability);
+
+        // Extreme bearish
+        let fv = compute_directional_fair_value(&snap, 10.0, -10.0, -10.0, -10.0, 0.0, false);
+        assert!(fv.probability >= 0.35 && fv.probability <= 0.65,
+            "P should be in [0.35, 0.65], got {}", fv.probability);
+    }
+
+    #[test]
+    fn test_directional_confidence_low() {
+        // No alignment → confidence should be low (below typical min_confidence of 0.50)
+        let cs = CryptoState::new();
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        let snap = cs.snapshot();
+
+        let fv = compute_directional_fair_value(&snap, 10.0, 0.0, 0.0, 0.0, 0.5, false);
+        assert!(
+            fv.confidence < 0.50,
+            "No aligned signals → confidence < 0.50, got {}",
+            fv.confidence
+        );
+    }
+
+    #[test]
+    fn test_directional_confidence_aligned() {
+        // Aligned signals → confidence should be higher (but still ≤0.45)
+        let cs = CryptoState::new();
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        let snap = cs.snapshot();
+
+        let fv = compute_directional_fair_value(&snap, 10.0, 0.5, 0.5, 0.5, 0.7, true);
+        assert!(
+            fv.confidence >= 0.35 && fv.confidence <= 0.45,
+            "Aligned signals → confidence in [0.35, 0.45], got {}",
+            fv.confidence
+        );
     }
 
     #[test]

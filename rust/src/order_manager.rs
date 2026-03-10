@@ -1184,16 +1184,28 @@ async fn persist_order(
 }
 
 /// Settle order outcomes by joining against contracts.settled_yes.
-/// Updates orders with outcome = 'win' or 'loss' for settled contracts.
+/// Updates orders with outcome = 'win' or 'loss' and computes pnl_cents.
+///
+/// P&L for binary contracts:
+///   win  → payout is $1.00 per contract, cost was fill_price → profit = (100 - fill_cents)
+///   loss → payout is $0.00, cost was fill_price → loss = -fill_cents
 pub async fn settle_order_outcomes(pool: &sqlx::PgPool) -> Result<u64> {
     let result = sqlx::query(
         r#"
-        UPDATE orders SET outcome = CASE
-            WHEN (direction = 'yes' AND c.settled_yes = true)
-              OR (direction = 'no' AND c.settled_yes = false)
-            THEN 'win'
-            ELSE 'loss'
-        END
+        UPDATE orders SET
+            outcome = CASE
+                WHEN (direction = 'yes' AND c.settled_yes = true)
+                  OR (direction = 'no' AND c.settled_yes = false)
+                THEN 'win'
+                ELSE 'loss'
+            END,
+            pnl_cents = CASE
+                WHEN (direction = 'yes' AND c.settled_yes = true)
+                  OR (direction = 'no' AND c.settled_yes = false)
+                THEN (100 - ROUND(fill_price * 100)::integer)
+                ELSE (-ROUND(fill_price * 100)::integer)
+            END,
+            settled_at = now()
         FROM contracts c
         WHERE orders.ticker = c.ticker
           AND c.settled_yes IS NOT NULL
@@ -1559,6 +1571,8 @@ mod tests {
             crypto_min_confidence: 0.50,
             crypto_cooldown_secs: 30,
             weather_cooldown_secs: 120,
+            crypto_max_market_disagreement: 0.25,
+            crypto_directional_min_conviction: 0.05,
         }
     }
 

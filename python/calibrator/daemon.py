@@ -76,18 +76,26 @@ class CalibrationDaemon:
     # ------------------------------------------------------------------
 
     async def settle_order_outcomes(self) -> int:
-        """Update orders with win/loss based on contract settlement."""
+        """Update orders with win/loss and pnl_cents based on contract settlement."""
         assert self.pool is not None
 
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 """
-                UPDATE orders SET outcome = CASE
-                    WHEN (direction = 'yes' AND c.settled_yes = true)
-                      OR (direction = 'no' AND c.settled_yes = false)
-                    THEN 'win'
-                    ELSE 'loss'
-                END
+                UPDATE orders SET
+                    outcome = CASE
+                        WHEN (direction = 'yes' AND c.settled_yes = true)
+                          OR (direction = 'no' AND c.settled_yes = false)
+                        THEN 'win'
+                        ELSE 'loss'
+                    END,
+                    pnl_cents = CASE
+                        WHEN (direction = 'yes' AND c.settled_yes = true)
+                          OR (direction = 'no' AND c.settled_yes = false)
+                        THEN (100 - ROUND(fill_price * 100)::integer)
+                        ELSE (-ROUND(fill_price * 100)::integer)
+                    END,
+                    settled_at = now()
                 FROM contracts c
                 WHERE orders.ticker = c.ticker
                   AND c.settled_yes IS NOT NULL
