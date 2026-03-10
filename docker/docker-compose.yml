@@ -81,7 +81,7 @@ services:
       NATS_URL: nats://nats:4222
 
       KALSHI_API_KEY: ${KALSHI_API_KEY:-39843d6e-c7e5-4106-85b4-c8457fc07125}
-      KALSHI_PRIVATE_KEY_PATH: /app/config/kalshi_dev.pem
+      KALSHI_PRIVATE_KEY_PATH: /app/${KALSHI_PRIVATE_KEY_PATH:-config/kalshi_dev.pem}
       KALSHI_BASE_URL: ${KALSHI_BASE_URL:-https://demo-api.kalshi.co}
       KALSHI_WS_URL: ${KALSHI_WS_URL:-wss://demo-api.kalshi.co/trade-api/ws/v2}
 

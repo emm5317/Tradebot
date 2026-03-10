@@ -26,3 +26,11 @@ Thumbs.db
 pgdata/
 redisdata/
 natsdata/
+
+# Tooling / generated
+.claude/
+.playwright-mcp/
+node_modules/
+package.json
+package-lock.json
+*.png
