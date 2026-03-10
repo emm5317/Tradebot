@@ -262,17 +262,19 @@ struct SignalRow {
     minutes_remaining: f32,
     acted_on: bool,
     rejection_reason: Option<String>,
+    source: Option<String>,
 }
 
 async fn api_signals(State(st): State<DashboardState>) -> Json<Vec<SignalRow>> {
     let rows = sqlx::query_as::<_, (
         i64, chrono::DateTime<chrono::Utc>, String, String, String,
-        f32, f32, f32, f32, f32, bool, Option<String>,
+        f32, f32, f32, f32, f32, bool, Option<String>, Option<String>,
     )>(
         r#"
         SELECT id, created_at, ticker, signal_type, direction,
                model_prob, market_price, edge, kelly_fraction,
-               minutes_remaining, acted_on, rejection_reason
+               minutes_remaining, acted_on, rejection_reason,
+               observation_data->>'source' AS source
         FROM signals
         ORDER BY created_at DESC
         LIMIT 50
@@ -297,6 +299,7 @@ async fn api_signals(State(st): State<DashboardState>) -> Json<Vec<SignalRow>> {
                 minutes_remaining: r.9,
                 acted_on: r.10,
                 rejection_reason: r.11,
+                source: r.12,
             })
             .collect(),
     )

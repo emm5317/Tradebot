@@ -544,6 +544,9 @@ function renderContracts(contracts) {
 }
 
 // ── Signals Table ───────────────────────────────────────
+// MODEL and MKT are displayed from the traded side's perspective so that
+// MODEL - MKT ≈ EDGE is visually intuitive.  RAW shows the pre-adjustment
+// difference; ADJ is the spread+micro adjusted edge actually used.
 function renderSignals(signals) {
   document.getElementById('signalBadge').textContent = signals.length + ' rows';
   if (!signals.length) {
@@ -553,25 +556,35 @@ function renderSignals(signals) {
   }
   let html = `<table><thead><tr>
     <th>AGE</th><th>TICKER</th><th>TYPE</th><th>DIR</th>
-    <th>EDGE</th><th>KELLY</th><th>MODEL</th><th>MKT</th><th>SRC</th>
+    <th>MODEL</th><th>MKT</th><th>RAW</th><th>ADJ</th><th>KELLY</th><th>SRC</th>
   </tr></thead><tbody>`;
   signals.forEach(s => {
     const a = age(s.created_at);
-    const edgePct = (s.edge * 100).toFixed(1);
-    const edgeCls = s.edge >= 0.06 ? 'edge-good' : s.edge >= 0.03 ? 'edge-ok' : 'edge-low';
-    const dirCls = s.direction === 'yes' ? 'dir-yes' : 'dir-no';
-    const srcCls = s.source === 'rust' ? 'source-rust' : 'source-python';
-    const actionable = s.edge >= 0.03 && a.cls === 'age-fresh' ? ' signal-actionable' : '';
+    const isNo = s.direction === 'no';
+    // Show model & market from the traded side so the numbers make sense together
+    const modelSide = isNo ? 1 - s.model_prob : s.model_prob;
+    const mktSide = isNo ? 1 - s.market_price : s.market_price;
+    const rawEdge = modelSide - mktSide;
+    const adjEdge = s.edge;
+    const rawPct = (rawEdge * 100).toFixed(1);
+    const adjPct = (adjEdge * 100).toFixed(1);
+    const edgeCls = adjEdge >= 0.06 ? 'edge-good' : adjEdge >= 0.03 ? 'edge-ok' : 'edge-low';
+    const rawCls = rawEdge >= 0.06 ? 'edge-good' : rawEdge >= 0.03 ? 'edge-ok' : 'edge-low';
+    const dirCls = isNo ? 'dir-no' : 'dir-yes';
+    const srcLabel = (s.source || '?').toUpperCase();
+    const srcCls = s.source === 'rust' ? 'source-rust' : s.source === 'python' ? 'source-python' : '';
+    const actionable = adjEdge >= 0.03 && a.cls === 'age-fresh' ? ' signal-actionable' : '';
     html += `<tr class="${actionable}">
       <td><span class="age ${a.cls}">${a.text}</span></td>
       <td style="color:var(--cyan)">${s.ticker}</td>
       <td>${s.signal_type}</td>
       <td class="${dirCls}">${s.direction.toUpperCase()}</td>
-      <td class="${edgeCls}">${edgePct}%</td>
+      <td>${(modelSide*100).toFixed(1)}%</td>
+      <td>${(mktSide*100).toFixed(0)}c</td>
+      <td class="${rawCls}">${rawPct}%</td>
+      <td class="${edgeCls}">${adjPct}%</td>
       <td>${(s.kelly_fraction*100).toFixed(1)}%</td>
-      <td>${(s.model_prob*100).toFixed(1)}%</td>
-      <td>${(s.market_price*100).toFixed(0)}c</td>
-      <td class="${srcCls}">${(s.source||'?').toUpperCase()}</td>
+      <td class="${srcCls}">${srcLabel}</td>
     </tr>`;
   });
   html += '</tbody></table>';
