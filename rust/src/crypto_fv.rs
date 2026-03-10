@@ -155,6 +155,37 @@ pub fn compute_kelly(model_prob: f64, fill_price: f64, direction: &str) -> f64 {
     kelly.max(0.0)
 }
 
+/// Robust Kelly criterion — sizes on worst-case probability within confidence interval.
+///
+/// Instead of using the point-estimate probability, computes Kelly from the lower
+/// bound of the probability interval: p_lo = model_prob - k*(1-confidence).
+/// This automatically reduces position size when model uncertainty is high,
+/// and refuses to trade when the lower bound doesn't clear the market price.
+///
+/// `k` controls interval width: 0.12 means ±12% at zero confidence.
+pub fn compute_robust_kelly(
+    model_prob: f64,
+    fill_price: f64,
+    direction: &str,
+    confidence: f64,
+) -> f64 {
+    const UNCERTAINTY_SCALE: f64 = 0.12; // max prob uncertainty at confidence=0
+
+    let uncertainty = UNCERTAINTY_SCALE * (1.0 - confidence.clamp(0.0, 1.0));
+
+    // Compute worst-case probability for our direction
+    let conservative_prob = if direction == "yes" {
+        // Buying YES: worst case is probability is lower than estimated
+        (model_prob - uncertainty).clamp(0.01, 0.99)
+    } else {
+        // Buying NO: worst case is probability is higher than estimated
+        // (i.e., the event is MORE likely, making NO less valuable)
+        (model_prob + uncertainty).clamp(0.01, 0.99)
+    };
+
+    compute_kelly(conservative_prob, fill_price, direction)
+}
+
 /// Estimate fill price from orderbook (simplified).
 pub fn estimate_fill_price(direction: &str, mid_price: f64, spread: f64) -> f64 {
     if direction == "yes" {
@@ -325,7 +356,7 @@ mod tests {
     fn test_fair_value_at_the_money() {
         let cs = CryptoState::new();
         cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
-        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), None, 30, 10.0, None);
 
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
@@ -342,7 +373,7 @@ mod tests {
     fn test_fair_value_deep_itm() {
         let cs = CryptoState::new();
         cs.update_coinbase(100000.0, 0.0, 0.0, 10.0);
-        cs.update_binance_spot(100000.0, None, Some(0.50), 30, 10.0);
+        cs.update_binance_spot(100000.0, None, Some(0.50), None, 30, 10.0, None);
 
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 90000.0, 5.0);
@@ -359,7 +390,7 @@ mod tests {
     fn test_fair_value_deep_otm() {
         let cs = CryptoState::new();
         cs.update_coinbase(90000.0, 0.0, 0.0, 10.0);
-        cs.update_binance_spot(90000.0, None, Some(0.50), 30, 10.0);
+        cs.update_binance_spot(90000.0, None, Some(0.50), None, 30, 10.0, None);
 
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 100000.0, 5.0);
@@ -389,7 +420,7 @@ mod tests {
     fn test_basis_signal_contango() {
         let cs = CryptoState::new();
         cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
-        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), None, 30, 10.0, None);
         cs.update_binance_futures(95500.0, 95200.0, 0.0, 0.5); // +500 basis
 
         let snap = cs.snapshot();
@@ -444,7 +475,7 @@ mod tests {
         assert!((fv.confidence - 0.40).abs() < 0.01, "No data = 0.40 confidence, got {}", fv.confidence);
 
         cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
-        cs.update_binance_spot(95000.0, None, None, 0, 10.0);
+        cs.update_binance_spot(95000.0, None, None, None, 0, 10.0, None);
         cs.update_binance_futures(95300.0, 0.0, 0.0, 0.5);
         cs.update_deribit(50.0);
         let snap = cs.snapshot();
@@ -461,7 +492,7 @@ mod tests {
     fn test_confidence_single_venue_passes() {
         // Single Binance venue should produce confidence > 0.5 (MIN_CONFIDENCE)
         let cs = CryptoState::new();
-        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), None, 30, 10.0, None);
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
         // 0.40 + 0.15(BN) = 0.55 (RTI not reliable with single venue)
@@ -512,11 +543,48 @@ mod tests {
     }
 
     #[test]
+    fn test_robust_kelly_high_confidence() {
+        // High confidence → robust Kelly should be close to standard Kelly
+        let standard = compute_kelly(0.7, 0.55, "yes");
+        let robust = compute_robust_kelly(0.7, 0.55, "yes", 1.0);
+        assert!((standard - robust).abs() < 0.01,
+            "At full confidence, robust≈standard: standard={standard}, robust={robust}");
+    }
+
+    #[test]
+    fn test_robust_kelly_low_confidence_reduces_size() {
+        // Low confidence → robust Kelly should be smaller
+        let high_conf = compute_robust_kelly(0.7, 0.55, "yes", 0.9);
+        let low_conf = compute_robust_kelly(0.7, 0.55, "yes", 0.5);
+        assert!(low_conf < high_conf,
+            "Lower confidence should reduce Kelly: high={high_conf}, low={low_conf}");
+    }
+
+    #[test]
+    fn test_robust_kelly_no_trade_when_uncertain() {
+        // With very low confidence and small edge, robust Kelly should be 0
+        // model_prob=0.55, fill_price=0.50, confidence=0.3
+        // uncertainty = 0.12 * (1 - 0.3) = 0.084
+        // conservative_prob = 0.55 - 0.084 = 0.466 < fill_price → kelly = 0
+        let k = compute_robust_kelly(0.55, 0.50, "yes", 0.3);
+        assert!(k < 0.01, "Should not trade with uncertain small edge, got kelly={k}");
+    }
+
+    #[test]
+    fn test_robust_kelly_no_direction() {
+        // For NO direction, worst case is probability higher than estimated
+        let high_conf = compute_robust_kelly(0.3, 0.45, "no", 0.9);
+        let low_conf = compute_robust_kelly(0.3, 0.45, "no", 0.5);
+        assert!(low_conf < high_conf,
+            "NO direction: lower confidence should reduce Kelly: high={high_conf}, low={low_conf}");
+    }
+
+    #[test]
     fn test_levy_averaging_reduces_extremes_near_expiry() {
         let cs = CryptoState::new();
         // Use a spot slightly above strike so probability is in a sensitive range
         cs.update_coinbase(95200.0, 0.0, 0.0, 10.0);
-        cs.update_binance_spot(95200.0, None, Some(0.50), 30, 10.0);
+        cs.update_binance_spot(95200.0, None, Some(0.50), None, 30, 10.0, None);
 
         let snap = cs.snapshot();
         let strike = 95000.0;

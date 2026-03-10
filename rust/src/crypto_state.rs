@@ -52,9 +52,13 @@ pub struct CryptoStateInner {
     pub binance_spot: f64,
     pub binance_spot_vol_realized: Option<f64>,
     pub binance_spot_vol_ewma: Option<f64>,
+    pub binance_spot_vol_garch: Option<f64>,
     pub binance_spot_bars_count: usize,
     pub binance_spot_updated: Option<Instant>,
     pub binance_trade_volume_5m: f64,
+    /// Hurst exponent from R/S analysis on 100 1-min bars.
+    /// H < 0.45 → mean-reverting, H > 0.55 → trending, else random walk.
+    pub hurst_exponent: Option<f64>,
 
     // Binance Futures
     pub perp_price: f64,
@@ -88,9 +92,11 @@ impl Default for CryptoStateInner {
             binance_spot: 0.0,
             binance_spot_vol_realized: None,
             binance_spot_vol_ewma: None,
+            binance_spot_vol_garch: None,
             binance_spot_bars_count: 0,
             binance_spot_updated: None,
             binance_trade_volume_5m: 0.0,
+            hurst_exponent: None,
             perp_price: 0.0,
             mark_price: 0.0,
             funding_rate: 0.0,
@@ -153,16 +159,20 @@ impl CryptoState {
         spot: f64,
         realized_vol: Option<f64>,
         ewma_vol: Option<f64>,
+        garch_vol: Option<f64>,
         bars_count: usize,
         trade_volume_5m: f64,
+        hurst: Option<f64>,
     ) {
         let mut state = self.inner.write().unwrap();
         state.binance_spot = spot;
         state.binance_spot_vol_realized = realized_vol;
         state.binance_spot_vol_ewma = ewma_vol;
+        state.binance_spot_vol_garch = garch_vol;
         state.binance_spot_bars_count = bars_count;
         state.binance_trade_volume_5m = trade_volume_5m;
         state.binance_spot_updated = Some(Instant::now());
+        state.hurst_exponent = hurst;
         recompute_derived(&mut state);
         trace!(spot, shadow_rti = state.shadow_rti, "binance spot updated");
         drop(state);
@@ -277,10 +287,14 @@ fn recompute_derived(state: &mut CryptoStateInner) {
         state.basis = 0.0;
     }
 
-    // Best vol: prefer DVOL > EWMA > realized
+    // Best vol: prefer DVOL > GARCH > EWMA > realized
     if state.dvol > 0.0 {
         // DVOL is annualized percentage (e.g. 52.3 means 52.3%)
         state.best_vol = Some(state.dvol / 100.0);
+    } else if let Some(garch) = state.binance_spot_vol_garch {
+        if garch > 0.0 {
+            state.best_vol = Some(garch);
+        }
     } else if let Some(ewma) = state.binance_spot_vol_ewma {
         if ewma > 0.0 {
             state.best_vol = Some(ewma);
@@ -301,7 +315,7 @@ mod tests {
         let cs = CryptoState::new();
         // Equal volume → equal weights → average
         cs.update_coinbase(95000.0, 94990.0, 95010.0, 10.0);
-        cs.update_binance_spot(95100.0, None, None, 0, 10.0);
+        cs.update_binance_spot(95100.0, None, None, None, 0, 10.0, None);
 
         let snap = cs.snapshot();
         // Equal volume → equal weights → (95000 + 95100) / 2 = 95050
@@ -314,7 +328,7 @@ mod tests {
         let cs = CryptoState::new();
         // Coinbase 4x volume → higher weight (sqrt(100)=10, sqrt(6.25)=2.5)
         cs.update_coinbase(95000.0, 94990.0, 95010.0, 100.0);
-        cs.update_binance_spot(95100.0, None, None, 0, 6.25);
+        cs.update_binance_spot(95100.0, None, None, None, 0, 6.25, None);
 
         let snap = cs.snapshot();
         // weight_cb = sqrt(100) = 10, weight_bn = sqrt(6.25) = 2.5
@@ -335,7 +349,7 @@ mod tests {
     #[test]
     fn test_shadow_rti_binance_only() {
         let cs = CryptoState::new();
-        cs.update_binance_spot(95100.0, None, None, 0, 10.0);
+        cs.update_binance_spot(95100.0, None, None, None, 0, 10.0, None);
 
         let snap = cs.snapshot();
         assert!((snap.shadow_rti - 95100.0).abs() < 0.01);
@@ -356,7 +370,7 @@ mod tests {
     fn test_shadow_rti_stale_venue() {
         let cs = CryptoState::new();
         cs.update_coinbase(95000.0, 94990.0, 95010.0, 10.0);
-        cs.update_binance_spot(95100.0, None, None, 0, 10.0);
+        cs.update_binance_spot(95100.0, None, None, None, 0, 10.0, None);
 
         // Manually set coinbase_updated to >5s ago to simulate staleness
         {
@@ -379,7 +393,7 @@ mod tests {
         // So we give Coinbase much more volume to make Binance the "outlier"
         // by having a high deviation AND low volume
         cs.update_coinbase(95000.0, 94990.0, 95010.0, 100.0);
-        cs.update_binance_spot(96900.0, None, None, 0, 1.0);
+        cs.update_binance_spot(96900.0, None, None, None, 0, 1.0, None);
 
         let snap = cs.snapshot();
         // median = (95000+96900)/2 = 95950
@@ -399,7 +413,7 @@ mod tests {
     fn test_shadow_rti_both_stale_fallback() {
         let cs = CryptoState::new();
         cs.update_coinbase(95000.0, 94990.0, 95010.0, 10.0);
-        cs.update_binance_spot(95100.0, None, None, 0, 10.0);
+        cs.update_binance_spot(95100.0, None, None, None, 0, 10.0, None);
         cs.update_binance_futures(95300.0, 95200.0, 0.0, 0.5);
 
         // Make both stale
@@ -431,7 +445,7 @@ mod tests {
     #[test]
     fn test_best_vol_dvol_preferred() {
         let cs = CryptoState::new();
-        cs.update_binance_spot(95000.0, Some(0.65), Some(0.70), 30, 10.0);
+        cs.update_binance_spot(95000.0, Some(0.65), Some(0.70), None, 30, 10.0, None);
         cs.update_deribit(52.3);
 
         let snap = cs.snapshot();
@@ -439,9 +453,20 @@ mod tests {
     }
 
     #[test]
+    fn test_best_vol_garch_fallback() {
+        let cs = CryptoState::new();
+        // GARCH available, no DVOL → should use GARCH
+        cs.update_binance_spot(95000.0, Some(0.65), Some(0.70), Some(0.68), 30, 10.0, None);
+
+        let snap = cs.snapshot();
+        assert!((snap.best_vol.unwrap() - 0.68).abs() < 0.001);
+    }
+
+    #[test]
     fn test_best_vol_ewma_fallback() {
         let cs = CryptoState::new();
-        cs.update_binance_spot(95000.0, Some(0.65), Some(0.70), 30, 10.0);
+        // No DVOL, no GARCH → should use EWMA
+        cs.update_binance_spot(95000.0, Some(0.65), Some(0.70), None, 30, 10.0, None);
 
         let snap = cs.snapshot();
         assert!((snap.best_vol.unwrap() - 0.70).abs() < 0.001);
@@ -450,17 +475,26 @@ mod tests {
     #[test]
     fn test_best_vol_realized_fallback() {
         let cs = CryptoState::new();
-        cs.update_binance_spot(95000.0, Some(0.65), None, 30, 10.0);
+        cs.update_binance_spot(95000.0, Some(0.65), None, None, 30, 10.0, None);
 
         let snap = cs.snapshot();
         assert!((snap.best_vol.unwrap() - 0.65).abs() < 0.001);
     }
 
     #[test]
+    fn test_hurst_exponent_stored() {
+        let cs = CryptoState::new();
+        cs.update_binance_spot(95000.0, None, None, None, 100, 10.0, Some(0.45));
+
+        let snap = cs.snapshot();
+        assert!((snap.hurst_exponent.unwrap() - 0.45).abs() < 0.001);
+    }
+
+    #[test]
     fn test_snapshot_is_consistent() {
         let cs = CryptoState::new();
         cs.update_coinbase(95000.0, 94990.0, 95010.0, 10.0);
-        cs.update_binance_spot(95100.0, Some(0.65), Some(0.70), 30, 10.0);
+        cs.update_binance_spot(95100.0, Some(0.65), Some(0.70), None, 30, 10.0, None);
         cs.update_binance_futures(95300.0, 95200.0, 0.0001, 0.55);
         cs.update_deribit(52.3);
 

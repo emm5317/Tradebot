@@ -127,10 +127,26 @@ impl EdgeTracker {
     }
 }
 
+/// Compute regime-adaptive weight multiplier from Hurst exponent.
+///
+/// Returns (momentum_weight, mean_reversion_weight):
+/// - H > 0.55 (trending): amplify momentum, dampen mean-reversion
+/// - H < 0.45 (mean-reverting): dampen momentum, amplify mean-reversion
+/// - H ≈ 0.50 (random walk): reduce all microstructure signal weights
+fn regime_weights(hurst: Option<f64>) -> (f64, f64) {
+    match hurst {
+        Some(h) if h > 0.55 => (1.5, 0.5),  // trending: boost momentum
+        Some(h) if h < 0.45 => (0.3, 1.5),   // mean-reverting: boost depth/imbalance
+        Some(_) => (0.7, 0.7),                // random walk: reduce all
+        None => (1.0, 1.0),                   // no data: default weights
+    }
+}
+
 /// Compute microstructure adjustment from trade tape and orderbook state.
 ///
 /// `price_momentum` is cents/second from linear regression on last_price history (7.3a).
 /// `volume_surge` indicates 60s volume > 3x the 5-minute average rate (7.3c).
+/// `hurst` is the Hurst exponent from R/S analysis for regime detection (Phase 9).
 fn compute_microstructure_adj(
     _ticker: &str,
     direction: &str,
@@ -140,7 +156,10 @@ fn compute_microstructure_adj(
     tape: &TradeTape,
     price_momentum: f64,
     volume_surge: bool,
+    hurst: Option<f64>,
 ) -> MicrostructureAdj {
+    let (momentum_w, mean_rev_w) = regime_weights(hurst);
+
     // Trade tape aggressiveness over last 30 seconds
     let aggr = tape.aggressiveness(Duration::from_secs(30));
     let dir_sign = if direction == "yes" { 1.0 } else { -1.0 };
@@ -156,29 +175,27 @@ fn compute_microstructure_adj(
     };
 
     // Depth imbalance: order_imbalance is bid_depth/(bid_depth+ask_depth), ~0.5 balanced
-    // Align with trade direction
-    let depth_imbalance = (order_imbalance - 0.5) * dir_sign * 0.02;
+    // Align with trade direction — this is a mean-reversion signal (fading book imbalance)
+    let depth_imbalance = (order_imbalance - 0.5) * dir_sign * 0.02 * mean_rev_w;
 
     // Phase 7.3b: VWAP-vs-mid signal
     // VWAP above mid = buying pressure (bullish for YES), below = selling pressure
+    // VWAP is a momentum-type signal (follows recent flow)
     let vwap_signal = if spread > 0.0 {
         tape.vwap(Duration::from_secs(60))
-            .map(|vwap| ((vwap - mid_price) / spread).clamp(-1.0, 1.0) * dir_sign * 0.02)
+            .map(|vwap| ((vwap - mid_price) / spread).clamp(-1.0, 1.0) * dir_sign * 0.02 * momentum_w)
             .unwrap_or(0.0)
     } else {
         0.0
     };
 
-    // Phase 7.3a: Price momentum signal
-    // Positive momentum aligned with direction = market converging toward our view = bonus
-    let momentum_signal = (price_momentum * dir_sign).clamp(-1.0, 1.0) * 0.02;
+    // Phase 7.3a: Price momentum signal — scaled by regime
+    let momentum_signal = (price_momentum * dir_sign).clamp(-1.0, 1.0) * 0.02 * momentum_w;
 
-    // Phase 7.3c: Volume surge confidence boost
-    // Unusual volume suggests informed trading — small bonus when aligned with direction
+    // Phase 7.3c: Volume surge confidence boost — scaled by momentum weight
     let volume_surge_signal = if volume_surge {
-        // Use trade aggressiveness to determine alignment
         let aligned = (aggr * dir_sign) > 0.0;
-        if aligned { 0.01 } else { -0.01 }
+        if aligned { 0.01 * momentum_w } else { -0.01 * momentum_w }
     } else {
         0.0
     };
@@ -411,12 +428,14 @@ async fn evaluate_entry(
     let (price_momentum, volume_surge) = read_ticker_signals(redis, &contract.ticker).await;
 
     // Phase 4.3: Microstructure adjustment (includes VWAP, momentum, volume surge)
+    // Phase 9: Regime-adaptive weighting via Hurst exponent
     let micro = {
         let tape = trade_tape.read().unwrap();
         compute_microstructure_adj(
             &contract.ticker, direction, order_imbalance,
             mid_price, spread, &tape,
             price_momentum, volume_surge,
+            snap.hurst_exponent,
         )
     };
     let adjusted_edge = effective_edge + micro.total;
@@ -453,8 +472,8 @@ async fn evaluate_entry(
         .and_then(|d| d.to_f64())
         .unwrap_or_else(|| crypto_fv::estimate_fill_price(direction, mid_price, spread));
 
-    // 8. Kelly criterion
-    let kelly = crypto_fv::compute_kelly(fv.probability, fill_price, direction);
+    // 8. Robust Kelly criterion — sizes on worst-case probability within confidence bounds
+    let kelly = crypto_fv::compute_robust_kelly(fv.probability, fill_price, direction, fv.confidence);
 
     // 9. Check minimum Kelly
     if kelly < config.crypto_min_kelly {
@@ -495,6 +514,7 @@ async fn evaluate_entry(
         micro_vwap = %format!("{:.4}", micro.vwap_signal),
         micro_momentum = %format!("{:.4}", micro.momentum_signal),
         micro_vol_surge = %format!("{:.4}", micro.volume_surge_signal),
+        hurst = %format!("{:.3}", snap.hurst_exponent.unwrap_or(0.0)),
         "crypto eval: entry signal"
     );
 
@@ -774,7 +794,7 @@ mod tests {
     fn test_microstructure_momentum_aligned_yes() {
         let tape = empty_tape();
         // Positive momentum + yes direction = positive signal
-        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.5, false);
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.5, false, None);
         assert!(adj.momentum_signal > 0.0, "momentum should be positive when aligned");
     }
 
@@ -782,7 +802,7 @@ mod tests {
     fn test_microstructure_momentum_opposed_yes() {
         let tape = empty_tape();
         // Negative momentum + yes direction = negative signal
-        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, -0.5, false);
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, -0.5, false, None);
         assert!(adj.momentum_signal < 0.0, "momentum should be negative when opposed");
     }
 
@@ -790,7 +810,7 @@ mod tests {
     fn test_microstructure_volume_surge_aligned() {
         // Bullish aggression (yes trades) + yes direction + surge
         let tape = tape_with_trades(30, 10);
-        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.0, true);
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.0, true, None);
         assert_eq!(adj.volume_surge_signal, 0.01);
     }
 
@@ -798,14 +818,14 @@ mod tests {
     fn test_microstructure_volume_surge_opposed() {
         // Bearish aggression (no trades) + yes direction + surge
         let tape = tape_with_trades(10, 30);
-        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.0, true);
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.0, true, None);
         assert_eq!(adj.volume_surge_signal, -0.01);
     }
 
     #[test]
     fn test_microstructure_no_volume_surge() {
         let tape = empty_tape();
-        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.0, false);
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.0, false, None);
         assert_eq!(adj.volume_surge_signal, 0.0);
     }
 
@@ -813,7 +833,7 @@ mod tests {
     fn test_microstructure_total_clamped() {
         let tape = empty_tape();
         // Extreme momentum should still be clamped to [-0.06, 0.06]
-        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 100.0, true);
+        let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 100.0, true, None);
         assert!(adj.total <= 0.06);
         assert!(adj.total >= -0.06);
     }
@@ -881,5 +901,54 @@ mod tests {
         // Record via public method — should prune old entry
         tracker.record("T", 0.06);
         assert_eq!(tracker.history["T"].len(), 1);
+    }
+
+    #[test]
+    fn test_regime_weights_trending() {
+        let (momentum_w, mean_rev_w) = regime_weights(Some(0.60));
+        assert!((momentum_w - 1.5).abs() < 0.01, "trending should boost momentum");
+        assert!((mean_rev_w - 0.5).abs() < 0.01, "trending should dampen mean-reversion");
+    }
+
+    #[test]
+    fn test_regime_weights_mean_reverting() {
+        let (momentum_w, mean_rev_w) = regime_weights(Some(0.40));
+        assert!((momentum_w - 0.3).abs() < 0.01, "mean-rev should dampen momentum");
+        assert!((mean_rev_w - 1.5).abs() < 0.01, "mean-rev should boost mean-reversion");
+    }
+
+    #[test]
+    fn test_regime_weights_random_walk() {
+        let (momentum_w, mean_rev_w) = regime_weights(Some(0.50));
+        assert!((momentum_w - 0.7).abs() < 0.01, "random walk should reduce momentum");
+        assert!((mean_rev_w - 0.7).abs() < 0.01, "random walk should reduce mean-reversion");
+    }
+
+    #[test]
+    fn test_regime_weights_no_data() {
+        let (momentum_w, mean_rev_w) = regime_weights(None);
+        assert!((momentum_w - 1.0).abs() < 0.01, "no data should use default weights");
+        assert!((mean_rev_w - 1.0).abs() < 0.01, "no data should use default weights");
+    }
+
+    #[test]
+    fn test_microstructure_trending_regime_boosts_momentum() {
+        let tape = empty_tape();
+        // Same momentum, different regimes
+        let adj_default = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.5, false, None);
+        let adj_trending = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.5, false, Some(0.60));
+        assert!(adj_trending.momentum_signal > adj_default.momentum_signal,
+            "trending regime should amplify momentum: trending={}, default={}",
+            adj_trending.momentum_signal, adj_default.momentum_signal);
+    }
+
+    #[test]
+    fn test_microstructure_mean_rev_regime_dampens_momentum() {
+        let tape = empty_tape();
+        let adj_default = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.5, false, None);
+        let adj_mean_rev = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.5, false, Some(0.40));
+        assert!(adj_mean_rev.momentum_signal < adj_default.momentum_signal,
+            "mean-reverting regime should dampen momentum: mean_rev={}, default={}",
+            adj_mean_rev.momentum_signal, adj_default.momentum_signal);
     }
 }
