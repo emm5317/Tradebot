@@ -423,7 +423,13 @@ async fn evaluate_entry(
         .unwrap_or(0.5);
 
     // 2. Compute fair value
-    let fv = crypto_fv::compute_crypto_fair_value(snap, contract.strike, minutes_remaining);
+    // For directional "price up?" contracts, use current BTC price as strike
+    let effective_strike = if contract.directional {
+        snap.shadow_rti
+    } else {
+        contract.strike
+    };
+    let fv = crypto_fv::compute_crypto_fair_value(snap, effective_strike, minutes_remaining);
 
     // 3. Check confidence
     if fv.confidence < config.crypto_min_confidence {
@@ -606,7 +612,7 @@ async fn evaluate_entry(
         model_prob = %format!("{:.4}", fv.probability),
         confidence = %format!("{:.2}", fv.confidence),
         shadow_rti = %format!("{:.0}", snap.shadow_rti),
-        strike = %format!("{:.0}", contract.strike),
+        strike = %format!("{:.0}", effective_strike),
         micro_total = %format!("{:.4}", micro.total),
         micro_trade = %format!("{:.4}", micro.trade_imbalance),
         micro_spread = %format!("{:.4}", micro.spread_regime),
@@ -744,7 +750,8 @@ async fn evaluate_exit(
         .and_then(|d| d.to_f64())
         .unwrap_or(0.0);
 
-    let fv = crypto_fv::compute_crypto_fair_value(snap, contract.strike, minutes_remaining);
+    let effective_strike = if contract.directional { snap.shadow_rti } else { contract.strike };
+    let fv = crypto_fv::compute_crypto_fair_value(snap, effective_strike, minutes_remaining);
 
     // Check if edge has flipped
     let current_edge = if held_direction == "yes" {

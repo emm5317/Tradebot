@@ -20,7 +20,8 @@ const THRESHOLDS: &[(&str, u64)] = &[
 ];
 
 /// Required feeds per strategy.
-const CRYPTO_REQUIRED: &[&str] = &["binance_spot"];
+/// Crypto uses OR-based check: at least one spot venue must be healthy.
+const CRYPTO_SPOT_VENUES: &[&str] = &["binance_spot", "coinbase"];
 const WEATHER_REQUIRED: &[&str] = &["kalshi_ws"];
 
 /// Thread-safe feed health tracker with granular scoring.
@@ -114,16 +115,22 @@ impl FeedHealth {
 
     /// Phase 5.8: Compute aggregate health for a strategy.
     pub fn strategy_health(&self, signal_type: &str) -> f64 {
-        let required = match signal_type {
-            "crypto" => CRYPTO_REQUIRED,
-            "weather" => WEATHER_REQUIRED,
-            _ => return 1.0,
-        };
-
-        required
-            .iter()
-            .map(|name| self.health_score(name))
-            .fold(f64::INFINITY, f64::min)
+        match signal_type {
+            "crypto" => {
+                // Best score among spot venues (OR-based)
+                CRYPTO_SPOT_VENUES
+                    .iter()
+                    .map(|name| self.health_score(name))
+                    .fold(0.0_f64, f64::max)
+            }
+            "weather" => {
+                WEATHER_REQUIRED
+                    .iter()
+                    .map(|name| self.health_score(name))
+                    .fold(f64::INFINITY, f64::min)
+            }
+            _ => 1.0,
+        }
     }
 
     /// Phase 5.8: Get detailed health for all feeds.
@@ -153,30 +160,49 @@ impl FeedHealth {
         crypto.min(weather)
     }
 
-    /// Check if all required feeds for a signal type are healthy.
-    /// Returns Ok(()) if all healthy, or Err(list of stale feeds).
+    /// Check if required feeds for a signal type are healthy.
+    /// Crypto: at least one spot venue must be healthy (OR-based).
+    /// Weather: all required feeds must be healthy (AND-based).
+    /// Returns Ok(()) if healthy, or Err(list of stale feeds).
     pub fn required_feeds_healthy(&self, signal_type: &str) -> Result<(), Vec<String>> {
-        let required = match signal_type {
-            "crypto" => CRYPTO_REQUIRED,
-            "weather" => WEATHER_REQUIRED,
-            _ => return Ok(()),
-        };
-
-        let stale: Vec<String> = required
-            .iter()
-            .filter(|name| !self.is_healthy(name))
-            .map(|name| name.to_string())
-            .collect();
-
-        if stale.is_empty() {
-            Ok(())
-        } else {
-            warn!(
-                signal_type = signal_type,
-                stale_feeds = ?stale,
-                "required feeds are stale"
-            );
-            Err(stale)
+        match signal_type {
+            "crypto" => {
+                // OR-based: at least one spot venue must be healthy
+                let any_healthy = CRYPTO_SPOT_VENUES.iter().any(|name| self.is_healthy(name));
+                if any_healthy {
+                    Ok(())
+                } else {
+                    let stale: Vec<String> = CRYPTO_SPOT_VENUES
+                        .iter()
+                        .filter(|name| !self.is_healthy(name))
+                        .map(|name| name.to_string())
+                        .collect();
+                    warn!(
+                        signal_type = signal_type,
+                        stale_feeds = ?stale,
+                        "all spot venues are stale"
+                    );
+                    Err(stale)
+                }
+            }
+            "weather" => {
+                let stale: Vec<String> = WEATHER_REQUIRED
+                    .iter()
+                    .filter(|name| !self.is_healthy(name))
+                    .map(|name| name.to_string())
+                    .collect();
+                if stale.is_empty() {
+                    Ok(())
+                } else {
+                    warn!(
+                        signal_type = signal_type,
+                        stale_feeds = ?stale,
+                        "required feeds are stale"
+                    );
+                    Err(stale)
+                }
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -231,17 +257,26 @@ mod tests {
     #[test]
     fn test_required_feeds_crypto() {
         let health = FeedHealth::new();
-        // No updates — crypto required feeds should be stale
+        // No updates — all spot venues stale
         let result = health.required_feeds_healthy("crypto");
         assert!(result.is_err());
         let stale = result.unwrap_err();
         assert!(stale.contains(&"binance_spot".to_string()));
+        assert!(stale.contains(&"coinbase".to_string()));
     }
 
     #[test]
-    fn test_required_feeds_crypto_healthy() {
+    fn test_required_feeds_crypto_healthy_binance() {
         let health = FeedHealth::new();
         health.record_update("binance_spot");
+        assert!(health.required_feeds_healthy("crypto").is_ok());
+    }
+
+    #[test]
+    fn test_required_feeds_crypto_healthy_coinbase() {
+        let health = FeedHealth::new();
+        // Coinbase alone should be sufficient (OR-based)
+        health.record_update("coinbase");
         assert!(health.required_feeds_healthy("crypto").is_ok());
     }
 

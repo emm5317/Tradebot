@@ -291,12 +291,6 @@ impl KalshiWsFeed {
         match msg_type.as_str() {
             "orderbook_snapshot" => {
                 if let Some(ticker) = msg.get("market_ticker").and_then(|v| v.as_str()) {
-                    // Kalshi sends yes_dollars_fp / no_dollars_fp arrays:
-                    //   [["0.08", "300.00"], ["0.22", "333.00"]]
-                    // Convert to (price_cents, size) tuples.
-                    // yes_dollars_fp = yes bids, no_dollars_fp = no bids.
-                    // For our model: yes bids are bids, yes asks are derived
-                    // from no bids (ask = 100 - no_bid_price).
                     let yes_bids = parse_dollars_fp_levels(msg.get("yes_dollars_fp"));
                     let no_bids = parse_dollars_fp_levels(msg.get("no_dollars_fp"));
 

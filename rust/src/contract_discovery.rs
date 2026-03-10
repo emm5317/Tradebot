@@ -18,6 +18,9 @@ pub struct CryptoContract {
     pub ticker: String,
     pub strike: f64,
     pub settlement_time: DateTime<Utc>,
+    /// True for directional "price up?" contracts (e.g. KXBTC15M).
+    /// For these, the strike is set to the current BTC price at eval time.
+    pub directional: bool,
 }
 
 /// Cached discovery of active crypto contracts from the database.
@@ -44,11 +47,12 @@ impl ContractDiscovery {
 
     /// Refresh the contract cache from the database.
     pub async fn refresh(&self, pool: &PgPool) {
-        let result: Result<Vec<(String, Option<f64>, DateTime<Utc>)>, _> = sqlx::query_as(
+        let result: Result<Vec<(String, Option<f64>, DateTime<Utc>, Option<String>)>, _> = sqlx::query_as(
             r#"
             SELECT c.ticker,
                    COALESCE(cr.strike::float8, c.threshold::float8) AS strike,
-                   c.settlement_time
+                   c.settlement_time,
+                   c.title
             FROM contracts c
             LEFT JOIN contract_rules cr ON cr.market_ticker = c.ticker
             WHERE c.status = 'active'
@@ -66,17 +70,33 @@ impl ContractDiscovery {
             Ok(rows) => {
                 let contracts: Vec<CryptoContract> = rows
                     .into_iter()
-                    .filter_map(|(ticker, strike, settlement_time)| {
-                        // Strike is required — skip contracts without one
-                        let strike = strike?;
-                        if strike <= 0.0 {
-                            return None;
+                    .filter_map(|(ticker, strike, settlement_time, title)| {
+                        // Detect directional "price up?" contracts (e.g. KXBTC15M)
+                        let is_directional = ticker.contains("15M")
+                            || title.as_deref().unwrap_or("").contains("price up");
+
+                        if is_directional {
+                            // Directional contracts use current price as strike at eval time.
+                            // Use a placeholder strike of 0; evaluator will substitute shadow_rti.
+                            Some(CryptoContract {
+                                ticker,
+                                strike: 0.0,
+                                settlement_time,
+                                directional: true,
+                            })
+                        } else {
+                            // Strike-based binary options — require valid strike
+                            let strike = strike?;
+                            if strike <= 0.0 {
+                                return None;
+                            }
+                            Some(CryptoContract {
+                                ticker,
+                                strike,
+                                settlement_time,
+                                directional: false,
+                            })
                         }
-                        Some(CryptoContract {
-                            ticker,
-                            strike,
-                            settlement_time,
-                        })
                     })
                     .collect();
 
