@@ -93,10 +93,14 @@ pub async fn run(
                         dirty_tickers.insert(ticker);
                     }
                     WsFeedMessage::TickerUpdate {
-                        ticker, yes_bid_size, yes_ask_size,
+                        ticker, yes_bid, yes_ask, yes_bid_size, yes_ask_size,
                         volume, open_interest, market_status,
                         last_price, ..
                     } => {
+                        // Forward top-of-book to OrderbookManager for fallback pricing
+                        if yes_bid.is_some() || yes_ask.is_some() {
+                            orderbooks.update_ticker_tob(&ticker, yes_bid, yes_ask);
+                        }
                         let state = ticker_states.entry(ticker.clone()).or_default();
                         if yes_bid_size.is_some() { state.yes_bid_size = yes_bid_size; }
                         if yes_ask_size.is_some() { state.yes_ask_size = yes_ask_size; }

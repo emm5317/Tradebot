@@ -9,7 +9,7 @@ use tokio::time::{Instant, interval};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::kalshi::auth::KalshiAuth;
 
@@ -291,8 +291,15 @@ impl KalshiWsFeed {
         match msg_type.as_str() {
             "orderbook_snapshot" => {
                 if let Some(ticker) = msg.get("market_ticker").and_then(|v| v.as_str()) {
-                    let yes_bids = parse_dollars_fp_levels(msg.get("yes_dollars_fp"));
-                    let no_bids = parse_dollars_fp_levels(msg.get("no_dollars_fp"));
+                    // Try dollars_fp format first, then integer format fallback
+                    let yes_bids = {
+                        let fp = parse_dollars_fp_levels(msg.get("yes_dollars_fp"));
+                        if fp.is_empty() { parse_integer_levels(msg.get("yes")) } else { fp }
+                    };
+                    let no_bids = {
+                        let fp = parse_dollars_fp_levels(msg.get("no_dollars_fp"));
+                        if fp.is_empty() { parse_integer_levels(msg.get("no")) } else { fp }
+                    };
 
                     // Convert no-side bids to yes-side asks: ask_cents = 100 - no_bid_cents
                     let yes_asks: Vec<(i64, i64)> = no_bids
@@ -300,15 +307,15 @@ impl KalshiWsFeed {
                         .map(|(price_cents, size)| (100 - price_cents, size))
                         .collect();
 
-                    if !yes_bids.is_empty() || !yes_asks.is_empty() {
-                        let _ = tx
-                            .send(WsFeedMessage::OrderbookSnapshot {
-                                ticker: ticker.to_string(),
-                                yes_bids,
-                                yes_asks,
-                            })
-                            .await;
-                    }
+                    // Always forward — even empty snapshots create book entries
+                    // so is_stale() and book_status() work correctly
+                    let _ = tx
+                        .send(WsFeedMessage::OrderbookSnapshot {
+                            ticker: ticker.to_string(),
+                            yes_bids,
+                            yes_asks,
+                        })
+                        .await;
                 }
             }
             "orderbook_delta" => {
@@ -391,8 +398,18 @@ impl KalshiWsFeed {
                         .await;
                 }
             }
-            // Ignore ack/subscribed/error/heartbeat messages
-            _ => {}
+            "subscribed" => {
+                if let Some(id) = raw.sid {
+                    debug!(id, "kalshi ws: subscription confirmed");
+                }
+            }
+            "error" => {
+                let err = msg.get("msg").and_then(|v| v.as_str()).unwrap_or("unknown");
+                error!(error = %err, "kalshi ws: server error");
+            }
+            _ => {
+                trace!(msg_type = %msg_type, "kalshi ws: unhandled message type");
+            }
         }
 
         Ok(())
@@ -411,6 +428,26 @@ fn parse_fp_to_i64(value: Option<&serde_json::Value>) -> Option<i64> {
     let s = value?.as_str()?;
     let val: f64 = s.parse().ok()?;
     Some(val.round() as i64)
+}
+
+/// Parse integer-format price level arrays: [[8, 300], ...] → [(8, 300), ...]
+/// Fallback for when dollars_fp fields are absent.
+fn parse_integer_levels(value: Option<&serde_json::Value>) -> Vec<(i64, i64)> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|entry| {
+            let pair = entry.as_array()?;
+            if pair.len() >= 2 {
+                let price = pair[0].as_i64()?;
+                let size = pair[1].as_i64()?;
+                Some((price, size))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Parse dollars_fp price level arrays: [["0.08", "300.00"], ...] → [(8, 300), ...]
@@ -437,5 +474,65 @@ impl std::fmt::Debug for KalshiWsFeed {
         f.debug_struct("KalshiWsFeed")
             .field("ws_url", &self.ws_url)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_integer_levels_valid() {
+        let data = json!([[8, 300], [12, 150], [45, 50]]);
+        let result = parse_integer_levels(Some(&data));
+        assert_eq!(result, vec![(8, 300), (12, 150), (45, 50)]);
+    }
+
+    #[test]
+    fn test_parse_integer_levels_empty() {
+        let data = json!([]);
+        assert_eq!(parse_integer_levels(Some(&data)), vec![]);
+        assert_eq!(parse_integer_levels(None), vec![]);
+    }
+
+    #[test]
+    fn test_parse_integer_levels_mixed_invalid() {
+        // Skip entries that aren't valid pairs
+        let data = json!([[8, 300], "bad", [12]]);
+        let result = parse_integer_levels(Some(&data));
+        assert_eq!(result, vec![(8, 300)]);
+    }
+
+    #[test]
+    fn test_parse_dollars_fp_levels_regression() {
+        let data = json!([["0.08", "300.00"], ["0.12", "150.00"]]);
+        let result = parse_dollars_fp_levels(Some(&data));
+        assert_eq!(result, vec![(8, 300), (12, 150)]);
+    }
+
+    #[test]
+    fn test_parse_dollars_fp_levels_empty() {
+        assert_eq!(parse_dollars_fp_levels(None), vec![]);
+        let data = json!([]);
+        assert_eq!(parse_dollars_fp_levels(Some(&data)), vec![]);
+    }
+
+    #[test]
+    fn test_parse_dollars_to_cents() {
+        let v = json!("0.96");
+        assert_eq!(parse_dollars_to_cents(Some(&v)), Some(96));
+        let v = json!("0.08");
+        assert_eq!(parse_dollars_to_cents(Some(&v)), Some(8));
+        assert_eq!(parse_dollars_to_cents(None), None);
+    }
+
+    #[test]
+    fn test_parse_fp_to_i64() {
+        let v = json!("136.00");
+        assert_eq!(parse_fp_to_i64(Some(&v)), Some(136));
+        let v = json!("-54.00");
+        assert_eq!(parse_fp_to_i64(Some(&v)), Some(-54));
+        assert_eq!(parse_fp_to_i64(None), None);
     }
 }

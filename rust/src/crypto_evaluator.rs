@@ -394,19 +394,31 @@ async fn evaluate_entry(
 ) {
     let eval_start = Instant::now();
 
-    // 1. Read orderbook
-    let mid_price = match orderbooks.mid_price(&contract.ticker) {
-        Some(d) => d.to_f64().unwrap_or(0.5),
+    // 1. Read orderbook (with ticker fallback)
+    let (mid_price, mid_source) = match orderbooks.mid_price_with_fallback(&contract.ticker) {
+        Some((d, src)) => (d.to_f64().unwrap_or(0.5), src),
         None => {
-            debug!(ticker = %contract.ticker, "crypto eval: no orderbook data");
+            let status = orderbooks.book_status(&contract.ticker);
+            debug!(
+                ticker = %contract.ticker,
+                has_entry = status.has_entry,
+                has_bids = status.has_bids,
+                has_asks = status.has_asks,
+                has_tob = status.has_tob,
+                "crypto eval: no price data"
+            );
             let pool_c = pool.clone();
             let ticker_c = contract.ticker.clone();
+            let reason = format!(
+                "no_price_data(book={},bids={},asks={},tob={})",
+                status.has_entry, status.has_bids, status.has_asks, status.has_tob
+            );
             tokio::spawn(async move {
                 decision_log::write(&pool_c, DecisionEntry {
                     ticker: ticker_c,
                     signal_type: "crypto".into(),
                     outcome: "skipped".into(),
-                    rejection_reason: Some("no_orderbook_data".into()),
+                    rejection_reason: Some(reason),
                     minutes_remaining: Some(minutes_remaining),
                     ..Default::default()
                 }).await;
@@ -414,10 +426,27 @@ async fn evaluate_entry(
             return;
         }
     };
+    if mid_source != crate::kalshi::orderbook::MidPriceSource::Orderbook {
+        debug!(
+            ticker = %contract.ticker,
+            source = ?mid_source,
+            mid = %format!("{:.4}", mid_price),
+            "crypto eval: using fallback mid price"
+        );
+    }
     let spread = orderbooks
         .spread(&contract.ticker)
         .and_then(|d| d.to_f64())
-        .unwrap_or(0.0);
+        .unwrap_or_else(|| {
+            // Fallback: compute from ticker ToB, or use conservative default
+            orderbooks.ticker_tob(&contract.ticker)
+                .and_then(|tob| {
+                    let bid = tob.yes_bid? as f64 / 100.0;
+                    let ask = tob.yes_ask? as f64 / 100.0;
+                    Some(ask - bid)
+                })
+                .unwrap_or(0.10)
+        });
     let order_imbalance = orderbooks
         .order_imbalance(&contract.ticker)
         .unwrap_or(0.5);
@@ -741,14 +770,22 @@ async fn evaluate_exit(
         return;
     }
 
-    let mid_price = match orderbooks.mid_price(&contract.ticker) {
-        Some(d) => d.to_f64().unwrap_or(0.5),
+    let mid_price = match orderbooks.mid_price_with_fallback(&contract.ticker) {
+        Some((d, _src)) => d.to_f64().unwrap_or(0.5),
         None => return,
     };
     let spread = orderbooks
         .spread(&contract.ticker)
         .and_then(|d| d.to_f64())
-        .unwrap_or(0.0);
+        .unwrap_or_else(|| {
+            orderbooks.ticker_tob(&contract.ticker)
+                .and_then(|tob| {
+                    let bid = tob.yes_bid? as f64 / 100.0;
+                    let ask = tob.yes_ask? as f64 / 100.0;
+                    Some(ask - bid)
+                })
+                .unwrap_or(0.10)
+        });
 
     let effective_strike = if contract.directional { snap.shadow_rti } else { contract.strike };
     let fv = crypto_fv::compute_crypto_fair_value(snap, effective_strike, minutes_remaining);
