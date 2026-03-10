@@ -279,37 +279,54 @@ impl KalshiWsFeed {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let raw: WsRawMessage = serde_json::from_str(text)?;
 
-        let Some(channel) = &raw.channel else {
-            return Ok(()); // heartbeat or ack
+        // Route by "type" field — Kalshi uses type, not channel
+        let Some(msg_type) = &raw.msg_type else {
+            return Ok(()); // heartbeat or malformed
         };
 
         let Some(msg) = &raw.msg else {
             return Ok(());
         };
 
-        match channel.as_str() {
+        match msg_type.as_str() {
+            "orderbook_snapshot" => {
+                if let Some(ticker) = msg.get("market_ticker").and_then(|v| v.as_str()) {
+                    // Kalshi sends yes_dollars_fp / no_dollars_fp arrays:
+                    //   [["0.08", "300.00"], ["0.22", "333.00"]]
+                    // Convert to (price_cents, size) tuples.
+                    // yes_dollars_fp = yes bids, no_dollars_fp = no bids.
+                    // For our model: yes bids are bids, yes asks are derived
+                    // from no bids (ask = 100 - no_bid_price).
+                    let yes_bids = parse_dollars_fp_levels(msg.get("yes_dollars_fp"));
+                    let no_bids = parse_dollars_fp_levels(msg.get("no_dollars_fp"));
+
+                    // Convert no-side bids to yes-side asks: ask_cents = 100 - no_bid_cents
+                    let yes_asks: Vec<(i64, i64)> = no_bids
+                        .into_iter()
+                        .map(|(price_cents, size)| (100 - price_cents, size))
+                        .collect();
+
+                    if !yes_bids.is_empty() || !yes_asks.is_empty() {
+                        let _ = tx
+                            .send(WsFeedMessage::OrderbookSnapshot {
+                                ticker: ticker.to_string(),
+                                yes_bids,
+                                yes_asks,
+                            })
+                            .await;
+                    }
+                }
+            }
             "orderbook_delta" => {
                 if let Some(ticker) = msg.get("market_ticker").and_then(|v| v.as_str()) {
-                    // Determine if this is a snapshot or delta based on message shape
-                    if let Some(yes) = msg.get("yes") {
-                        let bids = parse_price_levels(yes.get("bids"));
-                        let asks = parse_price_levels(yes.get("asks"));
+                    // Parse price_dollars ("0.96") → cents (96)
+                    // Parse delta_fp ("-54.00") → i64 (-54)
+                    let price_cents = parse_dollars_to_cents(msg.get("price_dollars"))
+                        .or_else(|| msg.get("price").and_then(|v| v.as_i64()));
+                    let delta = parse_fp_to_i64(msg.get("delta_fp"))
+                        .or_else(|| msg.get("delta").and_then(|v| v.as_i64()));
 
-                        if !bids.is_empty() || !asks.is_empty() {
-                            let _ = tx
-                                .send(WsFeedMessage::OrderbookSnapshot {
-                                    ticker: ticker.to_string(),
-                                    yes_bids: bids,
-                                    yes_asks: asks,
-                                })
-                                .await;
-                        }
-                    }
-
-                    if let (Some(price), Some(delta)) = (
-                        msg.get("price").and_then(|v| v.as_i64()),
-                        msg.get("delta").and_then(|v| v.as_i64()),
-                    ) {
+                    if let (Some(price_cents), Some(delta)) = (price_cents, delta) {
                         let side = msg
                             .get("side")
                             .and_then(|v| v.as_str())
@@ -320,7 +337,7 @@ impl KalshiWsFeed {
                             .send(WsFeedMessage::OrderbookDelta {
                                 ticker: ticker.to_string(),
                                 side,
-                                price_cents: price,
+                                price_cents,
                                 delta,
                             })
                             .await;
@@ -328,25 +345,30 @@ impl KalshiWsFeed {
                 }
             }
             "trade" => {
-                if let (Some(ticker), Some(price), Some(count)) = (
-                    msg.get("market_ticker").and_then(|v| v.as_str()),
-                    msg.get("yes_price").and_then(|v| v.as_i64()),
-                    msg.get("count").and_then(|v| v.as_i64()),
-                ) {
-                    let taker_side = msg
-                        .get("taker_side")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
+                if let Some(ticker) = msg.get("market_ticker").and_then(|v| v.as_str()) {
+                    // yes_price_dollars ("0.36") → cents (36)
+                    // count_fp ("136.00") → i64 (136)
+                    let price = parse_dollars_to_cents(msg.get("yes_price_dollars"))
+                        .or_else(|| msg.get("yes_price").and_then(|v| v.as_i64()));
+                    let count = parse_fp_to_i64(msg.get("count_fp"))
+                        .or_else(|| msg.get("count").and_then(|v| v.as_i64()));
 
-                    let _ = tx
-                        .send(WsFeedMessage::Trade {
-                            ticker: ticker.to_string(),
-                            price_cents: price,
-                            count,
-                            taker_side,
-                        })
-                        .await;
+                    if let (Some(price), Some(count)) = (price, count) {
+                        let taker_side = msg
+                            .get("taker_side")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+
+                        let _ = tx
+                            .send(WsFeedMessage::Trade {
+                                ticker: ticker.to_string(),
+                                price_cents: price,
+                                count,
+                                taker_side,
+                            })
+                            .await;
+                    }
                 }
             }
             "ticker" => {
@@ -354,19 +376,28 @@ impl KalshiWsFeed {
                     let _ = tx
                         .send(WsFeedMessage::TickerUpdate {
                             ticker: ticker.to_string(),
-                            yes_bid: msg.get("yes_bid").and_then(|v| v.as_i64()),
-                            yes_ask: msg.get("yes_ask").and_then(|v| v.as_i64()),
-                            yes_bid_size: msg.get("yes_bid_size").and_then(|v| v.as_i64()),
-                            yes_ask_size: msg.get("yes_ask_size").and_then(|v| v.as_i64()),
-                            last_price: msg.get("last_price").and_then(|v| v.as_i64()),
-                            last_trade_count: msg.get("last_trade_count").and_then(|v| v.as_i64()),
-                            volume: msg.get("volume").and_then(|v| v.as_i64()),
-                            open_interest: msg.get("open_interest").and_then(|v| v.as_i64()),
+                            yes_bid: parse_dollars_to_cents(msg.get("yes_bid_dollars"))
+                                .or_else(|| msg.get("yes_bid").and_then(|v| v.as_i64())),
+                            yes_ask: parse_dollars_to_cents(msg.get("yes_ask_dollars"))
+                                .or_else(|| msg.get("yes_ask").and_then(|v| v.as_i64())),
+                            yes_bid_size: parse_fp_to_i64(msg.get("yes_bid_size_fp"))
+                                .or_else(|| msg.get("yes_bid_size").and_then(|v| v.as_i64())),
+                            yes_ask_size: parse_fp_to_i64(msg.get("yes_ask_size_fp"))
+                                .or_else(|| msg.get("yes_ask_size").and_then(|v| v.as_i64())),
+                            last_price: parse_dollars_to_cents(msg.get("price_dollars"))
+                                .or_else(|| msg.get("last_price").and_then(|v| v.as_i64())),
+                            last_trade_count: parse_fp_to_i64(msg.get("last_trade_size_fp"))
+                                .or_else(|| msg.get("last_trade_count").and_then(|v| v.as_i64())),
+                            volume: parse_fp_to_i64(msg.get("volume_fp"))
+                                .or_else(|| msg.get("volume").and_then(|v| v.as_i64())),
+                            open_interest: parse_fp_to_i64(msg.get("open_interest_fp"))
+                                .or_else(|| msg.get("open_interest").and_then(|v| v.as_i64())),
                             market_status: msg.get("market_status").and_then(|v| v.as_str()).map(|s| s.to_string()),
                         })
                         .await;
                 }
             }
+            // Ignore ack/subscribed/error/heartbeat messages
             _ => {}
         }
 
@@ -374,8 +405,22 @@ impl KalshiWsFeed {
     }
 }
 
-/// Parse price level arrays from JSON value: [[price, size], ...]
-fn parse_price_levels(value: Option<&serde_json::Value>) -> Vec<(i64, i64)> {
+/// Parse dollar string ("0.96") to cents i64 (96).
+fn parse_dollars_to_cents(value: Option<&serde_json::Value>) -> Option<i64> {
+    let s = value?.as_str()?;
+    let dollars: f64 = s.parse().ok()?;
+    Some((dollars * 100.0).round() as i64)
+}
+
+/// Parse fixed-point string ("136.00") to i64 (136).
+fn parse_fp_to_i64(value: Option<&serde_json::Value>) -> Option<i64> {
+    let s = value?.as_str()?;
+    let val: f64 = s.parse().ok()?;
+    Some(val.round() as i64)
+}
+
+/// Parse dollars_fp price level arrays: [["0.08", "300.00"], ...] → [(8, 300), ...]
+fn parse_dollars_fp_levels(value: Option<&serde_json::Value>) -> Vec<(i64, i64)> {
     let Some(arr) = value.and_then(|v| v.as_array()) else {
         return vec![];
     };
@@ -383,7 +428,9 @@ fn parse_price_levels(value: Option<&serde_json::Value>) -> Vec<(i64, i64)> {
         .filter_map(|entry| {
             let pair = entry.as_array()?;
             if pair.len() >= 2 {
-                Some((pair[0].as_i64()?, pair[1].as_i64()?))
+                let price_dollars: f64 = pair[0].as_str()?.parse().ok()?;
+                let size: f64 = pair[1].as_str()?.parse().ok()?;
+                Some(((price_dollars * 100.0).round() as i64, size.round() as i64))
             } else {
                 None
             }

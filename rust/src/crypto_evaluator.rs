@@ -830,24 +830,27 @@ async fn persist_signal(pool: &sqlx::PgPool, signal: &Signal) -> Option<i64> {
     let result = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO signals (
-            ticker, signal_type, action, direction,
+            ticker, signal_type, direction,
             model_prob, market_price, edge, kelly_fraction,
-            minutes_remaining, spread, order_imbalance, source
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'rust')
+            minutes_remaining, observation_data
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id
         "#,
     )
     .bind(&signal.ticker)
     .bind(&signal.signal_type)
-    .bind(&signal.action)
     .bind(&signal.direction)
     .bind(signal.model_prob as f32)
     .bind(signal.market_price as f32)
     .bind(signal.edge as f32)
     .bind(signal.kelly_fraction as f32)
     .bind(signal.minutes_remaining as f32)
-    .bind(signal.spread as f32)
-    .bind(signal.order_imbalance as f32)
+    .bind(serde_json::json!({
+        "action": signal.action,
+        "spread": signal.spread,
+        "order_imbalance": signal.order_imbalance,
+        "source": "rust"
+    }))
     .fetch_one(pool)
     .await;
 

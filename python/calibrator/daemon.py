@@ -1,6 +1,6 @@
 """Calibration Agent Daemon — closes the feedback loop between predictions and outcomes.
 
-Runs an hourly cycle with seven jobs:
+Runs an hourly cycle with eight jobs:
 1. Settle order outcomes (win/loss from contracts.settled_yes)
 2. Populate calibration hypertable
 3. Compute rolling metrics (Brier, slippage, edge realization)
@@ -8,6 +8,7 @@ Runs an hourly cycle with seven jobs:
 5. HRRR skill recalculation
 6. Drift detection & Discord alerting
 7. Monthly source attribution report (via replay engine)
+8. Daily parameter sweep (runs once per day at ~06:00 UTC)
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ class CalibrationDaemon:
         self.pool: asyncpg.Pool | None = None
         self._shutdown = asyncio.Event()
         self._last_attribution_month: int | None = None
+        self._last_sweep_date: date | None = None
 
     async def run(self) -> None:
         """Initialize connections and run calibration loop."""
@@ -62,6 +64,7 @@ class CalibrationDaemon:
                 await self.recalculate_hrrr_skill()
                 await self.check_drift()
                 await self.maybe_run_source_attribution()
+                await self.maybe_run_daily_sweep()
                 logger.info("calibration_cycle_complete")
             except Exception:
                 logger.exception("calibration_cycle_failed")
@@ -433,6 +436,94 @@ class CalibrationDaemon:
             self._last_attribution_month = current_month
         except Exception:
             logger.exception("source_attribution_failed")
+
+    # ------------------------------------------------------------------
+    # Job 8: Daily Parameter Sweep
+    # ------------------------------------------------------------------
+
+    async def maybe_run_daily_sweep(self) -> None:
+        """Run parameter sweeps once daily (after 06:00 UTC) over the last 14 days.
+
+        Sweeps both weather and crypto strategies, storing results in
+        backtest_runs. Job 4 then picks up any improvements automatically.
+        """
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        # Only run once per day, after 06:00 UTC (after overnight settlements)
+        if self._last_sweep_date == today:
+            return
+        if now.hour < 6:
+            return
+
+        assert self.pool is not None
+
+        # Need at least some settled signals to sweep against
+        async with self.pool.acquire() as conn:
+            signal_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM signals s
+                JOIN contracts c ON s.ticker = c.ticker
+                WHERE c.settled_yes IS NOT NULL
+                  AND s.created_at > now() - interval '14 days'
+                """
+            )
+
+        if signal_count is None or signal_count < 20:
+            logger.info(
+                "daily_sweep_skipped",
+                reason="insufficient_settled_signals",
+                count=signal_count,
+            )
+            self._last_sweep_date = today
+            return
+
+        try:
+            from backtester.sweep import ParameterSweep
+
+            sweep = ParameterSweep(self.pool)
+            end = today
+            start = end - timedelta(days=14)
+
+            # Crypto threshold sweep (fast — filters existing signals)
+            try:
+                crypto_results = await sweep.sweep_crypto(
+                    start, end, max_combos=100,
+                    description="daily_auto_sweep",
+                )
+                logger.info(
+                    "daily_sweep_crypto_complete",
+                    results=len(crypto_results),
+                    best_brier=min(
+                        (r.brier_score for r in crypto_results if r.brier_score > 0),
+                        default=None,
+                    ),
+                )
+            except Exception:
+                logger.exception("daily_sweep_crypto_failed")
+
+            # Weather sweep (slower — re-evaluates FV; limit combos)
+            try:
+                weather_results = await sweep.sweep_weather(
+                    start, end, max_combos=50,
+                    description="daily_auto_sweep",
+                )
+                logger.info(
+                    "daily_sweep_weather_complete",
+                    results=len(weather_results),
+                    best_brier=min(
+                        (r.brier_score for r in weather_results if r.brier_score > 0),
+                        default=None,
+                    ),
+                )
+            except Exception:
+                logger.exception("daily_sweep_weather_failed")
+
+            self._last_sweep_date = today
+
+        except Exception:
+            logger.exception("daily_sweep_failed")
 
     # ------------------------------------------------------------------
     # Helpers

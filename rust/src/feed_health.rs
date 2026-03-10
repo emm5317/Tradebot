@@ -13,9 +13,9 @@ use tracing::warn;
 /// Per-feed staleness thresholds.
 const THRESHOLDS: &[(&str, u64)] = &[
     ("kalshi_ws", 5),
-    ("coinbase", 2),
-    ("binance_spot", 2),
-    ("binance_futures", 2),
+    ("coinbase", 5),
+    ("binance_spot", 10),
+    ("binance_futures", 5),
     ("deribit", 10),
 ];
 
@@ -213,10 +213,10 @@ mod tests {
         let health = FeedHealth::new();
         health.record_update("binance_spot");
 
-        // Manually insert an old timestamp
+        // Manually insert an old timestamp (binance_spot threshold = 10s)
         health
             .last_update
-            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(5));
+            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(15));
 
         assert!(!health.is_healthy("binance_spot"));
     }
@@ -278,20 +278,20 @@ mod tests {
     #[test]
     fn test_health_score_stale() {
         let health = FeedHealth::new();
-        // Insert timestamp beyond 2x threshold (binance_spot threshold = 2s)
+        // Insert timestamp beyond 2x threshold (binance_spot threshold = 10s)
         health
             .last_update
-            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(10));
+            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(25));
         assert_eq!(health.health_score("binance_spot"), 0.0);
     }
 
     #[test]
     fn test_health_score_degraded() {
         let health = FeedHealth::new();
-        // Between threshold and 2x threshold (threshold=2s, so 3s is > 2s but < 4s)
+        // Between threshold and 2x threshold (threshold=10s, so 15s is > 10s but < 20s)
         health
             .last_update
-            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(3));
+            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(15));
         assert_eq!(health.health_score("binance_spot"), 0.25);
     }
 

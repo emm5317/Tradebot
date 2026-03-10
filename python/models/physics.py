@@ -384,7 +384,7 @@ async def compute_hrrr_skill_scores(pool) -> None:
                 h.station,
                 EXTRACT(MONTH FROM h.forecast_time)::int AS month,
                 EXTRACT(HOUR FROM h.forecast_time)::int AS hour,
-                h.temperature_f AS hrrr_temp,
+                h.temp_2m_f AS hrrr_temp,
                 o.temperature_f AS actual_temp
             FROM hrrr_forecasts h
             JOIN LATERAL (
