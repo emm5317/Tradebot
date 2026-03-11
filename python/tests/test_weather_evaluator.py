@@ -1,6 +1,6 @@
 """Tests for weather signal evaluator."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from data.mesonet import ASOSObservation
 from signals.types import Contract, OrderbookState
@@ -15,14 +15,14 @@ def _make_contract(minutes_ahead: float = 12.0, threshold: float = 70.0) -> Cont
         city="Chicago",
         station="KORD",
         threshold=threshold,
-        settlement_time=datetime.now(timezone.utc) + timedelta(minutes=minutes_ahead),
+        settlement_time=datetime.now(UTC) + timedelta(minutes=minutes_ahead),
     )
 
 
 def _make_observation(temp: float = 72.0, stale: bool = False) -> ASOSObservation:
     return ASOSObservation(
         station="KORD",
-        observed_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(UTC),
         temperature_f=temp,
         wind_speed_kts=10.0,
         wind_gust_kts=None,
@@ -71,7 +71,7 @@ class TestWeatherEvaluator:
         contract = _make_contract()
         obs = ASOSObservation(
             station="KORD",
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             temperature_f=None,
             wind_speed_kts=None,
             wind_gust_kts=None,
@@ -181,7 +181,9 @@ class TestWeatherEvaluator:
         book = _make_orderbook(mid=0.40, spread=0.04)
 
         exit_signal = evaluator.evaluate_exit(
-            contract, obs, book,
+            contract,
+            obs,
+            book,
             held_direction="yes",
             entry_price=0.50,
         )

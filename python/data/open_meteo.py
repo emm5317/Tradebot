@@ -7,7 +7,7 @@ max/min estimation in settlement-aware weather fair-value computation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -20,11 +20,11 @@ _REQUEST_TIMEOUT = 15.0
 
 # Station coordinates for HRRR grid point lookup
 STATION_COORDS: dict[str, tuple[float, float]] = {
-    "KORD": (41.9742, -87.9073),   # Chicago O'Hare
-    "KJFK": (40.6413, -73.7781),   # New York JFK
+    "KORD": (41.9742, -87.9073),  # Chicago O'Hare
+    "KJFK": (40.6413, -73.7781),  # New York JFK
     "KDEN": (39.8561, -104.6737),  # Denver
     "KLAX": (33.9425, -118.4081),  # Los Angeles
-    "KIAH": (29.9902, -95.3368),   # Houston Intercontinental
+    "KIAH": (29.9902, -95.3368),  # Houston Intercontinental
 }
 
 
@@ -128,14 +128,14 @@ def _parse_hourly(data: dict[str, Any], station: str) -> list[HRRRForecast]:
     winds = hourly.get("wind_speed_10m", [])
     precips = hourly.get("precipitation", [])
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     results: list[HRRRForecast] = []
     for i, time_str in enumerate(times):
         try:
             ft = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
             if ft.tzinfo is None:
-                ft = ft.replace(tzinfo=timezone.utc)
+                ft = ft.replace(tzinfo=UTC)
         except (ValueError, AttributeError):
             continue
 

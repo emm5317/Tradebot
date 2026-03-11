@@ -1,9 +1,5 @@
 """Tests for NWS API observation fetcher."""
 
-from datetime import datetime, timezone
-
-import pytest
-
 from data.nws import _c_to_f, _extract_value, _kmh_to_kts
 
 

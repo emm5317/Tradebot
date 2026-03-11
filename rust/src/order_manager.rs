@@ -323,7 +323,8 @@ impl OrderManager {
 
     /// Record that a signal was acted upon (starts cooldown).
     fn record_signal_cooldown(&mut self, ticker: &str) {
-        self.signal_cooldowns.insert(ticker.to_string(), Instant::now());
+        self.signal_cooldowns
+            .insert(ticker.to_string(), Instant::now());
     }
 
     /// Public wrapper for tests to record cooldowns.
@@ -335,7 +336,11 @@ impl OrderManager {
     /// Check global order rate limit (max 10 orders/min).
     fn check_global_rate_limit(&self) -> bool {
         let one_minute_ago = Instant::now() - std::time::Duration::from_secs(60);
-        let recent = self.order_timestamps.iter().filter(|t| **t > one_minute_ago).count();
+        let recent = self
+            .order_timestamps
+            .iter()
+            .filter(|t| **t > one_minute_ago)
+            .count();
         recent < 10
     }
 
@@ -825,19 +830,13 @@ impl OrderManager {
     // -----------------------------------------------------------------------
 
     /// Cancel all in-flight orders for a given signal type (or all if signal_type is None).
-    pub async fn cancel_in_flight(
-        &mut self,
-        kalshi: &KalshiClient,
-        signal_type: Option<&str>,
-    ) {
+    pub async fn cancel_in_flight(&mut self, kalshi: &KalshiClient, signal_type: Option<&str>) {
         let cancellable: Vec<String> = self
             .orders
             .iter()
             .filter(|(_, o)| {
-                matches!(
-                    o.state,
-                    OrderState::Acknowledged | OrderState::PartialFill
-                ) && signal_type.map_or(true, |st| o.signal_type == st)
+                matches!(o.state, OrderState::Acknowledged | OrderState::PartialFill)
+                    && signal_type.is_none_or(|st| o.signal_type == st)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -937,7 +936,10 @@ impl OrderManager {
 
     /// Count of orders in non-terminal states.
     pub fn in_flight_count(&self) -> usize {
-        self.orders.values().filter(|o| !o.state.is_terminal()).count()
+        self.orders
+            .values()
+            .filter(|o| !o.state.is_terminal())
+            .count()
     }
 
     // -----------------------------------------------------------------------
@@ -1040,7 +1042,10 @@ impl OrderManager {
         if let Some((pnl,)) = today_pnl {
             if pnl != 0 {
                 self.daily_pnl.net_pnl_cents = pnl;
-                info!(daily_pnl_cents = pnl, "reconciliation: rehydrated daily PnL from DB");
+                info!(
+                    daily_pnl_cents = pnl,
+                    "reconciliation: rehydrated daily PnL from DB"
+                );
             }
         }
 
@@ -1102,9 +1107,8 @@ impl OrderManager {
     /// Clean up terminal orders older than 1 hour to prevent memory growth.
     pub fn gc_old_orders(&mut self) {
         let one_hour = std::time::Duration::from_secs(3600);
-        self.orders.retain(|_, o| {
-            !o.state.is_terminal() || o.created_at.elapsed() < one_hour
-        });
+        self.orders
+            .retain(|_, o| !o.state.is_terminal() || o.created_at.elapsed() < one_hour);
     }
 
     /// Phase 5.4: Periodic reconciliation against exchange positions.
@@ -1115,7 +1119,9 @@ impl OrderManager {
         kalshi: &KalshiClient,
         pool: &sqlx::PgPool,
     ) -> Result<Vec<ReconciliationEntry>> {
-        let exchange_positions = kalshi.get_positions().await
+        let exchange_positions = kalshi
+            .get_positions()
+            .await
             .context("Failed to fetch positions for reconciliation")?;
 
         let mut discrepancies = Vec::new();
@@ -1226,30 +1232,23 @@ fn cooldown_for_signal_type(signal_type: &str, config: Option<&Config>) -> std::
 }
 
 /// Persist order to database.
-async fn persist_order(
-    pool: &sqlx::PgPool,
-    order: &ManagedOrder,
-    signal: &Signal,
-) -> Result<()> {
+async fn persist_order(pool: &sqlx::PgPool, order: &ManagedOrder, signal: &Signal) -> Result<()> {
     let transitions_json =
         serde_json::to_string(&order.transitions.iter().map(|(s, _)| s).collect::<Vec<_>>())
             .unwrap_or_else(|_| "[]".to_string());
 
-    let crypto_snapshot_json = order
-        .crypto_snapshot
-        .as_ref()
-        .map(|s| {
-            serde_json::json!({
-                "shadow_rti": s.shadow_rti,
-                "coinbase_spot": s.coinbase_spot,
-                "binance_spot": s.binance_spot,
-                "perp_price": s.perp_price,
-                "basis": s.basis,
-                "best_vol": s.best_vol,
-                "dvol": s.dvol,
-            })
-            .to_string()
-        });
+    let crypto_snapshot_json = order.crypto_snapshot.as_ref().map(|s| {
+        serde_json::json!({
+            "shadow_rti": s.shadow_rti,
+            "coinbase_spot": s.coinbase_spot,
+            "binance_spot": s.binance_spot,
+            "perp_price": s.perp_price,
+            "basis": s.basis,
+            "best_vol": s.best_vol,
+            "dvol": s.dvol,
+        })
+        .to_string()
+    });
 
     // Set filled_at when order has a fill
     let filled_at: Option<chrono::DateTime<Utc>> = if order.state.has_fill() {
@@ -1383,42 +1382,138 @@ mod tests {
 
     #[test]
     fn test_valid_transitions() {
-        assert!(OrderState::Pending.validate_transition(OrderState::Submitting).is_ok());
-        assert!(OrderState::Submitting.validate_transition(OrderState::Acknowledged).is_ok());
-        assert!(OrderState::Submitting.validate_transition(OrderState::Rejected).is_ok());
-        assert!(OrderState::Submitting.validate_transition(OrderState::Filled).is_ok());
-        assert!(OrderState::Acknowledged.validate_transition(OrderState::Filled).is_ok());
-        assert!(OrderState::Acknowledged.validate_transition(OrderState::PartialFill).is_ok());
-        assert!(OrderState::Acknowledged.validate_transition(OrderState::CancelPending).is_ok());
-        assert!(OrderState::PartialFill.validate_transition(OrderState::Filled).is_ok());
-        assert!(OrderState::PartialFill.validate_transition(OrderState::CancelPending).is_ok());
-        assert!(OrderState::CancelPending.validate_transition(OrderState::Cancelled).is_ok());
-        assert!(OrderState::CancelPending.validate_transition(OrderState::Filled).is_ok());
-        assert!(OrderState::Replacing.validate_transition(OrderState::Acknowledged).is_ok());
+        assert!(
+            OrderState::Pending
+                .validate_transition(OrderState::Submitting)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Submitting
+                .validate_transition(OrderState::Acknowledged)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Submitting
+                .validate_transition(OrderState::Rejected)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Submitting
+                .validate_transition(OrderState::Filled)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Acknowledged
+                .validate_transition(OrderState::Filled)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Acknowledged
+                .validate_transition(OrderState::PartialFill)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Acknowledged
+                .validate_transition(OrderState::CancelPending)
+                .is_ok()
+        );
+        assert!(
+            OrderState::PartialFill
+                .validate_transition(OrderState::Filled)
+                .is_ok()
+        );
+        assert!(
+            OrderState::PartialFill
+                .validate_transition(OrderState::CancelPending)
+                .is_ok()
+        );
+        assert!(
+            OrderState::CancelPending
+                .validate_transition(OrderState::Cancelled)
+                .is_ok()
+        );
+        assert!(
+            OrderState::CancelPending
+                .validate_transition(OrderState::Filled)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Replacing
+                .validate_transition(OrderState::Acknowledged)
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_invalid_transitions() {
-        assert!(OrderState::Pending.validate_transition(OrderState::Filled).is_err());
-        assert!(OrderState::Filled.validate_transition(OrderState::Acknowledged).is_err());
-        assert!(OrderState::Cancelled.validate_transition(OrderState::Filled).is_err());
-        assert!(OrderState::Rejected.validate_transition(OrderState::Submitting).is_err());
-        assert!(OrderState::Pending.validate_transition(OrderState::CancelPending).is_err());
+        assert!(
+            OrderState::Pending
+                .validate_transition(OrderState::Filled)
+                .is_err()
+        );
+        assert!(
+            OrderState::Filled
+                .validate_transition(OrderState::Acknowledged)
+                .is_err()
+        );
+        assert!(
+            OrderState::Cancelled
+                .validate_transition(OrderState::Filled)
+                .is_err()
+        );
+        assert!(
+            OrderState::Rejected
+                .validate_transition(OrderState::Submitting)
+                .is_err()
+        );
+        assert!(
+            OrderState::Pending
+                .validate_transition(OrderState::CancelPending)
+                .is_err()
+        );
     }
 
     #[test]
     fn test_any_to_unknown() {
-        assert!(OrderState::Pending.validate_transition(OrderState::Unknown).is_ok());
-        assert!(OrderState::Submitting.validate_transition(OrderState::Unknown).is_ok());
-        assert!(OrderState::Acknowledged.validate_transition(OrderState::Unknown).is_ok());
-        assert!(OrderState::Filled.validate_transition(OrderState::Unknown).is_ok());
+        assert!(
+            OrderState::Pending
+                .validate_transition(OrderState::Unknown)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Submitting
+                .validate_transition(OrderState::Unknown)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Acknowledged
+                .validate_transition(OrderState::Unknown)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Filled
+                .validate_transition(OrderState::Unknown)
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_unknown_to_any() {
-        assert!(OrderState::Unknown.validate_transition(OrderState::Filled).is_ok());
-        assert!(OrderState::Unknown.validate_transition(OrderState::Cancelled).is_ok());
-        assert!(OrderState::Unknown.validate_transition(OrderState::Acknowledged).is_ok());
+        assert!(
+            OrderState::Unknown
+                .validate_transition(OrderState::Filled)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Unknown
+                .validate_transition(OrderState::Cancelled)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Unknown
+                .validate_transition(OrderState::Acknowledged)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1795,7 +1890,11 @@ mod tests {
         order.transition(OrderState::Submitting);
         let market_price = 0.45;
         let direction = "yes";
-        let paper_fill = if direction == "no" { 1.0 - market_price } else { market_price };
+        let paper_fill = if direction == "no" {
+            1.0 - market_price
+        } else {
+            market_price
+        };
         order.record_fill(10, Some(paper_fill));
         assert_eq!(order.entry_price, Some(0.45));
     }
@@ -1816,11 +1915,19 @@ mod tests {
         order.transition(OrderState::Submitting);
         let market_price = 0.55;
         let direction = "no";
-        let paper_fill = if direction == "no" { 1.0 - market_price } else { market_price };
+        let paper_fill = if direction == "no" {
+            1.0 - market_price
+        } else {
+            market_price
+        };
         order.record_fill(10, Some(paper_fill));
         // For NO: 1.0 - 0.55 = 0.45 (cost of NO contract)
         let fp = order.entry_price.unwrap();
-        assert!((fp - 0.45).abs() < 1e-10, "NO fill_price should be ~0.45, got {}", fp);
+        assert!(
+            (fp - 0.45).abs() < 1e-10,
+            "NO fill_price should be ~0.45, got {}",
+            fp
+        );
         assert!(fp < 0.50, "NO fill_price should be < 0.50 for mid > 0.50");
     }
 
@@ -1894,17 +2001,27 @@ mod tests {
 
         // Pending (in-flight)
         let o1 = ManagedOrder::new(
-            "tb-001".to_string(), "T1".to_string(),
-            "crypto".to_string(), "yes".to_string(),
-            10, 0.6, 0.5, None,
+            "tb-001".to_string(),
+            "T1".to_string(),
+            "crypto".to_string(),
+            "yes".to_string(),
+            10,
+            0.6,
+            0.5,
+            None,
         );
         mgr.orders.insert("tb-001".to_string(), o1);
 
         // Acknowledged (in-flight)
         let mut o2 = ManagedOrder::new(
-            "tb-002".to_string(), "T2".to_string(),
-            "crypto".to_string(), "yes".to_string(),
-            10, 0.6, 0.5, None,
+            "tb-002".to_string(),
+            "T2".to_string(),
+            "crypto".to_string(),
+            "yes".to_string(),
+            10,
+            0.6,
+            0.5,
+            None,
         );
         o2.transition(OrderState::Submitting);
         o2.transition(OrderState::Acknowledged);
@@ -1912,9 +2029,14 @@ mod tests {
 
         // Filled (terminal)
         let mut o3 = ManagedOrder::new(
-            "tb-003".to_string(), "T3".to_string(),
-            "crypto".to_string(), "yes".to_string(),
-            10, 0.6, 0.5, None,
+            "tb-003".to_string(),
+            "T3".to_string(),
+            "crypto".to_string(),
+            "yes".to_string(),
+            10,
+            0.6,
+            0.5,
+            None,
         );
         o3.transition(OrderState::Submitting);
         o3.transition(OrderState::Filled);

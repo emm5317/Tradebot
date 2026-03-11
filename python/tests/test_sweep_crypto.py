@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-
-import pytest
+from datetime import UTC, date, datetime, timedelta
 
 from backtester.costs import FeeModel
-from backtester.metrics import TradeRecord, compute_advanced_metrics
 from backtester.sweep import (
     CRYPTO_THRESHOLD_GRID,
     ParameterSweep,
-    SweepResult,
     _generate_combinations,
     _generate_walk_forward_splits,
 )
 
-
 # ── 8.1: Crypto threshold grid ──────────────────────────────────
+
 
 class TestCryptoThresholdGrid:
     """Verify the crypto threshold parameter grid is correct."""
@@ -53,7 +49,7 @@ class TestEvaluateCryptoThresholds:
         confidence: float = 0.7,
         day_offset: int = 0,
     ) -> dict:
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         return {
             "ticker": ticker,
             "signal_type": "crypto",
@@ -161,6 +157,7 @@ class TestEvaluateCryptoThresholds:
 
 # ── 8.4: Multi-signal mode ──────────────────────────────────────
 
+
 class TestMultiSignalMode:
     """Verify multi-signal vs single-signal behavior."""
 
@@ -173,7 +170,7 @@ class TestMultiSignalMode:
         return sweep
 
     def _make_signal(self, ticker: str, day_offset: int = 0, **kwargs) -> dict:
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
         defaults = {
             "ticker": ticker,
             "signal_type": "crypto",
@@ -232,20 +229,17 @@ class TestMultiSignalMode:
 
 # ── 8.5: Parallel execution helpers ─────────────────────────────
 
+
 class TestWalkForwardSplits:
     """Walk-forward split generation."""
 
     def test_splits_cover_range(self):
-        splits = _generate_walk_forward_splits(
-            date(2026, 1, 1), date(2026, 3, 1), window_days=14
-        )
+        splits = _generate_walk_forward_splits(date(2026, 1, 1), date(2026, 3, 1), window_days=14)
         assert len(splits) >= 2
 
     def test_splits_validation_does_not_overlap(self):
         """Validation windows should not overlap with each other."""
-        splits = _generate_walk_forward_splits(
-            date(2026, 1, 1), date(2026, 4, 1), window_days=14
-        )
+        splits = _generate_walk_forward_splits(date(2026, 1, 1), date(2026, 4, 1), window_days=14)
         for i in range(len(splits) - 1):
             # Each val window starts after the previous val starts
             assert splits[i + 1].val_start > splits[i].val_start
@@ -253,7 +247,5 @@ class TestWalkForwardSplits:
             assert splits[i + 1].train_start == splits[i].val_start
 
     def test_too_short_range_no_splits(self):
-        splits = _generate_walk_forward_splits(
-            date(2026, 1, 1), date(2026, 1, 10), window_days=14
-        )
+        splits = _generate_walk_forward_splits(date(2026, 1, 1), date(2026, 1, 10), window_days=14)
         assert len(splits) == 0

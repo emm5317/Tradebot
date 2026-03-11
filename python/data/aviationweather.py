@@ -8,8 +8,8 @@ Kalshi weather contract settlement.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -129,11 +129,9 @@ def _parse_metar_json(entry: dict[str, Any]) -> METARObservation | None:
 
     try:
         if isinstance(obs_time_str, (int, float)):
-            observed_at = datetime.fromtimestamp(obs_time_str, tz=timezone.utc)
+            observed_at = datetime.fromtimestamp(obs_time_str, tz=UTC)
         else:
-            observed_at = datetime.fromisoformat(
-                str(obs_time_str).replace("Z", "+00:00")
-            )
+            observed_at = datetime.fromisoformat(str(obs_time_str).replace("Z", "+00:00"))
     except (ValueError, OSError):
         return None
 

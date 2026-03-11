@@ -26,9 +26,7 @@ def estimate_fill_price(direction: str, orderbook: OrderbookState) -> float:
         return orderbook.mid_price - orderbook.spread / 2.0
 
 
-def compute_kelly(
-    model_prob: float, fill_price: float, direction: str
-) -> float:
+def compute_kelly(model_prob: float, fill_price: float, direction: str) -> float:
     """Kelly criterion for binary outcome using estimated fill price.
 
     For YES: pay fill_price, win (1 - fill_price) if correct.
@@ -71,9 +69,7 @@ def compute_effective_edge(
     return effective
 
 
-def determine_direction(
-    model_prob: float, market_price: float
-) -> tuple[str, float]:
+def determine_direction(model_prob: float, market_price: float) -> tuple[str, float]:
     """Determine trade direction and raw edge from model vs market price.
 
     Returns:

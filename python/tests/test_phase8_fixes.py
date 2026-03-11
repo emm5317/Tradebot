@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
-
 import pytest
 
 from models.physics import StationCalibration
 
-
 # ── 8.0a: StationCalibration constructor ───────────────────────
+
 
 class TestStationCalibrationConstruction:
     """Verify StationCalibration can be constructed the way sweep.py does it."""
@@ -50,19 +47,20 @@ class TestStationCalibrationConstruction:
         """StationCalibration should reject unknown kwargs (the original bug)."""
         with pytest.raises(TypeError):
             StationCalibration(
-                weight_physics=0.4,   # wrong: not a valid field
+                weight_physics=0.4,  # wrong: not a valid field
             )
         with pytest.raises(TypeError):
             StationCalibration(
-                hrrr_rmse_f=2.0,      # wrong: not a valid field
+                hrrr_rmse_f=2.0,  # wrong: not a valid field
             )
         with pytest.raises(TypeError):
             StationCalibration(
-                sample_size=100,      # wrong: not a valid field
+                sample_size=100,  # wrong: not a valid field
             )
 
 
 # ── 8.0e: Brier score consistency ─────────────────────────────
+
 
 class TestBrierScoreConsistency:
     """Verify Brier computation uses directional probability in both engine and sweep."""
@@ -130,6 +128,7 @@ class TestBrierScoreConsistency:
 
 # ── 8.0c: avg_edge_realized logic ─────────────────────────────
 
+
 class TestAvgEdgeRealized:
     """Verify edge realization logic matches what calibrator computes."""
 
@@ -150,9 +149,9 @@ class TestAvgEdgeRealized:
     def test_avg_edge_mixed(self):
         """Average across wins and losses."""
         edges = [
-            (0.05, "win"),   # +0.05
+            (0.05, "win"),  # +0.05
             (0.03, "loss"),  # -0.03
-            (0.07, "win"),   # +0.07
+            (0.07, "win"),  # +0.07
             (0.04, "loss"),  # -0.04
         ]
         realized = [e if o == "win" else -e for e, o in edges]

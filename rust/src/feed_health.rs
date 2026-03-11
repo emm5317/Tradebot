@@ -92,7 +92,9 @@ impl FeedHealth {
             None => return 1.0, // Unknown feed — don't block
         };
 
-        let p50 = self.p50_thresholds.get(feed_name)
+        let p50 = self
+            .p50_thresholds
+            .get(feed_name)
             .copied()
             .unwrap_or(threshold / 2);
 
@@ -123,12 +125,10 @@ impl FeedHealth {
                     .map(|name| self.health_score(name))
                     .fold(0.0_f64, f64::max)
             }
-            "weather" => {
-                WEATHER_REQUIRED
-                    .iter()
-                    .map(|name| self.health_score(name))
-                    .fold(f64::INFINITY, f64::min)
-            }
+            "weather" => WEATHER_REQUIRED
+                .iter()
+                .map(|name| self.health_score(name))
+                .fold(f64::INFINITY, f64::min),
             _ => 1.0,
         }
     }
@@ -167,7 +167,8 @@ impl FeedHealth {
             metrics::gauge!(
                 crate::metrics_registry::FEED_HEALTH_SCORE,
                 "feed" => *name
-            ).set(score);
+            )
+            .set(score);
         }
     }
 
@@ -251,9 +252,10 @@ mod tests {
         health.record_update("binance_spot");
 
         // Manually insert an old timestamp (binance_spot threshold = 10s)
-        health
-            .last_update
-            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(15));
+        health.last_update.insert(
+            "binance_spot".to_string(),
+            Instant::now() - Duration::from_secs(15),
+        );
 
         assert!(!health.is_healthy("binance_spot"));
     }
@@ -325,9 +327,10 @@ mod tests {
     fn test_health_score_stale() {
         let health = FeedHealth::new();
         // Insert timestamp beyond 2x threshold (binance_spot threshold = 10s)
-        health
-            .last_update
-            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(25));
+        health.last_update.insert(
+            "binance_spot".to_string(),
+            Instant::now() - Duration::from_secs(25),
+        );
         assert_eq!(health.health_score("binance_spot"), 0.0);
     }
 
@@ -335,9 +338,10 @@ mod tests {
     fn test_health_score_degraded() {
         let health = FeedHealth::new();
         // Between threshold and 2x threshold (threshold=10s, so 15s is > 10s but < 20s)
-        health
-            .last_update
-            .insert("binance_spot".to_string(), Instant::now() - Duration::from_secs(15));
+        health.last_update.insert(
+            "binance_spot".to_string(),
+            Instant::now() - Duration::from_secs(15),
+        );
         assert_eq!(health.health_score("binance_spot"), 0.25);
     }
 

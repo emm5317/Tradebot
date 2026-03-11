@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use fred::clients::Client as RedisClient;
 use fred::interfaces::KeysInterface;
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -49,7 +49,11 @@ impl CoinbaseState {
     /// Recompute 5-minute rolling trade volume, evicting stale entries.
     fn recompute_volume_5m(&mut self) {
         let cutoff = Instant::now() - VOLUME_WINDOW;
-        while self.trade_volumes.front().map_or(false, |(t, _)| *t < cutoff) {
+        while self
+            .trade_volumes
+            .front()
+            .is_some_and(|(t, _)| *t < cutoff)
+        {
             self.trade_volumes.pop_front();
         }
         self.trade_volume_5m = self.trade_volumes.iter().map(|(_, v)| v).sum();
@@ -68,7 +72,12 @@ impl CoinbaseFeed {
     }
 
     /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
-    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>, feed_health: Arc<FeedHealth>) {
+    pub async fn run(
+        &self,
+        redis: RedisClient,
+        crypto_state: Arc<CryptoState>,
+        feed_health: Arc<FeedHealth>,
+    ) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -78,7 +87,10 @@ impl CoinbaseFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis, &crypto_state, &feed_health).await {
+            match self
+                .connect_and_stream(&redis, &crypto_state, &feed_health)
+                .await
+            {
                 Ok(()) => {
                     warn!("coinbase ws closed by server, will reconnect");
                     backoff_secs = 1;
@@ -182,10 +194,7 @@ fn parse_coinbase_message(text: &str, state: &mut CoinbaseState) {
                 for event in events {
                     if let Some(updates) = event.get("updates").and_then(|v| v.as_array()) {
                         for update in updates {
-                            let side = update
-                                .get("side")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let side = update.get("side").and_then(|v| v.as_str()).unwrap_or("");
                             let price: f64 = update
                                 .get("price_level")
                                 .and_then(|v| v.as_str())

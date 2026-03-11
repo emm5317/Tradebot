@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import httpx
@@ -121,9 +121,7 @@ class CollectorDaemon:
         interval = self.settings.collection_interval_seconds
 
         transport = httpx.AsyncHTTPTransport(retries=2)
-        async with httpx.AsyncClient(
-            transport=transport, timeout=httpx.Timeout(15.0)
-        ) as client:
+        async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(15.0)) as client:
             while not self._shutdown.is_set():
                 try:
                     await self._collect_market_snapshots(client)
@@ -161,9 +159,7 @@ class CollectorDaemon:
 
         while not self._shutdown.is_set():
             try:
-                observations = await fetch_metar(
-                    self.settings.asos_stations, hours=1.0
-                )
+                observations = await fetch_metar(self.settings.asos_stations, hours=1.0)
                 if observations:
                     await self._insert_metar_observations(observations)
                     logger.info("metar_collected", count=len(observations))
@@ -178,9 +174,7 @@ class CollectorDaemon:
 
         while not self._shutdown.is_set():
             try:
-                forecasts = await fetch_hrrr_forecasts(
-                    self.settings.asos_stations, forecast_hours=24
-                )
+                forecasts = await fetch_hrrr_forecasts(self.settings.asos_stations, forecast_hours=24)
                 if forecasts:
                     await self._insert_hrrr_forecasts(forecasts)
                     logger.info("hrrr_collected", count=len(forecasts))
@@ -210,7 +204,7 @@ class CollectorDaemon:
         """Insert Binance spot tick into crypto_ticks table."""
         assert self.pool is not None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -234,7 +228,7 @@ class CollectorDaemon:
         while not self._shutdown.is_set():
             try:
                 assert self.pool is not None
-                today = datetime.now(timezone.utc).date()
+                today = datetime.now(UTC).date()
                 yesterday = today - timedelta(days=1)
                 # Aggregate both yesterday (catch stragglers) and today (running)
                 await aggregate_settlement_summary(self.pool, yesterday)
@@ -247,9 +241,7 @@ class CollectorDaemon:
 
     # --- Database writes ---
 
-    async def _insert_asos_observations(
-        self, observations: dict[str, ASOSObservation]
-    ) -> None:
+    async def _insert_asos_observations(self, observations: dict[str, ASOSObservation]) -> None:
         """Batch insert ASOS observations using COPY for efficiency."""
         assert self.pool is not None
 
@@ -285,9 +277,7 @@ class CollectorDaemon:
                 ],
             )
 
-    async def _insert_nws_observations(
-        self, observations: dict[str, ASOSObservation]
-    ) -> None:
+    async def _insert_nws_observations(self, observations: dict[str, ASOSObservation]) -> None:
         """Batch insert NWS observations using COPY for efficiency."""
         assert self.pool is not None
 
@@ -326,7 +316,7 @@ class CollectorDaemon:
     async def _insert_btc_observation(self, state) -> None:
         assert self.pool is not None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -339,9 +329,7 @@ class CollectorDaemon:
                 state.realized_vol_30m,
             )
 
-    async def _insert_metar_observations(
-        self, observations: list[METARObservation]
-    ) -> None:
+    async def _insert_metar_observations(self, observations: list[METARObservation]) -> None:
         """Insert METAR observations into metar_observations table."""
         assert self.pool is not None
 
@@ -377,9 +365,7 @@ class CollectorDaemon:
                 except Exception:
                     logger.debug("metar_insert_skipped", station=obs.station)
 
-    async def _insert_hrrr_forecasts(
-        self, forecasts: list[HRRRForecast]
-    ) -> None:
+    async def _insert_hrrr_forecasts(self, forecasts: list[HRRRForecast]) -> None:
         """Insert HRRR forecasts into hrrr_forecasts table."""
         assert self.pool is not None
 
@@ -445,11 +431,9 @@ class CollectorDaemon:
                         return None
 
                     market = resp.json().get("market", {})
-                    now = datetime.now(timezone.utc)
+                    now = datetime.now(UTC)
                     settlement = settlement_times[ticker]
-                    minutes_to_settlement = (
-                        settlement - now
-                    ).total_seconds() / 60.0
+                    minutes_to_settlement = (settlement - now).total_seconds() / 60.0
 
                     yes_price = float(market.get("yes_price", 0)) / 100.0
                     no_price = float(market.get("no_price", 0)) / 100.0
@@ -469,9 +453,7 @@ class CollectorDaemon:
                     logger.exception("market_snapshot_single_error", ticker=ticker)
                     return None
 
-        results = await asyncio.gather(
-            *[_fetch_one(t) for t in tickers], return_exceptions=True
-        )
+        results = await asyncio.gather(*[_fetch_one(t) for t in tickers], return_exceptions=True)
         snapshots = [r for r in results if isinstance(r, tuple)]
 
         if snapshots:
@@ -497,7 +479,7 @@ class CollectorDaemon:
         """Sleep for the given duration, returning early if shutdown is signalled."""
         try:
             await asyncio.wait_for(self._shutdown.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     def shutdown(self) -> None:

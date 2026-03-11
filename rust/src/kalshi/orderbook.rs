@@ -75,8 +75,8 @@ impl Orderbook {
 /// Top-of-book data from the ticker channel (fallback when orderbook is empty).
 #[derive(Debug, Clone, Default)]
 pub struct TickerTopOfBook {
-    pub yes_bid: Option<i64>,   // cents
-    pub yes_ask: Option<i64>,   // cents
+    pub yes_bid: Option<i64>, // cents
+    pub yes_ask: Option<i64>, // cents
     pub last_update: Option<Instant>,
 }
 
@@ -117,7 +117,10 @@ impl OrderbookManager {
     }
 
     /// Get or create an orderbook for a ticker.
-    pub fn get_or_create(&self, ticker: &str) -> dashmap::mapref::one::RefMut<'_, String, Orderbook> {
+    pub fn get_or_create(
+        &self,
+        ticker: &str,
+    ) -> dashmap::mapref::one::RefMut<'_, String, Orderbook> {
         self.books
             .entry(ticker.to_string())
             .or_insert_with(|| Orderbook::new(ticker.to_string()))
@@ -229,8 +232,12 @@ impl OrderbookManager {
     /// Update top-of-book from ticker channel data.
     pub fn update_ticker_tob(&self, ticker: &str, yes_bid: Option<i64>, yes_ask: Option<i64>) {
         let mut tob = self.ticker_tob.entry(ticker.to_string()).or_default();
-        if yes_bid.is_some() { tob.yes_bid = yes_bid; }
-        if yes_ask.is_some() { tob.yes_ask = yes_ask; }
+        if yes_bid.is_some() {
+            tob.yes_bid = yes_bid;
+        }
+        if yes_ask.is_some() {
+            tob.yes_ask = yes_ask;
+        }
         tob.last_update = Some(Instant::now());
     }
 
@@ -256,18 +263,30 @@ impl OrderbookManager {
 
         // Get ticker ToB for fallback
         let tob = self.ticker_tob.get(ticker);
-        let tob_bid = tob.as_ref().and_then(|t| t.yes_bid).and_then(cents_to_decimal);
-        let tob_ask = tob.as_ref().and_then(|t| t.yes_ask).and_then(cents_to_decimal);
+        let tob_bid = tob
+            .as_ref()
+            .and_then(|t| t.yes_bid)
+            .and_then(cents_to_decimal);
+        let tob_ask = tob
+            .as_ref()
+            .and_then(|t| t.yes_ask)
+            .and_then(cents_to_decimal);
 
         // 2. One book side + ticker complement
         if let Some(bid) = book_bid {
             if let Some(ask) = tob_ask {
-                return Some(((bid + ask) / Decimal::from(2), MidPriceSource::OrderbookPlusTicker));
+                return Some((
+                    (bid + ask) / Decimal::from(2),
+                    MidPriceSource::OrderbookPlusTicker,
+                ));
             }
         }
         if let Some(ask) = book_ask {
             if let Some(bid) = tob_bid {
-                return Some(((bid + ask) / Decimal::from(2), MidPriceSource::OrderbookPlusTicker));
+                return Some((
+                    (bid + ask) / Decimal::from(2),
+                    MidPriceSource::OrderbookPlusTicker,
+                ));
             }
         }
 
@@ -300,10 +319,17 @@ impl OrderbookManager {
         let has_entry = book.is_some();
         let has_bids = book.as_ref().map(|b| !b.bids.is_empty()).unwrap_or(false);
         let has_asks = book.as_ref().map(|b| !b.asks.is_empty()).unwrap_or(false);
-        let has_tob = self.ticker_tob.get(ticker)
+        let has_tob = self
+            .ticker_tob
+            .get(ticker)
             .map(|t| t.yes_bid.is_some() || t.yes_ask.is_some())
             .unwrap_or(false);
-        BookStatus { has_entry, has_bids, has_asks, has_tob }
+        BookStatus {
+            has_entry,
+            has_bids,
+            has_asks,
+            has_tob,
+        }
     }
 
     /// Check if the orderbook data is stale.
@@ -371,21 +397,23 @@ mod tests {
 
         // Add to existing bid level
         mgr.apply_delta("T", Side::Bid, 50, 5);
-        assert_eq!(mgr.depth_at_price("T", Side::Bid, Decimal::from_str_exact("0.50").unwrap()), 15);
+        assert_eq!(
+            mgr.depth_at_price("T", Side::Bid, Decimal::from_str_exact("0.50").unwrap()),
+            15
+        );
 
         // Remove from bid level (goes to zero → removed)
         mgr.apply_delta("T", Side::Bid, 50, -15);
-        assert_eq!(mgr.depth_at_price("T", Side::Bid, Decimal::from_str_exact("0.50").unwrap()), 0);
+        assert_eq!(
+            mgr.depth_at_price("T", Side::Bid, Decimal::from_str_exact("0.50").unwrap()),
+            0
+        );
     }
 
     #[test]
     fn test_estimated_fill_price() {
         let mgr = OrderbookManager::new();
-        mgr.apply_snapshot(
-            "T",
-            vec![],
-            vec![(55, 10), (56, 20), (57, 30)],
-        );
+        mgr.apply_snapshot("T", vec![], vec![(55, 10), (56, 20), (57, 30)]);
 
         // Small order fills at best ask
         let fill = mgr.estimated_fill_price("T", Side::Bid, 5).unwrap();

@@ -5,21 +5,15 @@ from models.binary_option import compute_binary_probability, compute_binary_put_
 
 class TestBinaryProbability:
     def test_at_strike_near_50_percent(self):
-        p = compute_binary_probability(
-            spot=65000.0, strike=65000.0, minutes_remaining=10.0, sigma_annual=0.60
-        )
+        p = compute_binary_probability(spot=65000.0, strike=65000.0, minutes_remaining=10.0, sigma_annual=0.60)
         assert abs(p - 0.5) < 0.05
 
     def test_above_strike_high_prob(self):
-        p = compute_binary_probability(
-            spot=65100.0, strike=65000.0, minutes_remaining=10.0, sigma_annual=0.60
-        )
+        p = compute_binary_probability(spot=65100.0, strike=65000.0, minutes_remaining=10.0, sigma_annual=0.60)
         assert p > 0.50
 
     def test_well_below_strike_low_prob(self):
-        p = compute_binary_probability(
-            spot=64000.0, strike=65000.0, minutes_remaining=5.0, sigma_annual=0.40
-        )
+        p = compute_binary_probability(spot=64000.0, strike=65000.0, minutes_remaining=5.0, sigma_annual=0.40)
         assert p < 0.15
 
     def test_zero_time_above(self):

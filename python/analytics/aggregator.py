@@ -7,7 +7,7 @@ last settlement.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -32,9 +32,7 @@ async def aggregate_daily_performance(
         Dict of strategy -> metrics dict.
     """
     if target_date is None:
-        target_date = (
-            datetime.now(timezone.utc).date()
-        )
+        target_date = datetime.now(UTC).date()
 
     results = {}
 

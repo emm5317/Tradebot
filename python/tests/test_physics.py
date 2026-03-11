@@ -1,7 +1,5 @@
 """Tests for weather physics and ensemble model."""
 
-import math
-
 from models.physics import (
     climatological_probability,
     compute_ensemble_probability,

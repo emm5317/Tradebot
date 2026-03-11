@@ -8,7 +8,7 @@ uses hand-rolled least squares for n < 100 data points.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import structlog
 
@@ -62,10 +62,9 @@ def compute_weather_probability(
     # or min contracts where current > strike, the probability of the
     # process *ever* exceeding the barrier is 2x the terminal probability.
     # P(max B(t) > K, t in [0,T]) = 2 * P(B(T) > K) when B(0) < K.
-    if contract_type == "weather_max" and current_temp_f < threshold_f:
-        p_excursion = min(2.0 * p_terminal, 1.0)
-        return p_excursion
-    elif contract_type == "weather_min" and current_temp_f > threshold_f:
+    if (contract_type == "weather_max" and current_temp_f < threshold_f) or (
+        contract_type == "weather_min" and current_temp_f > threshold_f
+    ):
         p_excursion = min(2.0 * p_terminal, 1.0)
         return p_excursion
 
@@ -208,19 +207,13 @@ def compute_ensemble_probability(
         sigma = sigma_table.get((station, hour, month), _DEFAULT_SIGMA)
 
     # 1. Physics model (with reflection principle for max/min)
-    p_physics = compute_weather_probability(
-        current_temp_f, threshold_f, minutes_remaining, sigma, contract_type
-    )
+    p_physics = compute_weather_probability(current_temp_f, threshold_f, minutes_remaining, sigma, contract_type)
 
     # 2. Climatological prior
-    p_climo = climatological_probability(
-        station, hour, month, threshold_f, current_temp_f, climo_table
-    )
+    p_climo = climatological_probability(station, hour, month, threshold_f, current_temp_f, climo_table)
 
     # 3. Trend extrapolation
-    p_trend = trend_extrapolation_probability(
-        recent_temps or [], threshold_f, minutes_remaining, sigma
-    )
+    p_trend = trend_extrapolation_probability(recent_temps or [], threshold_f, minutes_remaining, sigma)
 
     # Weighted ensemble
     w1, w2, w3 = weights

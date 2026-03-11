@@ -7,7 +7,7 @@ import json
 import math
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 import websockets
@@ -49,7 +49,7 @@ class BinanceFeed:
     bars_1m: deque[OHLCBar] = field(default_factory=lambda: deque(maxlen=60))
     realized_vol_30m: float | None = None
     ewma_vol_30m: float | None = None
-    last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_updated: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     # EWMA decay factor (0.94 = RiskMetrics standard for daily, adapted for 1-min)
     _ewma_lambda: float = 0.94
@@ -107,7 +107,7 @@ class BinanceFeed:
         price = float(msg["p"])
         qty = float(msg["q"])
         trade_time_ms = msg["T"]
-        trade_time = datetime.fromtimestamp(trade_time_ms / 1000, tz=timezone.utc)
+        trade_time = datetime.fromtimestamp(trade_time_ms / 1000, tz=UTC)
         current_minute = trade_time_ms // 60_000
 
         self.spot_price = price
@@ -150,11 +150,7 @@ class BinanceFeed:
 
         # Use last 30 bars (need 31 closes for 30 returns)
         closes = [bar.close for bar in list(self.bars_1m)[-31:]]
-        log_returns = [
-            math.log(closes[i] / closes[i - 1])
-            for i in range(1, len(closes))
-            if closes[i - 1] > 0
-        ]
+        log_returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes)) if closes[i - 1] > 0]
 
         if len(log_returns) < 2:
             self.realized_vol_30m = None
@@ -188,17 +184,12 @@ class BinanceFeed:
             # Initialize with simple variance from available bars
             if len(self.bars_1m) >= 10:
                 closes = [b.close for b in bars[-11:]]
-                returns = [
-                    math.log(closes[i] / closes[i - 1])
-                    for i in range(1, len(closes))
-                    if closes[i - 1] > 0
-                ]
+                returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes)) if closes[i - 1] > 0]
                 if returns:
                     self._ewma_variance = sum(r * r for r in returns) / len(returns)
 
         self._ewma_variance = (
-            self._ewma_lambda * self._ewma_variance
-            + (1.0 - self._ewma_lambda) * log_return * log_return
+            self._ewma_lambda * self._ewma_variance + (1.0 - self._ewma_lambda) * log_return * log_return
         )
 
         sigma_1min = math.sqrt(self._ewma_variance)

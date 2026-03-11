@@ -19,14 +19,14 @@ from dataclasses import dataclass
 class RoundingResult:
     """Result of rounding ambiguity analysis."""
 
-    min_f: float          # lowest possible Fahrenheit from this METAR reading
-    max_f: float          # highest possible Fahrenheit from this METAR reading
-    reported_f: float     # nominal F conversion (round(C * 9/5 + 32))
-    is_ambiguous: bool    # True if strike falls within [min_f, max_f]
-    ambiguity_band: float # max_f - min_f (always 1.8°F for whole-degree C)
-    floor_f: int = 0                   # floor(reported_f)
-    ceil_f: int = 0                    # ceil(reported_f)
-    safe_zone: bool = False            # True if strike is >0.7F from nearest ambiguity boundary
+    min_f: float  # lowest possible Fahrenheit from this METAR reading
+    max_f: float  # highest possible Fahrenheit from this METAR reading
+    reported_f: float  # nominal F conversion (round(C * 9/5 + 32))
+    is_ambiguous: bool  # True if strike falls within [min_f, max_f]
+    ambiguity_band: float  # max_f - min_f (always 1.8°F for whole-degree C)
+    floor_f: int = 0  # floor(reported_f)
+    ceil_f: int = 0  # ceil(reported_f)
+    safe_zone: bool = False  # True if strike is >0.7F from nearest ambiguity boundary
     boundary_probability: float = 0.5  # P(actual >= strike) given uniform on [min_f, max_f]
 
 

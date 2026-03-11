@@ -9,8 +9,6 @@ Run: pytest python/tests/test_crypto_parity.py -v
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from models.crypto_fv import (
@@ -62,9 +60,7 @@ class TestStandardBinaryProb:
             (95000, 95500, 600, 0.50, "slightly OTM"),
         ],
     )
-    def test_standard_binary_prob(
-        self, spot: float, strike: float, seconds: float, vol: float, desc: str
-    ) -> None:
+    def test_standard_binary_prob(self, spot: float, strike: float, seconds: float, vol: float, desc: str) -> None:
         p = _standard_binary_prob(spot, strike, seconds, vol)
         assert 0.0 <= p <= 1.0, f"Probability out of range for {desc}: {p}"
 

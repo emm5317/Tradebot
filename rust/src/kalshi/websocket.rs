@@ -6,8 +6,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, interval};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
@@ -38,9 +38,9 @@ pub enum WsFeedMessage {
     /// Incremental orderbook delta.
     OrderbookDelta {
         ticker: String,
-        side: String,      // "yes" or "no"
+        side: String, // "yes" or "no"
         price_cents: i64,
-        delta: i64,        // positive = add, negative = remove
+        delta: i64, // positive = add, negative = remove
     },
     /// Trade occurred.
     Trade {
@@ -103,7 +103,11 @@ pub struct KalshiWsFeed {
 
 impl KalshiWsFeed {
     /// Create a new WS feed and return a subscription handle for dynamic subscriptions.
-    pub fn new(ws_url: String, auth: KalshiAuth, cancel: CancellationToken) -> (Self, WsSubscriptionHandle) {
+    pub fn new(
+        ws_url: String,
+        auth: KalshiAuth,
+        cancel: CancellationToken,
+    ) -> (Self, WsSubscriptionHandle) {
         let (sub_tx, sub_rx) = mpsc::unbounded_channel();
         let feed = Self {
             ws_url,
@@ -294,11 +298,19 @@ impl KalshiWsFeed {
                     // Try dollars_fp format first, then integer format fallback
                     let yes_bids = {
                         let fp = parse_dollars_fp_levels(msg.get("yes_dollars_fp"));
-                        if fp.is_empty() { parse_integer_levels(msg.get("yes")) } else { fp }
+                        if fp.is_empty() {
+                            parse_integer_levels(msg.get("yes"))
+                        } else {
+                            fp
+                        }
                     };
                     let no_bids = {
                         let fp = parse_dollars_fp_levels(msg.get("no_dollars_fp"));
-                        if fp.is_empty() { parse_integer_levels(msg.get("no")) } else { fp }
+                        if fp.is_empty() {
+                            parse_integer_levels(msg.get("no"))
+                        } else {
+                            fp
+                        }
                     };
 
                     // Convert no-side bids to yes-side asks: ask_cents = 100 - no_bid_cents
@@ -393,7 +405,10 @@ impl KalshiWsFeed {
                                 .or_else(|| msg.get("volume").and_then(|v| v.as_i64())),
                             open_interest: parse_fp_to_i64(msg.get("open_interest_fp"))
                                 .or_else(|| msg.get("open_interest").and_then(|v| v.as_i64())),
-                            market_status: msg.get("market_status").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            market_status: msg
+                                .get("market_status")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                         })
                         .await;
                 }

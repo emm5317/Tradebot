@@ -1,6 +1,6 @@
 """Tests for crypto signal evaluator."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from signals.crypto import BlackoutWindow, CryptoSignalEvaluator
 from signals.types import Contract, OrderbookState
@@ -11,7 +11,7 @@ def _make_contract(minutes_ahead: float = 10.0, threshold: float = 65000.0) -> C
         ticker="BTC-65K-T1200",
         category="crypto",
         threshold=threshold,
-        settlement_time=datetime.now(timezone.utc) + timedelta(minutes=minutes_ahead),
+        settlement_time=datetime.now(UTC) + timedelta(minutes=minutes_ahead),
     )
 
 
@@ -31,16 +31,14 @@ class TestCryptoEvaluator:
         evaluator = CryptoSignalEvaluator()
         contract = _make_contract(minutes_ahead=20.0)
         book = _make_orderbook()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
-        signal, rejection, state = evaluator.evaluate(
-            contract, 65500.0, 0.60, now, book
-        )
+        signal, rejection, state = evaluator.evaluate(contract, 65500.0, 0.60, now, book)
         assert signal is None
         assert rejection is None
 
     def test_blackout_rejects(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         blackout = BlackoutWindow(
             "FOMC",
             now - timedelta(minutes=5),
@@ -50,9 +48,7 @@ class TestCryptoEvaluator:
         contract = _make_contract()
         book = _make_orderbook()
 
-        signal, rejection, state = evaluator.evaluate(
-            contract, 65500.0, 0.60, now, book
-        )
+        signal, rejection, state = evaluator.evaluate(contract, 65500.0, 0.60, now, book)
         assert signal is None
         assert rejection is not None
         assert "blackout" in rejection.rejection_reason
@@ -62,11 +58,9 @@ class TestCryptoEvaluator:
         evaluator = CryptoSignalEvaluator()
         contract = _make_contract()
         book = _make_orderbook()
-        stale_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+        stale_time = datetime.now(UTC) - timedelta(seconds=60)
 
-        signal, rejection, state = evaluator.evaluate(
-            contract, 65500.0, 0.60, stale_time, book
-        )
+        signal, rejection, state = evaluator.evaluate(contract, 65500.0, 0.60, stale_time, book)
         assert signal is None
         assert rejection is not None
         assert "stale" in rejection.rejection_reason
@@ -75,11 +69,9 @@ class TestCryptoEvaluator:
         evaluator = CryptoSignalEvaluator()
         contract = _make_contract()
         book = _make_orderbook()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
-        signal, rejection, state = evaluator.evaluate(
-            contract, 65500.0, None, now, book
-        )
+        signal, rejection, state = evaluator.evaluate(contract, 65500.0, None, now, book)
         assert signal is None
         assert rejection is not None
         assert "volatility" in rejection.rejection_reason
@@ -89,11 +81,9 @@ class TestCryptoEvaluator:
         # Spot well above strike → model_prob high, market at 0.50 → big edge
         contract = _make_contract(threshold=60000.0)
         book = _make_orderbook(mid=0.50, spread=0.04)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
-        signal, rejection, state = evaluator.evaluate(
-            contract, 65000.0, 0.60, now, book
-        )
+        signal, rejection, state = evaluator.evaluate(contract, 65000.0, 0.60, now, book)
         assert signal is not None
         assert signal.direction == "yes"
         assert signal.signal_type == "crypto"
@@ -104,27 +94,21 @@ class TestCryptoEvaluator:
         # Spot at strike → model prob ~0.50, market ~0.50 → no edge
         contract = _make_contract(threshold=65000.0)
         book = _make_orderbook(mid=0.50, spread=0.04)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
-        signal, rejection, state = evaluator.evaluate(
-            contract, 65000.0, 0.60, now, book
-        )
+        signal, rejection, state = evaluator.evaluate(contract, 65000.0, 0.60, now, book)
         assert signal is None
 
     def test_cooldown(self):
         evaluator = CryptoSignalEvaluator()
         contract = _make_contract(threshold=55000.0)
         book = _make_orderbook(mid=0.50, spread=0.04)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
-        signal1, _, _ = evaluator.evaluate(
-            contract, 65000.0, 0.60, now, book
-        )
+        signal1, _, _ = evaluator.evaluate(contract, 65000.0, 0.60, now, book)
         assert signal1 is not None
 
-        signal2, rejection2, _ = evaluator.evaluate(
-            contract, 65000.0, 0.60, now, book
-        )
+        signal2, rejection2, _ = evaluator.evaluate(contract, 65000.0, 0.60, now, book)
         assert signal2 is None
         assert rejection2 is not None
         assert "cooldown" in rejection2.rejection_reason
@@ -134,10 +118,14 @@ class TestCryptoEvaluator:
         # Bought YES at 0.50 but spot now way below strike
         contract = _make_contract(threshold=70000.0, minutes_ahead=8.0)
         book = _make_orderbook(mid=0.10, spread=0.04)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         exit_signal = evaluator.evaluate_exit(
-            contract, 60000.0, 0.60, now, book,
+            contract,
+            60000.0,
+            0.60,
+            now,
+            book,
             held_direction="yes",
             entry_price=0.50,
         )
@@ -148,27 +136,25 @@ class TestCryptoEvaluator:
         evaluator = CryptoSignalEvaluator()
         contract = _make_contract()
         book = _make_orderbook()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
-        _, _, state = evaluator.evaluate(
-            contract, 65500.0, 0.60, now, book
-        )
+        _, _, state = evaluator.evaluate(contract, 65500.0, 0.60, now, book)
         assert state.ticker == contract.ticker
         assert state.signal_type == "crypto"
 
 
 class TestBlackoutWindow:
     def test_active_during_window(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         w = BlackoutWindow("FOMC", now - timedelta(hours=1), now + timedelta(hours=1))
         assert w.is_active(now)
 
     def test_inactive_before_window(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         w = BlackoutWindow("FOMC", now + timedelta(hours=1), now + timedelta(hours=2))
         assert not w.is_active(now)
 
     def test_inactive_after_window(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         w = BlackoutWindow("FOMC", now - timedelta(hours=2), now - timedelta(hours=1))
         assert not w.is_active(now)

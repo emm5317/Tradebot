@@ -9,15 +9,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import asyncpg
 import structlog
 
 from backtester.costs import FeeModel
-from config import Settings, get_settings
+from config import get_settings
 from data.mesonet import ASOSObservation
 from models.physics import build_climo_table, build_sigma_table
 from signals.crypto import CryptoSignalEvaluator
@@ -109,9 +108,7 @@ class Backtester:
                 continue
 
             # Fetch time-aligned data for this contract
-            snapshots = await self._fetch_snapshots(
-                contract["ticker"], contract["settlement_time"]
-            )
+            snapshots = await self._fetch_snapshots(contract["ticker"], contract["settlement_time"])
 
             for snap in snapshots:
                 orderbook = OrderbookState(
@@ -196,7 +193,7 @@ class Backtester:
         # Calibration buckets: 0-10%, 10-20%, ..., 90-100%
         buckets: dict[str, list[tuple[float, bool]]] = {}
         for i in range(10):
-            buckets[f"{i*10}-{(i+1)*10}%"] = []
+            buckets[f"{i * 10}-{(i + 1) * 10}%"] = []
 
         for sig in result.signals:
             if sig.actual_outcome is None:
@@ -226,7 +223,7 @@ class Backtester:
 
             # Calibration bucket
             bucket_idx = min(int(p * 10), 9)
-            bucket_key = f"{bucket_idx*10}-{(bucket_idx+1)*10}%"
+            bucket_key = f"{bucket_idx * 10}-{(bucket_idx + 1) * 10}%"
             buckets[bucket_key].append((p, bool(won)))
 
         n = len([s for s in result.signals if s.actual_outcome is not None])
@@ -267,10 +264,7 @@ class Backtester:
             )
         contracts = [dict(r) for r in rows]
         if signal_types:
-            contracts = [
-                c for c in contracts
-                if self._infer_signal_type(c) in signal_types
-            ]
+            contracts = [c for c in contracts if self._infer_signal_type(c) in signal_types]
         return contracts
 
     async def _fetch_snapshots(self, ticker: str, settlement_time: datetime) -> list[dict]:
@@ -289,9 +283,7 @@ class Backtester:
             )
         return [dict(r) for r in rows]
 
-    async def _fetch_nearest_observation(
-        self, station: str, at: datetime
-    ) -> ASOSObservation | None:
+    async def _fetch_nearest_observation(self, station: str, at: datetime) -> ASOSObservation | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -354,8 +346,8 @@ async def main() -> None:
     parser.add_argument("--type", help="Signal type filter (weather, crypto)")
     args = parser.parse_args()
 
-    start = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    start = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=UTC)
+    end = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=UTC)
     signal_types = [args.type] if args.type else None
 
     settings = get_settings()

@@ -42,11 +42,23 @@ mod tests {
         assert!(!OrderState::Rejected.has_fill());
 
         // Verify valid transitions to Rejected
-        assert!(OrderState::Submitting.validate_transition(OrderState::Rejected).is_ok());
-        assert!(OrderState::Acknowledged.validate_transition(OrderState::Rejected).is_ok());
+        assert!(
+            OrderState::Submitting
+                .validate_transition(OrderState::Rejected)
+                .is_ok()
+        );
+        assert!(
+            OrderState::Acknowledged
+                .validate_transition(OrderState::Rejected)
+                .is_ok()
+        );
 
         // Verify Pending cannot directly go to Rejected (must go through Submitting first)
-        assert!(OrderState::Pending.validate_transition(OrderState::Rejected).is_err());
+        assert!(
+            OrderState::Pending
+                .validate_transition(OrderState::Rejected)
+                .is_err()
+        );
     }
 
     // Scenario 5: Market closed → no retry

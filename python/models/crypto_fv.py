@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Literal
 
 import structlog
 
@@ -43,10 +42,10 @@ class CryptoInputs:
 class CryptoFairValue:
     """Output of the crypto fair-value engine."""
 
-    probability: float              # P(contract settles YES)
-    confidence: float               # 0-1 confidence in estimate
-    shadow_rti: float               # estimated RTI value
-    basis: float                    # perp - spot basis
+    probability: float  # P(contract settles YES)
+    confidence: float  # 0-1 confidence in estimate
+    shadow_rti: float  # estimated RTI value
+    basis: float  # perp - spot basis
     component_contributions: dict[str, float] = field(default_factory=dict)
 
 
@@ -73,7 +72,7 @@ def compute_crypto_fair_value(inputs: CryptoInputs) -> CryptoFairValue:
     minutes = max(inputs.minutes_remaining, 0.01)
     # Convert annualized vol to vol for remaining time
     # vol_period = vol_annual * sqrt(minutes / (365.25 * 24 * 60))
-    vol_period = vol * math.sqrt(minutes / (365.25 * 24.0 * 60.0))
+    _vol_period = vol * math.sqrt(minutes / (365.25 * 24.0 * 60.0))  # kept for future use
 
     # --- Step 4: Core probability via settlement-aware model ---
     # Uses Levy approximation for RTI averaging window near expiry,
@@ -82,9 +81,7 @@ def compute_crypto_fair_value(inputs: CryptoInputs) -> CryptoFairValue:
     if shadow_rti <= 0 or inputs.strike <= 0:
         p_core = 0.5
     else:
-        p_core = _compute_settlement_probability(
-            shadow_rti, inputs.strike, seconds_remaining, vol
-        )
+        p_core = _compute_settlement_probability(shadow_rti, inputs.strike, seconds_remaining, vol)
 
     components["p_core"] = p_core
 
@@ -186,9 +183,7 @@ _SECONDS_PER_YEAR = 525_600.0 * 60.0
 _RISK_FREE_RATE = 0.05
 
 
-def _compute_settlement_probability(
-    spot: float, strike: float, seconds_remaining: float, vol: float
-) -> float:
+def _compute_settlement_probability(spot: float, strike: float, seconds_remaining: float, vol: float) -> float:
     """Settlement-aware probability using Levy averaging near expiry."""
     if seconds_remaining <= 0.01:
         return 1.0 if spot >= strike else 0.0
@@ -209,23 +204,17 @@ def _compute_settlement_probability(
     return p_standard * (1.0 - blend) + p_averaging * blend
 
 
-def _standard_binary_prob(
-    spot: float, strike: float, seconds_remaining: float, vol: float
-) -> float:
+def _standard_binary_prob(spot: float, strike: float, seconds_remaining: float, vol: float) -> float:
     """Standard Black-Scholes binary: N(d2)."""
     t = seconds_remaining / _SECONDS_PER_YEAR
     vol_period = vol * math.sqrt(t)
     if vol_period <= 0:
         return 1.0 if spot >= strike else 0.0
-    d2 = (math.log(spot / strike) + (_RISK_FREE_RATE - 0.5 * vol * vol) * t) / (
-        vol * math.sqrt(t)
-    )
+    d2 = (math.log(spot / strike) + (_RISK_FREE_RATE - 0.5 * vol * vol) * t) / (vol * math.sqrt(t))
     return _norm_cdf(d2)
 
 
-def _levy_averaging_prob(
-    spot: float, strike: float, seconds_remaining: float, vol: float
-) -> float:
+def _levy_averaging_prob(spot: float, strike: float, seconds_remaining: float, vol: float) -> float:
     """Levy approximation for binary option on arithmetic average (TWAP).
 
     Var(TWAP over τ) ≈ S²·σ²·τ/3, so effective vol = σ·√(τ/3).

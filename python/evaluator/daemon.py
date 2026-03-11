@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import time as time_mod
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 
 import asyncpg
 import nats
@@ -46,9 +46,7 @@ class EvaluationDaemon:
 
     async def run(self) -> None:
         """Initialize connections, register evaluators, run evaluation loop."""
-        self.pool = await asyncpg.create_pool(
-            self.settings.database_url, min_size=2, max_size=5
-        )
+        self.pool = await asyncpg.create_pool(self.settings.database_url, min_size=2, max_size=5)
         self.nc = await nats.connect(self.settings.nats_url)
         self.redis = aioredis.from_url(self.settings.redis_url)
 
@@ -100,12 +98,10 @@ class EvaluationDaemon:
     async def _maybe_refresh_calibration(self) -> None:
         """Reload calibration tables if stale (every 15 minutes)."""
         if (time_mod.monotonic() - self._last_cal_refresh) > 900:
-            self._sigma_table, self._climo_table, self._station_calibration = (
-                await asyncio.gather(
-                    build_sigma_table(self.pool),
-                    build_climo_table(self.pool),
-                    build_station_calibration(self.pool),
-                )
+            self._sigma_table, self._climo_table, self._station_calibration = await asyncio.gather(
+                build_sigma_table(self.pool),
+                build_climo_table(self.pool),
+                build_station_calibration(self.pool),
             )
             # Update the weather evaluator with fresh tables
             self._weather_eval.sigma_table = self._sigma_table
@@ -185,9 +181,7 @@ class EvaluationDaemon:
         snapshots = {r["ticker"]: r for r in snapshot_rows}
 
         # Step 4 depends on rows (needs ticker list)
-        orderbook_overrides = await self._fetch_redis_orderbooks(
-            [r["ticker"] for r in rows]
-        )
+        orderbook_overrides = await self._fetch_redis_orderbooks([r["ticker"] for r in rows])
 
         t_io = time_mod.monotonic()
 
@@ -231,10 +225,13 @@ class EvaluationDaemon:
                     station = contract.station or "KORD"
                     obs = asos_obs.get(station) if asos_obs else None
                     if obs is None:
-                        asyncio.create_task(self._write_decision_log(
-                            ticker=ticker, outcome="skipped",
-                            rejection_reason="no_observation_data",
-                        ))
+                        asyncio.create_task(
+                            self._write_decision_log(
+                                ticker=ticker,
+                                outcome="skipped",
+                                rejection_reason="no_observation_data",
+                            )
+                        )
                         continue
                     sig, rej, state = evaluator.evaluate(
                         contract=contract,
@@ -269,38 +266,45 @@ class EvaluationDaemon:
                     await self.publisher.publish_rejection(rej)
 
                 # Decision audit log
-                mins_left = (contract.settlement_time - datetime.now(timezone.utc)).total_seconds() / 60.0
+                mins_left = (contract.settlement_time - datetime.now(UTC)).total_seconds() / 60.0
                 if sig is not None:
-                    asyncio.create_task(self._write_decision_log(
-                        ticker=ticker, outcome="signal",
-                        model_prob=state.model_prob if state else None,
-                        market_price=orderbook.mid_price,
-                        edge=sig.edge,
-                        direction=sig.direction,
-                        minutes_remaining=mins_left,
-                        confidence=state.confidence if state else None,
-                    ))
+                    asyncio.create_task(
+                        self._write_decision_log(
+                            ticker=ticker,
+                            outcome="signal",
+                            model_prob=state.model_prob if state else None,
+                            market_price=orderbook.mid_price,
+                            edge=sig.edge,
+                            direction=sig.direction,
+                            minutes_remaining=mins_left,
+                            confidence=state.confidence if state else None,
+                        )
+                    )
                 elif rej is not None:
-                    asyncio.create_task(self._write_decision_log(
-                        ticker=ticker, outcome="rejected",
-                        rejection_reason=rej.rejection_reason if hasattr(rej, "rejection_reason") else None,
-                        model_prob=state.model_prob if state else None,
-                        market_price=orderbook.mid_price,
-                        edge=rej.edge if hasattr(rej, "edge") else None,
-                        minutes_remaining=mins_left,
-                        confidence=state.confidence if state else None,
-                    ))
+                    asyncio.create_task(
+                        self._write_decision_log(
+                            ticker=ticker,
+                            outcome="rejected",
+                            rejection_reason=rej.rejection_reason if hasattr(rej, "rejection_reason") else None,
+                            model_prob=state.model_prob if state else None,
+                            market_price=orderbook.mid_price,
+                            edge=rej.edge if hasattr(rej, "edge") else None,
+                            minutes_remaining=mins_left,
+                            confidence=state.confidence if state else None,
+                        )
+                    )
                 else:
-                    asyncio.create_task(self._write_decision_log(
-                        ticker=ticker, outcome="skipped",
-                        minutes_remaining=mins_left,
-                    ))
+                    asyncio.create_task(
+                        self._write_decision_log(
+                            ticker=ticker,
+                            outcome="skipped",
+                            minutes_remaining=mins_left,
+                        )
+                    )
 
             except Exception:
                 logger.exception("evaluate_contract_error", ticker=ticker)
-                await self.notifier.notify_error(
-                    "evaluate_contract_error", {"ticker": ticker}
-                )
+                await self.notifier.notify_error("evaluate_contract_error", {"ticker": ticker})
 
         t_eval = time_mod.monotonic()
         logger.info(
@@ -338,9 +342,16 @@ class EvaluationDaemon:
                     ) VALUES ($1, 'weather', 'python', $2, $3,
                               $4, $5, $6, $7, $8, $9, $10)
                     """,
-                    ticker, outcome, rejection_reason,
-                    model_prob, market_price, edge, direction,
-                    minutes_remaining, confidence, signal_id,
+                    ticker,
+                    outcome,
+                    rejection_reason,
+                    model_prob,
+                    market_price,
+                    edge,
+                    direction,
+                    minutes_remaining,
+                    confidence,
+                    signal_id,
                 )
         except Exception:
             logger.debug("decision_log_write_failed", ticker=ticker)
@@ -412,7 +423,7 @@ class EvaluationDaemon:
 
     async def _maybe_run_daily_aggregation(self) -> None:
         """Run daily strategy aggregation once per day after midnight UTC."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         today = now.date()
 
         # Only run once per day, after midnight UTC
@@ -435,7 +446,7 @@ class EvaluationDaemon:
     async def _sleep_or_shutdown(self, seconds: float) -> None:
         try:
             await asyncio.wait_for(self._shutdown.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     async def _cleanup(self) -> None:

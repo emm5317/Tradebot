@@ -1,11 +1,10 @@
 """Tests for ASOS observation fetcher."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-import httpx
 import pytest
 
-from data.mesonet import ASOSObservation, _STATION_MAP, _first_key, _safe_float, fetch_observation
+from data.mesonet import _STATION_MAP, ASOSObservation, _first_key, _safe_float
 
 
 def test_safe_float_valid():
@@ -24,7 +23,7 @@ def test_safe_float_missing():
 def test_observation_is_frozen():
     ob = ASOSObservation(
         station="KORD",
-        observed_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(UTC),
         temperature_f=72.0,
         wind_speed_kts=10.0,
         wind_gust_kts=None,
@@ -43,7 +42,7 @@ def test_observation_is_frozen():
 def test_staleness_flag():
     ob_fresh = ASOSObservation(
         station="KORD",
-        observed_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(UTC),
         temperature_f=72.0,
         wind_speed_kts=None,
         wind_gust_kts=None,
@@ -56,7 +55,7 @@ def test_staleness_flag():
 
     ob_stale = ASOSObservation(
         station="KORD",
-        observed_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(UTC),
         temperature_f=72.0,
         wind_speed_kts=None,
         wind_gust_kts=None,

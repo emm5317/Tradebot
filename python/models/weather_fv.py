@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Literal
 
 import structlog
@@ -27,10 +26,10 @@ logger = structlog.get_logger()
 class SourceConflict:
     """Detected conflict or outage between METAR and HRRR sources."""
 
-    metar_hrrr_conflict: bool = False   # |METAR - nearest HRRR| > 3F
+    metar_hrrr_conflict: bool = False  # |METAR - nearest HRRR| > 3F
     metar_missing: bool = False
     hrrr_missing: bool = False
-    sigma_multiplier: float = 1.0       # 1.0 normal, 1.5 conflict, 1.25 METAR outage
+    sigma_multiplier: float = 1.0  # 1.0 normal, 1.5 conflict, 1.25 METAR outage
 
 
 def detect_source_conflict(
@@ -67,14 +66,14 @@ class WeatherState:
     """Running state for a weather contract's settlement day."""
 
     station: str
-    obs_date: str                       # ISO date string
+    obs_date: str  # ISO date string
     contract_type: Literal["weather_max", "weather_min"]
     strike_f: float
     running_max_f: float | None = None
     running_min_f: float | None = None
     obs_count: int = 0
-    locked: bool = False                # True if outcome already determined
-    lock_direction: str | None = None   # "above" or "below" when locked
+    locked: bool = False  # True if outcome already determined
+    lock_direction: str | None = None  # "above" or "below" when locked
     rounding_ambiguous: bool = False
     last_metar_c: int | None = None
 
@@ -83,11 +82,11 @@ class WeatherState:
 class WeatherFairValue:
     """Output of the weather fair-value engine."""
 
-    probability: float              # P(contract settles YES)
-    confidence: float               # 0-1 confidence in estimate
-    already_locked: bool            # outcome already determined
-    lock_direction: str | None      # "above"/"below" if locked
-    rounding_ambiguous: bool        # near C→F rounding boundary
+    probability: float  # P(contract settles YES)
+    confidence: float  # 0-1 confidence in estimate
+    already_locked: bool  # outcome already determined
+    lock_direction: str | None  # "above"/"below" if locked
+    rounding_ambiguous: bool  # near C→F rounding boundary
     uncertainty_band: tuple[float, float]  # (low_p, high_p)
     components: dict[str, float] = field(default_factory=dict)
 
@@ -240,9 +239,7 @@ def compute_weather_fair_value(
     # --- Step 5: HRRR forecast excursion probability ---
     # Apply HRRR bias correction if station calibration available
     if station_cal is not None and hrrr_forecast_temps_f:
-        hrrr_forecast_temps_f = [
-            t - station_cal.hrrr_bias_f for t in hrrr_forecast_temps_f
-        ]
+        hrrr_forecast_temps_f = [t - station_cal.hrrr_bias_f for t in hrrr_forecast_temps_f]
 
     p_hrrr: float | None = None
     if hrrr_forecast_temps_f and len(hrrr_forecast_temps_f) > 0:
@@ -316,24 +313,11 @@ def compute_weather_fair_value(
                 scale = (w_phys + w_hrrr + w_trend + w_climo) / total_other
             else:
                 scale = 1.0
-            probability = (
-                w_phys * scale * p_physics
-                + w_trend * scale * p_trend
-                + w_climo * scale * p_climo
-            )
+            probability = w_phys * scale * p_physics + w_trend * scale * p_trend + w_climo * scale * p_climo
     elif p_hrrr is not None:
-        probability = (
-            0.35 * p_physics
-            + 0.25 * p_hrrr
-            + 0.20 * p_trend
-            + 0.20 * p_climo
-        )
+        probability = 0.35 * p_physics + 0.25 * p_hrrr + 0.20 * p_trend + 0.20 * p_climo
     else:
-        probability = (
-            0.45 * p_physics
-            + 0.25 * p_trend
-            + 0.30 * p_climo
-        )
+        probability = 0.45 * p_physics + 0.25 * p_trend + 0.30 * p_climo
 
     # --- Step 7b: Rounding component blending (Phase 4.7) ---
     if rounding_ambiguous and rounding_result is not None:

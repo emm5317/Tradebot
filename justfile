@@ -100,12 +100,26 @@ docker-test:
 
 fmt:
     cd rust; cargo fmt
+    cd python; ruff format .
 
 fmt-check:
     cd rust; cargo fmt --check
+    cd python; ruff format --check .
 
 clippy:
     cd rust; cargo clippy -- -D warnings
+
+ruff:
+    cd python; ruff check .
+
+ruff-fix:
+    cd python; ruff check --fix .
+
+lint: clippy ruff
+
+lint-fix:
+    cd rust; cargo clippy --fix --allow-dirty -- -D warnings
+    cd python; ruff check --fix .
 
 clean:
     cd rust; cargo clean

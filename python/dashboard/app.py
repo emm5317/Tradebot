@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import asyncpg
 import nats
@@ -97,7 +97,7 @@ async def calibration_redirect():
 
 @app.get("/api/health")
 async def health():
-    checks = {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+    checks = {"status": "ok", "timestamp": datetime.now(UTC).isoformat()}
     try:
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -504,26 +504,28 @@ async def risk_summary():
                 if raw:
                     fdata = json.loads(raw)
                     score = fdata.get("score", 0)
-                    result["feeds"].append({
-                        "name": feed,
-                        "score": score,
-                        "age_ms": fdata.get("age_ms", 0),
-                        "healthy": score >= 0.5,
-                    })
+                    result["feeds"].append(
+                        {
+                            "name": feed,
+                            "score": score,
+                            "age_ms": fdata.get("age_ms", 0),
+                            "healthy": score >= 0.5,
+                        }
+                    )
                 else:
-                    result["feeds"].append({
-                        "name": feed, "score": 0, "age_ms": 0, "healthy": False,
-                    })
+                    result["feeds"].append(
+                        {
+                            "name": feed,
+                            "score": 0,
+                            "age_ms": 0,
+                            "healthy": False,
+                        }
+                    )
 
             # Strategy health: best crypto feed, kalshi for weather
-            crypto_scores = [
-                f["score"] for f in result["feeds"]
-                if f["name"] in ("coinbase", "binance_spot")
-            ]
+            crypto_scores = [f["score"] for f in result["feeds"] if f["name"] in ("coinbase", "binance_spot")]
             result["crypto_health"] = max(crypto_scores) if crypto_scores else 0
-            kalshi_feeds = [
-                f["score"] for f in result["feeds"] if f["name"] == "kalshi_ws"
-            ]
+            kalshi_feeds = [f["score"] for f in result["feeds"] if f["name"] == "kalshi_ws"]
             result["weather_health"] = min(kalshi_feeds) if kalshi_feeds else 0
     except Exception:
         logger.warning("risk_summary_redis_error")
@@ -549,10 +551,7 @@ async def decision_breakdown(hours: int = 24):
         rows = await conn.fetch(query, hours)
 
     total = sum(r["count"] for r in rows) or 1
-    return [
-        {"reason": r["rejection_reason"], "count": r["count"], "pct": r["count"] / total}
-        for r in rows
-    ]
+    return [{"reason": r["rejection_reason"], "count": r["count"], "pct": r["count"] / total} for r in rows]
 
 
 @app.get("/api/orders")
@@ -581,7 +580,8 @@ async def execution_stats(hours: int = 24):
 
     async with pool.acquire() as conn:
         # Aggregate stats
-        row = await conn.fetchrow("""
+        row = await conn.fetchrow(
+            """
             SELECT
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE status = 'filled') as filled,
@@ -600,15 +600,20 @@ async def execution_stats(hours: int = 24):
             FROM orders o
             LEFT JOIN signals s ON o.signal_id = s.id
             WHERE o.created_at >= NOW() - make_interval(hours => $1)
-        """, hours)
+        """,
+            hours,
+        )
 
         # Latency histogram (10 buckets)
-        lat_rows = await conn.fetch("""
+        lat_rows = await conn.fetch(
+            """
             SELECT latency_ms FROM orders
             WHERE latency_ms IS NOT NULL
               AND created_at >= NOW() - make_interval(hours => $1)
             ORDER BY latency_ms
-        """, hours)
+        """,
+            hours,
+        )
 
     total = row["total"] or 0
     filled = row["filled"] or 0
@@ -655,8 +660,7 @@ async def microstructure(hours: int = 1):
     """Recent microstructure adjustments from decision_log."""
     assert pool is not None
 
-    components = ["micro_trade", "micro_spread", "micro_depth",
-                  "micro_vwap", "micro_momentum", "micro_vol_surge"]
+    components = ["micro_trade", "micro_spread", "micro_depth", "micro_vwap", "micro_momentum", "micro_vol_surge"]
 
     async with pool.acquire() as conn:
         # Latest values
@@ -670,7 +674,8 @@ async def microstructure(hours: int = 1):
         """)
 
         # Averages over window
-        avg_row = await conn.fetchrow("""
+        avg_row = await conn.fetchrow(
+            """
             SELECT AVG(micro_trade) as avg_trade,
                    AVG(micro_spread) as avg_spread,
                    AVG(micro_depth) as avg_depth,
@@ -681,7 +686,9 @@ async def microstructure(hours: int = 1):
             FROM decision_log
             WHERE micro_total IS NOT NULL
               AND created_at >= NOW() - make_interval(hours => $1)
-        """, hours)
+        """,
+            hours,
+        )
 
     result = []
     names = {
@@ -697,20 +704,24 @@ async def microstructure(hours: int = 1):
         last_val = float(last_row[col]) if last_row and last_row[col] is not None else None
         avg_col = f"avg_{col.replace('micro_', '')}"
         avg_val = float(avg_row[avg_col]) if avg_row and avg_row[avg_col] is not None else None
-        result.append({
-            "component": names.get(col, col),
-            "last": round(last_val, 4) if last_val is not None else None,
-            "avg": round(avg_val, 4) if avg_val is not None else None,
-        })
+        result.append(
+            {
+                "component": names.get(col, col),
+                "last": round(last_val, 4) if last_val is not None else None,
+                "avg": round(avg_val, 4) if avg_val is not None else None,
+            }
+        )
 
     # Add total
     last_total = float(last_row["micro_total"]) if last_row and last_row["micro_total"] is not None else None
     avg_total = float(avg_row["avg_total"]) if avg_row and avg_row["avg_total"] is not None else None
-    result.append({
-        "component": "TOTAL",
-        "last": round(last_total, 4) if last_total is not None else None,
-        "avg": round(avg_total, 4) if avg_total is not None else None,
-    })
+    result.append(
+        {
+            "component": "TOTAL",
+            "last": round(last_total, 4) if last_total is not None else None,
+            "avg": round(avg_total, 4) if avg_total is not None else None,
+        }
+    )
 
     return result
 
@@ -771,13 +782,16 @@ async def settlement_outcomes(days: int = 7):
     assert pool is not None
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(
+            """
             SELECT station, obs_date, final_max_f, final_min_f,
                    contracts_settled
             FROM daily_settlement_summary
             WHERE obs_date >= CURRENT_DATE - $1::int
             ORDER BY obs_date DESC, station
-        """, days)
+        """,
+            days,
+        )
 
     return [dict(r) for r in rows]
 
@@ -850,14 +864,12 @@ async def event_stream(request: Request):
                 if sub:
                     try:
                         while True:
-                            msg = await asyncio.wait_for(
-                                sub.next_msg(), timeout=0.1
-                            )
+                            msg = await asyncio.wait_for(sub.next_msg(), timeout=0.1)
                             yield {
                                 "event": "signal",
                                 "data": msg.data.decode(),
                             }
-                    except (asyncio.TimeoutError, nats.errors.TimeoutError):
+                    except (TimeoutError, nats.errors.TimeoutError):
                         pass
 
                 # Model state snapshot every cycle (2s)

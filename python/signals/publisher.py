@@ -142,8 +142,16 @@ class SignalPublisher:
 
         asyncio.create_task(
             self._persist_evaluation(
-                ticker, signal_type, model_prob, market_price,
-                edge, direction, inputs, components, confidence, acted_on,
+                ticker,
+                signal_type,
+                model_prob,
+                market_price,
+                edge,
+                direction,
+                inputs,
+                components,
+                confidence,
+                acted_on,
             )
         )
 
@@ -205,11 +213,13 @@ class SignalPublisher:
                     signal.edge,
                     signal.kelly_fraction,
                     signal.minutes_remaining,
-                    json.dumps({
-                        "spread": signal.spread,
-                        "order_imbalance": signal.order_imbalance,
-                        "action": signal.action.value,
-                    }),
+                    json.dumps(
+                        {
+                            "spread": signal.spread,
+                            "order_imbalance": signal.order_imbalance,
+                            "action": signal.action.value,
+                        }
+                    ),
                     True,  # acted_on
                     json.dumps(signal.model_components) if signal.model_components else None,
                 )

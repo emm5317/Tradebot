@@ -10,8 +10,8 @@ use std::time::Duration;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::KeysInterface;
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -75,7 +75,12 @@ impl BinanceFuturesFeed {
     }
 
     /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
-    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>, feed_health: Arc<FeedHealth>) {
+    pub async fn run(
+        &self,
+        redis: RedisClient,
+        crypto_state: Arc<CryptoState>,
+        feed_health: Arc<FeedHealth>,
+    ) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -85,7 +90,10 @@ impl BinanceFuturesFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis, &crypto_state, &feed_health).await {
+            match self
+                .connect_and_stream(&redis, &crypto_state, &feed_health)
+                .await
+            {
                 Ok(()) => {
                     warn!("binance futures ws closed by server, will reconnect");
                     backoff_secs = 1;
@@ -170,7 +178,11 @@ fn parse_binance_futures_message(text: &str, state: &mut BinanceFuturesState) {
     match event_type {
         "aggTrade" => {
             // Aggregate trade: last price
-            if let Some(price) = data.get("p").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
+            if let Some(price) = data
+                .get("p")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+            {
                 state.perp_price = price;
             }
         }
@@ -205,10 +217,18 @@ fn parse_binance_futures_message(text: &str, state: &mut BinanceFuturesState) {
         }
         "markPriceUpdate" => {
             // Mark price and funding rate
-            if let Some(mark) = data.get("p").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
+            if let Some(mark) = data
+                .get("p")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+            {
                 state.mark_price = mark;
             }
-            if let Some(rate) = data.get("r").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
+            if let Some(rate) = data
+                .get("r")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+            {
                 state.funding_rate = rate;
             }
         }
@@ -267,7 +287,8 @@ mod tests {
     #[test]
     fn test_parse_depth_update() {
         let mut state = BinanceFuturesState::default();
-        let msg = r#"{"data":{"e":"depthUpdate","b":[["95000.00","1.5"]],"a":[["95100.00","2.0"]]}}"#;
+        let msg =
+            r#"{"data":{"e":"depthUpdate","b":[["95000.00","1.5"]],"a":[["95100.00","2.0"]]}}"#;
         parse_binance_futures_message(msg, &mut state);
         assert!((state.best_bid - 95000.0).abs() < 0.01);
         assert!((state.best_ask - 95100.0).abs() < 0.01);

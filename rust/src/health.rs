@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -50,10 +50,7 @@ struct ReadinessResult {
 
 /// Readiness probe — checks all critical dependencies.
 async fn health_ready(State(st): State<HealthState>) -> (StatusCode, Json<ReadinessResult>) {
-    let db_ok = sqlx::query("SELECT 1")
-        .fetch_one(&st.pool)
-        .await
-        .is_ok();
+    let db_ok = sqlx::query("SELECT 1").fetch_one(&st.pool).await.is_ok();
 
     let redis_ok = fred::interfaces::ClientLike::ping::<String>(&st.redis, None)
         .await
@@ -85,7 +82,10 @@ async fn health_ready(State(st): State<HealthState>) -> (StatusCode, Json<Readin
 /// Prometheus metrics scrape endpoint.
 async fn metrics_endpoint(State(st): State<HealthState>) -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         st.prometheus_handle.render(),
     )
 }

@@ -102,10 +102,7 @@ impl TradeTape {
 
     /// Most recent trade for a specific ticker.
     pub fn last_trade(&self, ticker: &str) -> Option<&TradeRecord> {
-        self.trades
-            .iter()
-            .rev()
-            .find(|t| t.ticker == ticker)
+        self.trades.iter().rev().find(|t| t.ticker == ticker)
     }
 
     /// Number of trades currently stored.

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from datetime import date, timedelta, timezone, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import asyncpg
 import structlog
@@ -38,9 +38,7 @@ class CalibrationDaemon:
 
     async def run(self) -> None:
         """Initialize connections and run calibration loop."""
-        self.pool = await asyncpg.create_pool(
-            self.settings.database_url, min_size=2, max_size=5
-        )
+        self.pool = await asyncpg.create_pool(self.settings.database_url, min_size=2, max_size=5)
         logger.info("calibrator_started")
 
         try:
@@ -199,12 +197,8 @@ class CalibrationDaemon:
                   AND s.created_at <= $2
                 GROUP BY s.signal_type
                 """,
-                datetime.combine(period_start, datetime.min.time()).replace(
-                    tzinfo=timezone.utc
-                ),
-                datetime.combine(today, datetime.max.time()).replace(
-                    tzinfo=timezone.utc
-                ),
+                datetime.combine(period_start, datetime.min.time()).replace(tzinfo=UTC),
+                datetime.combine(today, datetime.max.time()).replace(tzinfo=UTC),
             )
 
             for row in rows:
@@ -346,8 +340,7 @@ class CalibrationDaemon:
             if recent > baseline + 0.03:
                 await self._send_discord_alert(
                     webhook_url,
-                    f"Model drift: {strategy} 7d Brier {recent:.3f} "
-                    f"vs 30d baseline {baseline:.3f}",
+                    f"Model drift: {strategy} 7d Brier {recent:.3f} vs 30d baseline {baseline:.3f}",
                 )
                 logger.warning(
                     "drift_detected",
@@ -401,7 +394,7 @@ class CalibrationDaemon:
 
     async def maybe_run_source_attribution(self) -> None:
         """Run source attribution once per month on the 1st."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         current_month = now.year * 12 + now.month
 
         if self._last_attribution_month == current_month:
@@ -417,15 +410,11 @@ class CalibrationDaemon:
             engine = ReplayEngine(self.pool)
 
             # Attribute over the previous month
-            end = datetime.combine(
-                now.date(), datetime.min.time()
-            ).replace(tzinfo=timezone.utc)
+            end = datetime.combine(now.date(), datetime.min.time()).replace(tzinfo=UTC)
             start = end - timedelta(days=30)
 
             for signal_type in ("weather", "crypto"):
-                attributions = await engine.run_full_attribution(
-                    start, end, signal_type
-                )
+                attributions = await engine.run_full_attribution(start, end, signal_type)
                 if not attributions:
                     continue
 
@@ -448,7 +437,7 @@ class CalibrationDaemon:
                                 webhook_url,
                                 f"Source '{attr.source_name}' has negative lift "
                                 f"for {signal_type}: Brier delta {attr.brier_delta:.4f}, "
-                                f"PnL delta ${attr.pnl_delta/100:.2f}",
+                                f"PnL delta ${attr.pnl_delta / 100:.2f}",
                             )
 
             self._last_attribution_month = current_month
@@ -465,7 +454,7 @@ class CalibrationDaemon:
         Sweeps both weather and crypto strategies, storing results in
         backtest_runs. Job 4 then picks up any improvements automatically.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         today = now.date()
 
         # Only run once per day, after 06:00 UTC (after overnight settlements)
@@ -507,7 +496,9 @@ class CalibrationDaemon:
             # Crypto threshold sweep (fast — filters existing signals)
             try:
                 crypto_results = await sweep.sweep_crypto(
-                    start, end, max_combos=100,
+                    start,
+                    end,
+                    max_combos=100,
                     description="daily_auto_sweep",
                 )
                 logger.info(
@@ -524,7 +515,9 @@ class CalibrationDaemon:
             # Weather sweep (slower — re-evaluates FV; limit combos)
             try:
                 weather_results = await sweep.sweep_weather(
-                    start, end, max_combos=50,
+                    start,
+                    end,
+                    max_combos=50,
                     description="daily_auto_sweep",
                 )
                 logger.info(
@@ -551,7 +544,7 @@ class CalibrationDaemon:
         """Sleep for the given duration, returning early if shutdown is signalled."""
         try:
             await asyncio.wait_for(self._shutdown.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     def shutdown(self) -> None:

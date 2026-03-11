@@ -49,9 +49,7 @@ def compute_binary_probability(
     T = minutes_remaining / _MINUTES_PER_YEAR
 
     sqrt_T = math.sqrt(T)
-    d2 = (
-        math.log(spot / strike) + (risk_free_rate - 0.5 * sigma_annual**2) * T
-    ) / (sigma_annual * sqrt_T)
+    d2 = (math.log(spot / strike) + (risk_free_rate - 0.5 * sigma_annual**2) * T) / (sigma_annual * sqrt_T)
 
     return fast_norm_cdf(d2)
 
@@ -64,6 +62,4 @@ def compute_binary_put_probability(
     risk_free_rate: float = 0.05,
 ) -> float:
     """Probability that spot < strike at settlement (binary put)."""
-    return 1.0 - compute_binary_probability(
-        spot, strike, minutes_remaining, sigma_annual, risk_free_rate
-    )
+    return 1.0 - compute_binary_probability(spot, strike, minutes_remaining, sigma_annual, risk_free_rate)

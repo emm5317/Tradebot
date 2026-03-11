@@ -121,8 +121,10 @@ impl CryptoState {
     /// Create with explicit RTI config (from environment).
     pub fn with_config(rti_config: RtiConfig) -> Self {
         let (notify, _) = watch::channel(0u64);
-        let mut inner = CryptoStateInner::default();
-        inner.rti_config = rti_config;
+        let inner = CryptoStateInner {
+            rti_config,
+            ..Default::default()
+        };
         Self {
             inner: RwLock::new(inner),
             notify,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import structlog
@@ -70,9 +70,7 @@ async def fetch_observation(
                 )
                 await asyncio.sleep(delay)
     else:
-        raise ConnectionError(
-            f"Failed to fetch observation for {station} after 3 attempts"
-        ) from last_exc
+        raise ConnectionError(f"Failed to fetch observation for {station} after 3 attempts") from last_exc
 
     data = resp.json()
 
@@ -84,11 +82,11 @@ async def fetch_observation(
     # Parse observation timestamp
     utc_valid = ob.get("utc_valid")
     if utc_valid:
-        observed_at = datetime.fromisoformat(utc_valid).replace(tzinfo=timezone.utc)
+        observed_at = datetime.fromisoformat(utc_valid).replace(tzinfo=UTC)
     else:
-        observed_at = datetime.now(timezone.utc)
+        observed_at = datetime.now(UTC)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     staleness = (now - observed_at).total_seconds()
 
     return ASOSObservation(
@@ -115,21 +113,16 @@ async def fetch_all_stations(
     and omitted from the result rather than failing the entire batch.
     """
     transport = httpx.AsyncHTTPTransport(retries=0)  # we handle retries ourselves
-    async with httpx.AsyncClient(
-        transport=transport, timeout=httpx.Timeout(15.0)
-    ) as client:
-        tasks = {
-            station: fetch_observation(
-                client, station, mesonet_base_url=mesonet_base_url
-            )
-            for station in stations
-        }
+    async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(15.0)) as client:
+        tasks = {station: fetch_observation(client, station, mesonet_base_url=mesonet_base_url) for station in stations}
         gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
         results: dict[str, ASOSObservation] = {}
         for station, result in zip(tasks.keys(), gathered):
             if isinstance(result, Exception):
                 logger.exception(
-                    "mesonet_station_failed", station=station, error=str(result),
+                    "mesonet_station_failed",
+                    station=station,
+                    error=str(result),
                 )
             else:
                 results[station] = result

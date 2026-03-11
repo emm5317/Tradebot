@@ -186,8 +186,12 @@ fn compute_microstructure_adj(
         0.0
     };
 
-    let total = (trade_imbalance + spread_regime + depth_imbalance
-        + vwap_signal + momentum_signal + volume_surge_signal)
+    let total = (trade_imbalance
+        + spread_regime
+        + depth_imbalance
+        + vwap_signal
+        + momentum_signal
+        + volume_surge_signal)
         .clamp(-0.06, 0.06);
 
     MicrostructureAdj {
@@ -225,6 +229,7 @@ fn contract_phase(minutes_remaining: f64, min_minutes: f64, max_minutes: f64) ->
 ///
 /// Subscribes to CryptoState changes and evaluates all active crypto contracts
 /// on every exchange price update.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: Arc<Config>,
     crypto_state: Arc<CryptoState>,
@@ -449,7 +454,8 @@ async fn evaluate_entry(
         .and_then(|d| d.to_f64())
         .unwrap_or_else(|| {
             // Fallback: compute from ticker ToB, or use conservative default
-            orderbooks.ticker_tob(&contract.ticker)
+            orderbooks
+                .ticker_tob(&contract.ticker)
                 .and_then(|tob| {
                     let bid = tob.yes_bid? as f64 / 100.0;
                     let ask = tob.yes_ask? as f64 / 100.0;
@@ -468,9 +474,7 @@ async fn evaluate_entry(
     } else {
         raw_spread
     };
-    let order_imbalance = orderbooks
-        .order_imbalance(&contract.ticker)
-        .unwrap_or(0.5);
+    let order_imbalance = orderbooks.order_imbalance(&contract.ticker).unwrap_or(0.5);
 
     // 2. Compute fair value
     // Read microstructure signals early — directional model needs them for FV
@@ -530,7 +534,9 @@ async fn evaluate_entry(
     let (direction, raw_edge) = crypto_fv::determine_direction(fv.probability, mid_price);
 
     // 4a. Guard: ATM directional no-opinion — N(d2) at ATM is ~0.50 by necessity, not signal
-    if contract.directional && (fv.probability - 0.50).abs() < config.crypto_directional_min_conviction {
+    if contract.directional
+        && (fv.probability - 0.50).abs() < config.crypto_directional_min_conviction
+    {
         debug!(
             ticker = %contract.ticker,
             model_prob = %format!("{:.4}", fv.probability),
@@ -605,9 +611,14 @@ async fn evaluate_entry(
     } else {
         let tape = trade_tape.read_or_recover();
         compute_microstructure_adj(
-            &contract.ticker, direction, order_imbalance,
-            mid_price, spread, &tape,
-            price_momentum, volume_surge,
+            &contract.ticker,
+            direction,
+            order_imbalance,
+            mid_price,
+            spread,
+            &tape,
+            price_momentum,
+            volume_surge,
         )
     };
     let adjusted_edge = effective_edge + micro.total;
@@ -845,11 +856,13 @@ async fn evaluate_entry(
         crate::metrics_registry::EVAL_TOTAL,
         "signal_type" => "crypto",
         "outcome" => "signal"
-    ).increment(1);
+    )
+    .increment(1);
     metrics::histogram!(
         crate::metrics_registry::ORDER_LATENCY,
         "signal_type" => "crypto"
-    ).record(eval_start.elapsed().as_secs_f64());
+    )
+    .record(eval_start.elapsed().as_secs_f64());
 
     // Decision log: successful signal
     decision_writer.send(DecisionEntry {
@@ -923,7 +936,8 @@ async fn evaluate_exit(
         .spread(&contract.ticker)
         .and_then(|d| d.to_f64())
         .unwrap_or_else(|| {
-            orderbooks.ticker_tob(&contract.ticker)
+            orderbooks
+                .ticker_tob(&contract.ticker)
                 .and_then(|tob| {
                     let bid = tob.yes_bid? as f64 / 100.0;
                     let ask = tob.yes_ask? as f64 / 100.0;
@@ -951,8 +965,13 @@ async fn evaluate_exit(
         let dir_sign = if price_momentum >= 0.0 { 1.0 } else { -1.0 };
         let surge_aligned = volume_surge && (tape_data.0 * dir_sign) > 0.0;
         crypto_fv::compute_directional_fair_value(
-            snap, minutes_remaining, price_momentum,
-            tape_data.0, tape_data.1, order_imbalance, surge_aligned,
+            snap,
+            minutes_remaining,
+            price_momentum,
+            tape_data.0,
+            tape_data.1,
+            order_imbalance,
+            surge_aligned,
         )
     } else {
         crypto_fv::compute_crypto_fair_value(snap, contract.strike, minutes_remaining)
@@ -969,11 +988,7 @@ async fn evaluate_exit(
         return; // Edge hasn't flipped enough to exit
     }
 
-    let exit_direction = if held_direction == "yes" {
-        "no"
-    } else {
-        "yes"
-    };
+    let exit_direction = if held_direction == "yes" { "no" } else { "yes" };
 
     info!(
         ticker = %contract.ticker,
@@ -1022,10 +1037,12 @@ async fn read_ticker_signals(redis: &fred::clients::Client, ticker: &str) -> (f6
     match result {
         Ok(Some(json_str)) => {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                let momentum = v.get("price_momentum")
+                let momentum = v
+                    .get("price_momentum")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0);
-                let surge = v.get("volume_surge")
+                let surge = v
+                    .get("volume_surge")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 (momentum, surge)
@@ -1178,7 +1195,10 @@ mod tests {
         let tape = empty_tape();
         // Positive momentum + yes direction = positive signal
         let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, 0.5, false);
-        assert!(adj.momentum_signal > 0.0, "momentum should be positive when aligned");
+        assert!(
+            adj.momentum_signal > 0.0,
+            "momentum should be positive when aligned"
+        );
     }
 
     #[test]
@@ -1186,7 +1206,10 @@ mod tests {
         let tape = empty_tape();
         // Negative momentum + yes direction = negative signal
         let adj = compute_microstructure_adj("T", "yes", 0.5, 0.5, 0.05, &tape, -0.5, false);
-        assert!(adj.momentum_signal < 0.0, "momentum should be negative when opposed");
+        assert!(
+            adj.momentum_signal < 0.0,
+            "momentum should be negative when opposed"
+        );
     }
 
     #[test]
@@ -1240,8 +1263,14 @@ mod tests {
         }
 
         let slope = tracker.trend("TICKER", 30).unwrap();
-        assert!(slope > 0.001, "growing edge should have positive slope > 0.001, got {slope}");
-        assert!(tracker.should_wait("TICKER"), "should wait when edge is growing fast");
+        assert!(
+            slope > 0.001,
+            "growing edge should have positive slope > 0.001, got {slope}"
+        );
+        assert!(
+            tracker.should_wait("TICKER"),
+            "should wait when edge is growing fast"
+        );
     }
 
     #[test]
@@ -1255,8 +1284,14 @@ mod tests {
         }
 
         let slope = tracker.trend("TICKER", 30).unwrap();
-        assert!(slope < 0.0, "shrinking edge should have negative slope, got {slope}");
-        assert!(!tracker.should_wait("TICKER"), "should NOT wait when edge is shrinking");
+        assert!(
+            slope < 0.0,
+            "shrinking edge should have negative slope, got {slope}"
+        );
+        assert!(
+            !tracker.should_wait("TICKER"),
+            "should NOT wait when edge is shrinking"
+        );
     }
 
     #[test]
@@ -1270,8 +1305,14 @@ mod tests {
         }
 
         let slope = tracker.trend("TICKER", 30).unwrap();
-        assert!(slope.abs() < 0.001, "stable edge should have ~0 slope, got {slope}");
-        assert!(!tracker.should_wait("TICKER"), "should NOT wait when edge is stable");
+        assert!(
+            slope.abs() < 0.001,
+            "stable edge should have ~0 slope, got {slope}"
+        );
+        assert!(
+            !tracker.should_wait("TICKER"),
+            "should NOT wait when edge is stable"
+        );
     }
 
     #[test]
@@ -1281,11 +1322,17 @@ mod tests {
 
         // Model says 0.50, market says 0.99 → raw_edge = 0.49 > 0.25 → REJECT
         let (_, raw_edge) = crypto_fv::determine_direction(0.50, 0.99);
-        assert!(raw_edge > threshold, "0.49 edge should exceed 0.25 threshold");
+        assert!(
+            raw_edge > threshold,
+            "0.49 edge should exceed 0.25 threshold"
+        );
 
         // Model says 0.60, market says 0.55 → raw_edge = 0.05 < 0.25 → PASS
         let (_, raw_edge) = crypto_fv::determine_direction(0.60, 0.55);
-        assert!(raw_edge < threshold, "0.05 edge should be below 0.25 threshold");
+        assert!(
+            raw_edge < threshold,
+            "0.05 edge should be below 0.25 threshold"
+        );
 
         // Model says 0.30, market says 0.55 → raw_edge = 0.25, at boundary → PASS (not >)
         let (_, raw_edge) = crypto_fv::determine_direction(0.30, 0.55);
@@ -1315,15 +1362,33 @@ mod tests {
         // For directional contracts, only spread_regime should apply
         // (other components are already in the directional FV model)
         let spread = 0.03; // tight → bonus 0.01
-        let spread_regime = if spread < 0.04 { 0.01 } else if spread > 0.10 { -0.02 } else { 0.0 };
+        let spread_regime = if spread < 0.04 {
+            0.01
+        } else if spread > 0.10 {
+            -0.02
+        } else {
+            0.0
+        };
         assert_eq!(spread_regime, 0.01);
 
         let spread = 0.15; // wide → penalty -0.02
-        let spread_regime = if spread < 0.04 { 0.01 } else if spread > 0.10 { -0.02 } else { 0.0 };
+        let spread_regime = if spread < 0.04 {
+            0.01
+        } else if spread > 0.10 {
+            -0.02
+        } else {
+            0.0
+        };
         assert_eq!(spread_regime, -0.02);
 
         let spread = 0.06; // normal → 0
-        let spread_regime = if spread < 0.04 { 0.01 } else if spread > 0.10 { -0.02 } else { 0.0 };
+        let spread_regime = if spread < 0.04 {
+            0.01
+        } else if spread > 0.10 {
+            -0.02
+        } else {
+            0.0
+        };
         assert_eq!(spread_regime, 0.0);
     }
 
@@ -1344,7 +1409,10 @@ mod tests {
         // Verify the negative spread guard logic: negative values should be clamped to 0.10
         let raw_spread = -0.36;
         let spread = if raw_spread < 0.0 { 0.10 } else { raw_spread };
-        assert_eq!(spread, 0.10, "negative spread should be replaced with 0.10 default");
+        assert_eq!(
+            spread, 0.10,
+            "negative spread should be replaced with 0.10 default"
+        );
 
         // Zero and positive should pass through
         let raw_spread = 0.05;
@@ -1361,12 +1429,18 @@ mod tests {
         // YES direction: fill_price=0.85 → win=0.15, lose=0.85 → ratio=5.67 > 4.0 → REJECT
         let fill_price = 0.85;
         let (win, lose) = (1.0 - fill_price, fill_price);
-        assert!(lose > 4.0 * win, "0.85 YES fill should fail risk/reward: win={win}, lose={lose}");
+        assert!(
+            lose > 4.0 * win,
+            "0.85 YES fill should fail risk/reward: win={win}, lose={lose}"
+        );
 
         // NO direction: fill_price=0.15 → win=0.15, lose=0.85 → ratio=5.67 > 4.0 → REJECT
         let fill_price = 0.15;
         let (win, lose) = (fill_price, 1.0 - fill_price);
-        assert!(lose > 4.0 * win, "0.15 NO fill should fail risk/reward: win={win}, lose={lose}");
+        assert!(
+            lose > 4.0 * win,
+            "0.15 NO fill should fail risk/reward: win={win}, lose={lose}"
+        );
 
         // YES direction: fill_price=0.50 → win=0.50, lose=0.50 → ratio=1.0 → PASS
         let fill_price = 0.50;

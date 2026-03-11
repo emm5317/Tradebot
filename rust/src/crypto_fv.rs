@@ -216,7 +216,7 @@ pub fn compute_effective_edge(raw_edge: f64, spread: f64) -> f64 {
 /// Kelly criterion for binary outcome.
 pub fn compute_kelly(model_prob: f64, fill_price: f64, direction: &str) -> f64 {
     // Refuse to size trades at extreme prices (terrible risk/reward)
-    if fill_price < 0.03 || fill_price > 0.97 {
+    if !(0.03..=0.97).contains(&fill_price) {
         return 0.0;
     }
 
@@ -259,12 +259,7 @@ fn estimate_volatility(state: &CryptoStateInner) -> f64 {
 /// 3. **Within RTI window (≤60s):** Levy approximation for arithmetic average options.
 ///    The CFB RTI is a 60-second TWAP — the variance of a TWAP over interval τ
 ///    is σ²τ/3 (vs σ²τ for point-in-time), reducing tail risk near expiry.
-fn compute_settlement_probability(
-    spot: f64,
-    strike: f64,
-    seconds_remaining: f64,
-    vol: f64,
-) -> f64 {
+fn compute_settlement_probability(spot: f64, strike: f64, seconds_remaining: f64, vol: f64) -> f64 {
     if seconds_remaining <= 0.01 {
         // Expired — deterministic
         return if spot >= strike { 1.0 } else { 0.0 };
@@ -302,8 +297,7 @@ fn standard_binary_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64
         return if spot >= strike { 1.0 } else { 0.0 };
     }
 
-    let d2 = ((spot / strike).ln() + (RISK_FREE_RATE - 0.5 * vol * vol) * t)
-        / (vol * t.sqrt());
+    let d2 = ((spot / strike).ln() + (RISK_FREE_RATE - 0.5 * vol * vol) * t) / (vol * t.sqrt());
     norm_cdf(d2)
 }
 
@@ -354,8 +348,7 @@ fn levy_averaging_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64)
 
     // d2 with Levy-adjusted volatility
     // Drift adjustment: (r - σ²/6) instead of (r - σ²/2) for the average
-    let d2 = ((spot / k_eff).ln() + (RISK_FREE_RATE - vol * vol / 6.0) * tau)
-        / (vol_avg);
+    let d2 = ((spot / k_eff).ln() + (RISK_FREE_RATE - vol * vol / 6.0) * tau) / (vol_avg);
     norm_cdf(d2)
 }
 
@@ -376,11 +369,7 @@ fn erfc(x: f64) -> f64 {
             + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
     let result = poly * (-x * x).exp();
 
-    if sign < 0.0 {
-        2.0 - result
-    } else {
-        result
-    }
+    if sign < 0.0 { 2.0 - result } else { result }
 }
 
 #[cfg(test)]
@@ -477,7 +466,10 @@ mod tests {
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
 
         // Contango should push probability slightly higher
-        assert!(fv.basis_signal > 0.0, "Contango should produce positive basis signal");
+        assert!(
+            fv.basis_signal > 0.0,
+            "Contango should produce positive basis signal"
+        );
     }
 
     #[test]
@@ -489,9 +481,16 @@ mod tests {
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
 
-        assert!(fv.funding_signal > 0.0, "Positive funding should produce positive signal");
+        assert!(
+            fv.funding_signal > 0.0,
+            "Positive funding should produce positive signal"
+        );
         // tanh mapping: 0.001 * 4000 = 4.0, tanh(4.0) ≈ 0.9993 → 0.03 * 0.9993 ≈ 0.030
-        assert!(fv.funding_signal < 0.031, "Funding signal should be <= 0.03, got {}", fv.funding_signal);
+        assert!(
+            fv.funding_signal < 0.031,
+            "Funding signal should be <= 0.03, got {}",
+            fv.funding_signal
+        );
     }
 
     #[test]
@@ -512,7 +511,8 @@ mod tests {
         assert!(
             fv2.funding_signal > fv1.funding_signal * 2.0,
             "Funding signal should show gradient: small={}, moderate={}",
-            fv1.funding_signal, fv2.funding_signal
+            fv1.funding_signal,
+            fv2.funding_signal
         );
     }
 
@@ -522,7 +522,11 @@ mod tests {
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 95000.0, 10.0);
         // No data = base 0.40, no feeds, no RTI reliable bonus = 0.40
-        assert!((fv.confidence - 0.40).abs() < 0.01, "No data = 0.40 confidence, got {}", fv.confidence);
+        assert!(
+            (fv.confidence - 0.40).abs() < 0.01,
+            "No data = 0.40 confidence, got {}",
+            fv.confidence
+        );
 
         cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
         cs.update_binance_spot(95000.0, None, None, 0, 10.0);
@@ -613,7 +617,8 @@ mod tests {
         assert!(
             (fv_far.probability - fv_near.probability).abs() > 0.001,
             "Averaging model should differ from standard: far={}, near={}",
-            fv_far.probability, fv_near.probability
+            fv_far.probability,
+            fv_near.probability
         );
     }
 
@@ -634,7 +639,8 @@ mod tests {
         assert!(
             (p_levy - 0.5).abs() > (p_standard - 0.5).abs() * 0.9,
             "Levy should be at least as decisive as standard: levy={}, standard={}",
-            p_levy, p_standard
+            p_levy,
+            p_standard
         );
     }
 
@@ -655,7 +661,8 @@ mod tests {
         assert!(
             p_half_window > p_full_window,
             "Partial window with spot>strike should increase prob: half={}, full={}",
-            p_half_window, p_full_window
+            p_half_window,
+            p_full_window
         );
     }
 
@@ -674,19 +681,26 @@ mod tests {
 
         // All should be near 0.5 for ATM, but should vary smoothly
         for (label, p) in [
-            ("6min", p_6min), ("5min", p_5min), ("3min", p_3min),
-            ("1min", p_1min), ("30s", p_30s),
+            ("6min", p_6min),
+            ("5min", p_5min),
+            ("3min", p_3min),
+            ("1min", p_1min),
+            ("30s", p_30s),
         ] {
             assert!(
                 (p - 0.5).abs() < 0.15,
-                "ATM prob at {} should be near 0.5, got {}", label, p
+                "ATM prob at {} should be near 0.5, got {}",
+                label,
+                p
             );
         }
 
         // No jumps at transition boundaries (5min and 1min)
         assert!(
             (p_5min - p_6min).abs() < 0.05,
-            "No jump at 5min boundary: p_5min={}, p_6min={}", p_5min, p_6min
+            "No jump at 5min boundary: p_5min={}, p_6min={}",
+            p_5min,
+            p_6min
         );
     }
 
@@ -760,13 +774,19 @@ mod tests {
 
         // Extreme bullish
         let fv = compute_directional_fair_value(&snap, 10.0, 10.0, 10.0, 10.0, 1.0, true);
-        assert!(fv.probability >= 0.35 && fv.probability <= 0.65,
-            "P should be in [0.35, 0.65], got {}", fv.probability);
+        assert!(
+            fv.probability >= 0.35 && fv.probability <= 0.65,
+            "P should be in [0.35, 0.65], got {}",
+            fv.probability
+        );
 
         // Extreme bearish
         let fv = compute_directional_fair_value(&snap, 10.0, -10.0, -10.0, -10.0, 0.0, false);
-        assert!(fv.probability >= 0.35 && fv.probability <= 0.65,
-            "P should be in [0.35, 0.65], got {}", fv.probability);
+        assert!(
+            fv.probability >= 0.35 && fv.probability <= 0.65,
+            "P should be in [0.35, 0.65], got {}",
+            fv.probability
+        );
     }
 
     #[test]
@@ -811,26 +831,57 @@ mod tests {
     #[test]
     fn test_kelly_extreme_fill_price_rejected() {
         // Extreme fill prices should return 0 Kelly (refuse to size)
-        assert_eq!(compute_kelly(0.60, 0.99, "yes"), 0.0, "fill_price=0.99 should be rejected");
-        assert_eq!(compute_kelly(0.40, 0.01, "no"), 0.0, "fill_price=0.01 should be rejected");
-        assert_eq!(compute_kelly(0.60, 0.98, "yes"), 0.0, "fill_price=0.98 should be rejected");
-        assert_eq!(compute_kelly(0.40, 0.02, "no"), 0.0, "fill_price=0.02 should be rejected");
+        assert_eq!(
+            compute_kelly(0.60, 0.99, "yes"),
+            0.0,
+            "fill_price=0.99 should be rejected"
+        );
+        assert_eq!(
+            compute_kelly(0.40, 0.01, "no"),
+            0.0,
+            "fill_price=0.01 should be rejected"
+        );
+        assert_eq!(
+            compute_kelly(0.60, 0.98, "yes"),
+            0.0,
+            "fill_price=0.98 should be rejected"
+        );
+        assert_eq!(
+            compute_kelly(0.40, 0.02, "no"),
+            0.0,
+            "fill_price=0.02 should be rejected"
+        );
         // Just inside bounds should work
-        assert!(compute_kelly(0.60, 0.50, "yes") > 0.0, "fill_price=0.50 should be accepted");
+        assert!(
+            compute_kelly(0.60, 0.50, "yes") > 0.0,
+            "fill_price=0.50 should be accepted"
+        );
     }
 
     #[test]
     fn test_fill_price_clamped() {
         // Extreme spread/mid combos should be clamped to [0.01, 0.99]
         let fp = estimate_fill_price("yes", 0.95, 0.20);
-        assert!(fp <= 0.99, "fill_price should be clamped to 0.99, got {}", fp);
+        assert!(
+            fp <= 0.99,
+            "fill_price should be clamped to 0.99, got {}",
+            fp
+        );
 
         let fp = estimate_fill_price("no", 0.05, 0.20);
-        assert!(fp >= 0.01, "fill_price should be clamped to 0.01, got {}", fp);
+        assert!(
+            fp >= 0.01,
+            "fill_price should be clamped to 0.01, got {}",
+            fp
+        );
 
         // Normal case still works
         let fp = estimate_fill_price("yes", 0.50, 0.04);
-        assert!((fp - 0.52).abs() < 1e-6, "normal case: expected 0.52, got {}", fp);
+        assert!(
+            (fp - 0.52).abs() < 1e-6,
+            "normal case: expected 0.52, got {}",
+            fp
+        );
     }
 
     #[test]
@@ -855,9 +906,15 @@ mod tests {
         let edge_normal = compute_effective_edge(0.10, 0.04);
         let edge_negative = compute_effective_edge(0.10, -0.50);
         // With negative spread, spread_cost = -0.25, effective = 0.10 + 0.25 = 0.35
-        assert!(edge_negative > edge_normal, "negative spread inflates edge (bug this phase fixes)");
+        assert!(
+            edge_negative > edge_normal,
+            "negative spread inflates edge (bug this phase fixes)"
+        );
         // After the evaluator guard, spread is clamped to 0.10, so:
         let edge_guarded = compute_effective_edge(0.10, 0.10);
-        assert!(edge_guarded < edge_normal, "guarded spread (0.10) correctly reduces edge vs tight spread");
+        assert!(
+            edge_guarded < edge_normal,
+            "guarded spread (0.10) correctly reduces edge vs tight spread"
+        );
     }
 }

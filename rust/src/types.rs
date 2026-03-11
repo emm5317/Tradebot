@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 
 /// Signal priority levels for cooldown bypass logic.
 /// Higher priority signals can bypass cooldown in certain conditions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalPriority {
     /// Timer-based evaluation (Python polling loop).
+    #[default]
     Timer = 0,
     /// Re-evaluation of existing position.
     Reeval = 1,
@@ -17,12 +18,6 @@ pub enum SignalPriority {
     NewData = 2,
     /// Lock detection (highest priority).
     LockDetection = 3,
-}
-
-impl Default for SignalPriority {
-    fn default() -> Self {
-        Self::Timer
-    }
 }
 
 /// Signal schema matching the Python SignalSchema.

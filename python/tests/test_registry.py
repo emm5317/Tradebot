@@ -1,8 +1,8 @@
 """Tests for the evaluator plugin registry."""
 
+from signals.crypto import CryptoSignalEvaluator
 from signals.registry import EvaluatorRegistry
 from signals.weather import WeatherSignalEvaluator
-from signals.crypto import CryptoSignalEvaluator
 
 
 def test_register_and_get():

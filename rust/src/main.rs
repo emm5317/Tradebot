@@ -1,3 +1,8 @@
+// Allow dead_code: many pub APIs are used by downstream consumers or future phases
+#![allow(dead_code)]
+// Allow collapsible_if: nested if-let guards are often more readable
+#![allow(clippy::collapsible_if)]
+
 mod clock;
 mod config;
 mod contract_discovery;
@@ -10,10 +15,10 @@ mod decision_log;
 mod discord;
 mod execution;
 mod feed_health;
+mod feeds;
 mod health;
 #[cfg(test)]
 mod integration_tests;
-mod feeds;
 mod kalshi;
 mod kill_switch;
 mod lock_ext;
@@ -90,8 +95,8 @@ async fn main() -> Result<()> {
     tracing::info!(result = row.0, "postgresql connected");
 
     // Connect to Redis with automatic reconnection
-    let redis_config = fred::types::config::Config::from_url(&config.redis_url)
-        .context("Invalid REDIS_URL")?;
+    let redis_config =
+        fred::types::config::Config::from_url(&config.redis_url).context("Invalid REDIS_URL")?;
     let reconnect_policy = fred::types::config::ReconnectPolicy::new_exponential(
         0,    // unlimited retries
         1,    // min delay ms
@@ -104,7 +109,8 @@ async fn main() -> Result<()> {
         .wait_for_connect()
         .await
         .context("Failed to connect to Redis")?;
-    let pong: String = fred::interfaces::ClientLike::ping(&redis, None).await
+    let pong: String = fred::interfaces::ClientLike::ping(&redis, None)
+        .await
         .context("Redis PING failed")?;
     tracing::info!(response = %pong, "redis connected");
 
@@ -118,7 +124,8 @@ async fn main() -> Result<()> {
     let kalshi_auth = kalshi::auth::KalshiAuth::new(
         config.kalshi_api_key.clone(),
         &config.kalshi_private_key_path,
-    ).context("Failed to initialize Kalshi auth")?;
+    )
+    .context("Failed to initialize Kalshi auth")?;
     let kalshi = Arc::new(kalshi::client::KalshiClient::new(
         kalshi_auth,
         config.kalshi_base_url.clone(),
@@ -134,13 +141,11 @@ async fn main() -> Result<()> {
     let ws_auth = kalshi::auth::KalshiAuth::new(
         config.kalshi_api_key.clone(),
         &config.kalshi_private_key_path,
-    ).context("Failed to create WS auth")?;
+    )
+    .context("Failed to create WS auth")?;
 
-    let (ws_feed, ws_sub_handle) = kalshi::websocket::KalshiWsFeed::new(
-        config.kalshi_ws_url.clone(),
-        ws_auth,
-        cancel.clone(),
-    );
+    let (ws_feed, ws_sub_handle) =
+        kalshi::websocket::KalshiWsFeed::new(config.kalshi_ws_url.clone(), ws_auth, cancel.clone());
 
     // Initialize kill switch state (moved up for supervisor)
     let kill_switch = Arc::new(kill_switch::KillSwitchState::new(
@@ -157,11 +162,8 @@ async fn main() -> Result<()> {
             .expect("failed to build discord http client");
         (client, url)
     });
-    let mut supervisor = supervisor::TaskSupervisor::new(
-        cancel.clone(),
-        Arc::clone(&kill_switch),
-        discord_config,
-    );
+    let mut supervisor =
+        supervisor::TaskSupervisor::new(cancel.clone(), Arc::clone(&kill_switch), discord_config);
 
     supervisor.spawn("kalshi_ws", TaskCriticality::Critical, async move {
         ws_feed.run(ws_tx).await;
@@ -171,9 +173,9 @@ async fn main() -> Result<()> {
     let feed_health = Arc::new(feed_health::FeedHealth::new());
 
     // Shared trade tape for orderbook feed + crypto evaluator (Phase 4.3)
-    let trade_tape = Arc::new(std::sync::RwLock::new(
-        kalshi::trade_tape::TradeTape::new(10_000),
-    ));
+    let trade_tape = Arc::new(std::sync::RwLock::new(kalshi::trade_tape::TradeTape::new(
+        10_000,
+    )));
 
     supervisor.spawn("orderbook_feed", TaskCriticality::Critical, {
         let orderbooks = Arc::clone(&orderbooks);
@@ -196,10 +198,8 @@ async fn main() -> Result<()> {
 
     // Spawn crypto exchange feeds (gated by config)
     if config.enable_coinbase {
-        let feed = feeds::coinbase::CoinbaseFeed::new(
-            config.coinbase_ws_url.clone(),
-            cancel.clone(),
-        );
+        let feed =
+            feeds::coinbase::CoinbaseFeed::new(config.coinbase_ws_url.clone(), cancel.clone());
         let redis_clone = redis.clone();
         let cs = Arc::clone(&crypto_state);
         let fh = Arc::clone(&feed_health);
@@ -232,10 +232,7 @@ async fn main() -> Result<()> {
     }
 
     if config.enable_deribit {
-        let feed = feeds::deribit::DeribitFeed::new(
-            config.deribit_ws_url.clone(),
-            cancel.clone(),
-        );
+        let feed = feeds::deribit::DeribitFeed::new(config.deribit_ws_url.clone(), cancel.clone());
         let redis_clone = redis.clone();
         let cs = Arc::clone(&crypto_state);
         let fh = Arc::clone(&feed_health);
@@ -244,7 +241,9 @@ async fn main() -> Result<()> {
     }
 
     // Phase 3: Contract discovery for crypto evaluator (with WS subscription wiring)
-    let contract_discovery = Arc::new(contract_discovery::ContractDiscovery::with_ws_handle(ws_sub_handle));
+    let contract_discovery = Arc::new(contract_discovery::ContractDiscovery::with_ws_handle(
+        ws_sub_handle,
+    ));
     supervisor.spawn("contract_discovery", TaskCriticality::Critical, {
         let cd = Arc::clone(&contract_discovery);
         let pool = pool.clone();
@@ -283,8 +282,10 @@ async fn main() -> Result<()> {
         let cancel = cancel.clone();
         let dw = decision_writer.clone();
         async move {
-            crypto_evaluator::run(config, cs, cd, ob, tt, om, k, ks, fh, pool, redis, nats, cancel, dw)
-                .await;
+            crypto_evaluator::run(
+                config, cs, cd, ob, tt, om, k, ks, fh, pool, redis, nats, cancel, dw,
+            )
+            .await;
         }
     });
 
@@ -342,7 +343,9 @@ async fn main() -> Result<()> {
         let nats = nats.clone();
         let cancel = cancel.clone();
         async move {
-            if let Err(e) = execution::run(&config, nats, pool, kalshi, ks, fh, cs, om, cancel).await {
+            if let Err(e) =
+                execution::run(&config, nats, pool, kalshi, ks, fh, cs, om, cancel).await
+            {
                 tracing::error!(error = %e, "execution engine failed");
             }
         }
@@ -359,7 +362,9 @@ async fn main() -> Result<()> {
     }
 
     // ── Stage 1: Activate kill switch (prevents new orders) ──────────
-    kill_switch.kill_all.store(true, std::sync::atomic::Ordering::Relaxed);
+    kill_switch
+        .kill_all
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     tracing::warn!("kill switch activated — no new orders will be placed");
 
     // ── Stage 2: Signal all loops to stop + drain supervised tasks ───

@@ -1,7 +1,5 @@
 """Tests for signal publisher."""
 
-from datetime import datetime, timezone
-
 from signals.publisher import SignalPublisher
 from signals.types import ModelState, RejectedSignal, SignalSchema
 

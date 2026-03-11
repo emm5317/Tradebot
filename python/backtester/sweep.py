@@ -14,24 +14,21 @@ import argparse
 import asyncio
 import itertools
 import json
-import math
 import os
 import uuid
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import asyncpg
 import structlog
 
 from backtester.costs import FeeModel
-from backtester.metrics import AdvancedMetrics, TradeRecord, compute_advanced_metrics
+from backtester.metrics import TradeRecord, compute_advanced_metrics
 from config import get_settings
 from data.mesonet import ASOSObservation
-from models.physics import StationCalibration, build_climo_table, build_sigma_table
-from models.weather_fv import WeatherFairValue, WeatherState, compute_weather_fair_value
-from signals.types import Contract, OrderbookState
+from models.physics import StationCalibration
+from models.weather_fv import compute_weather_fair_value
 
 logger = structlog.get_logger()
 
@@ -146,22 +143,20 @@ class ParameterSweep:
 
             params["weight_climo"] = round(w_c, 2)
 
-            result = await self._evaluate_weather_params(
-                contracts, params, start, end
-            )
+            result = await self._evaluate_weather_params(contracts, params, start, end)
             results.append(result)
 
             # Store to DB
-            await self._store_run(
-                result, "weather", start, end, description
-            )
+            await self._store_run(result, "weather", start, end, description)
 
             if (i + 1) % 10 == 0:
                 logger.info(
                     "sweep_progress",
                     completed=i + 1,
                     total=len(combos),
-                    best_brier=min(r.brier_score for r in results if r.brier_score > 0) if any(r.brier_score > 0 for r in results) else None,
+                    best_brier=min(r.brier_score for r in results if r.brier_score > 0)
+                    if any(r.brier_score > 0 for r in results)
+                    else None,
                 )
 
         # Sort by Brier score (lower is better)
@@ -229,23 +224,17 @@ class ParameterSweep:
 
             # Validate: single run with best params
             if signal_type == "weather":
-                val_contracts = await self._fetch_settled_contracts(
-                    split.val_start, split.val_end, signal_type
-                )
+                val_contracts = await self._fetch_settled_contracts(split.val_start, split.val_end, signal_type)
                 if not val_contracts:
                     continue
                 val_result = await self._evaluate_weather_params(
                     val_contracts, best_params, split.val_start, split.val_end
                 )
             else:
-                val_signals = await self._fetch_crypto_signals(
-                    split.val_start, split.val_end
-                )
+                val_signals = await self._fetch_crypto_signals(split.val_start, split.val_end)
                 if not val_signals:
                     continue
-                val_result = self._evaluate_crypto_thresholds(
-                    val_signals, best_params
-                )
+                val_result = self._evaluate_crypto_thresholds(val_signals, best_params)
 
             await self._store_run(
                 val_result,
@@ -258,19 +247,21 @@ class ParameterSweep:
                 baseline_run_id=train_results[0].run_id,
             )
 
-            oos_results.append({
-                "split": f"{split.val_start}→{split.val_end}",
-                "train_brier": train_results[0].brier_score,
-                "val_brier": val_result.brier_score,
-                "train_pnl": train_results[0].simulated_pnl_cents,
-                "val_pnl": val_result.simulated_pnl_cents,
-                "params": best_params,
-                "overfit_ratio": (
-                    val_result.brier_score / train_results[0].brier_score
-                    if train_results[0].brier_score > 0
-                    else None
-                ),
-            })
+            oos_results.append(
+                {
+                    "split": f"{split.val_start}→{split.val_end}",
+                    "train_brier": train_results[0].brier_score,
+                    "val_brier": val_result.brier_score,
+                    "train_pnl": train_results[0].simulated_pnl_cents,
+                    "val_pnl": val_result.simulated_pnl_cents,
+                    "params": best_params,
+                    "overfit_ratio": (
+                        val_result.brier_score / train_results[0].brier_score
+                        if train_results[0].brier_score > 0
+                        else None
+                    ),
+                }
+            )
 
             logger.info(
                 "walk_forward_split_done",
@@ -325,9 +316,9 @@ class ParameterSweep:
                     "sweep_progress",
                     completed=i + 1,
                     total=len(combos),
-                    best_brier=min(
-                        r.brier_score for r in results if r.brier_score > 0
-                    ) if any(r.brier_score > 0 for r in results) else None,
+                    best_brier=min(r.brier_score for r in results if r.brier_score > 0)
+                    if any(r.brier_score > 0 for r in results)
+                    else None,
                 )
 
         results.sort(key=lambda r: r.brier_score if r.brier_score > 0 else float("inf"))
@@ -421,16 +412,20 @@ class ParameterSweep:
             edge_sum += abs(edge)
             result.total_signals += 1
 
-            trade_records.append(TradeRecord(
-                settlement_date=sig["settlement_time"].date() if sig.get("settlement_time") else sig["created_at"].date(),
-                direction=direction,
-                model_prob=model_prob,
-                market_price=market_price,
-                edge=abs(edge),
-                settled_yes=settled_yes,
-                pnl_cents=sig_pnl,
-                fee_cents=fee,
-            ))
+            trade_records.append(
+                TradeRecord(
+                    settlement_date=sig["settlement_time"].date()
+                    if sig.get("settlement_time")
+                    else sig["created_at"].date(),
+                    direction=direction,
+                    model_prob=model_prob,
+                    market_price=market_price,
+                    edge=abs(edge),
+                    settled_yes=settled_yes,
+                    pnl_cents=sig_pnl,
+                    fee_cents=fee,
+                )
+            )
 
         result.total_contracts = len(tickers_seen) if not self.multi_signal else brier_count
 
@@ -480,8 +475,8 @@ class ParameterSweep:
                   AND s.created_at <= $2
                 ORDER BY s.created_at
                 """,
-                datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc),
-                datetime.combine(end, datetime.max.time(), tzinfo=timezone.utc),
+                datetime.combine(start, datetime.min.time(), tzinfo=UTC),
+                datetime.combine(end, datetime.max.time(), tzinfo=UTC),
             )
         return [dict(r) for r in rows]
 
@@ -535,9 +530,7 @@ class ParameterSweep:
 
         async def eval_with_limit(params: dict) -> SweepResult:
             async with sem:
-                return await self._evaluate_weather_params(
-                    contracts, params, start, end
-                )
+                return await self._evaluate_weather_params(contracts, params, start, end)
 
         tasks = [eval_with_limit(p) for p in valid_combos]
         results = await asyncio.gather(*tasks)
@@ -592,9 +585,7 @@ class ParameterSweep:
         losses = 0
         edge_sum = 0.0
         trade_records: list[TradeRecord] = []
-        buckets: dict[str, list[tuple[float, bool]]] = {
-            f"{i*10}-{(i+1)*10}%": [] for i in range(10)
-        }
+        buckets: dict[str, list[tuple[float, bool]]] = {f"{i * 10}-{(i + 1) * 10}%": [] for i in range(10)}
 
         for contract in contracts:
             settled_yes = contract["settled_yes"]
@@ -603,31 +594,23 @@ class ParameterSweep:
 
             result.total_contracts += 1
 
-            snapshots = await self._fetch_snapshots(
-                contract["ticker"], contract["settlement_time"]
-            )
+            snapshots = await self._fetch_snapshots(contract["ticker"], contract["settlement_time"])
             if not snapshots:
                 continue
 
             contract_type = (
-                "weather_max" if "high" in (contract["title"] or "").lower()
-                or "above" in (contract["title"] or "").lower()
+                "weather_max"
+                if "high" in (contract["title"] or "").lower() or "above" in (contract["title"] or "").lower()
                 else "weather_min"
             )
 
             for snap in snapshots:
-                obs = await self._fetch_nearest_observation(
-                    contract["station"] or "KORD", snap["captured_at"]
-                )
+                obs = await self._fetch_nearest_observation(contract["station"] or "KORD", snap["captured_at"])
                 if obs is None or obs.temperature_f is None:
                     continue
 
-                metar = await self._fetch_nearest_metar(
-                    contract["station"] or "KORD", snap["captured_at"]
-                )
-                hrrr = await self._fetch_hrrr_forecasts(
-                    contract["station"] or "KORD", snap["captured_at"]
-                )
+                metar = await self._fetch_nearest_metar(contract["station"] or "KORD", snap["captured_at"])
+                hrrr = await self._fetch_hrrr_forecasts(contract["station"] or "KORD", snap["captured_at"])
 
                 minutes_remaining = max(
                     0.0,
@@ -683,20 +666,22 @@ class ParameterSweep:
                 edge_sum += abs_edge
                 result.total_signals += 1
 
-                trade_records.append(TradeRecord(
-                    settlement_date=contract["settlement_time"].date(),
-                    direction=direction,
-                    model_prob=fv.probability,
-                    market_price=market_price,
-                    edge=abs_edge,
-                    settled_yes=settled_yes,
-                    pnl_cents=sig_pnl,
-                    fee_cents=fee,
-                ))
+                trade_records.append(
+                    TradeRecord(
+                        settlement_date=contract["settlement_time"].date(),
+                        direction=direction,
+                        model_prob=fv.probability,
+                        market_price=market_price,
+                        edge=abs_edge,
+                        settled_yes=settled_yes,
+                        pnl_cents=sig_pnl,
+                        fee_cents=fee,
+                    )
+                )
 
                 # Calibration buckets on directional probability
                 bucket_idx = min(int(p * 10), 9)
-                bucket_key = f"{bucket_idx*10}-{(bucket_idx+1)*10}%"
+                bucket_key = f"{bucket_idx * 10}-{(bucket_idx + 1) * 10}%"
                 buckets[bucket_key].append((p, bool(won)))
 
                 # In default mode, take only first signal per contract
@@ -740,15 +725,8 @@ class ParameterSweep:
 
     # ── Data fetching ────────────────────────────────────────────
 
-    async def _fetch_settled_contracts(
-        self, start: date, end: date, signal_type: str
-    ) -> list[dict]:
+    async def _fetch_settled_contracts(self, start: date, end: date, signal_type: str) -> list[dict]:
         async with self.pool.acquire() as conn:
-            type_filter = (
-                "('temperature', 'weather', 'wind', 'rain', 'snow')"
-                if signal_type == "weather"
-                else "('bitcoin', 'btc', 'crypto')"
-            )
             rows = await conn.fetch(
                 f"""
                 SELECT ticker, title, category, city, station, threshold,
@@ -757,21 +735,21 @@ class ParameterSweep:
                 WHERE settlement_time >= $1
                   AND settlement_time <= $2
                   AND settled_yes IS NOT NULL
-                  AND LOWER(COALESCE(category, '')) SIMILAR TO '%({'|'.join(
-                      ['temperature','weather','wind','rain','snow']
-                      if signal_type == 'weather'
-                      else ['bitcoin','btc','crypto']
-                  )})%'
+                  AND LOWER(COALESCE(category, '')) SIMILAR TO '%({
+                    "|".join(
+                        ["temperature", "weather", "wind", "rain", "snow"]
+                        if signal_type == "weather"
+                        else ["bitcoin", "btc", "crypto"]
+                    )
+                })%'
                 ORDER BY settlement_time
                 """,
-                datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc),
-                datetime.combine(end, datetime.max.time(), tzinfo=timezone.utc),
+                datetime.combine(start, datetime.min.time(), tzinfo=UTC),
+                datetime.combine(end, datetime.max.time(), tzinfo=UTC),
             )
         return [dict(r) for r in rows]
 
-    async def _fetch_snapshots(
-        self, ticker: str, settlement_time: datetime
-    ) -> list[dict]:
+    async def _fetch_snapshots(self, ticker: str, settlement_time: datetime) -> list[dict]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -787,9 +765,7 @@ class ParameterSweep:
             )
         return [dict(r) for r in rows]
 
-    async def _fetch_nearest_observation(
-        self, station: str, at: datetime
-    ) -> ASOSObservation | None:
+    async def _fetch_nearest_observation(self, station: str, at: datetime) -> ASOSObservation | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -821,9 +797,7 @@ class ParameterSweep:
             is_stale=staleness > 300,
         )
 
-    async def _fetch_nearest_metar(
-        self, station: str, at: datetime
-    ) -> dict | None:
+    async def _fetch_nearest_metar(self, station: str, at: datetime) -> dict | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -840,9 +814,7 @@ class ParameterSweep:
             )
         return dict(row) if row else None
 
-    async def _fetch_hrrr_forecasts(
-        self, station: str, at: datetime
-    ) -> list[float] | None:
+    async def _fetch_hrrr_forecasts(self, station: str, at: datetime) -> list[float] | None:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -945,9 +917,8 @@ class ParameterSweep:
 
 # ── Utilities ────────────────────────────────────────────────────
 
-def _generate_combinations(
-    grid: dict[str, list[Any]], max_combos: int
-) -> list[dict[str, Any]]:
+
+def _generate_combinations(grid: dict[str, list[Any]], max_combos: int) -> list[dict[str, Any]]:
     """Generate all parameter combinations, capped at max_combos."""
     keys = list(grid.keys())
     values = list(grid.values())
@@ -962,9 +933,7 @@ def _generate_combinations(
     return combos
 
 
-def _generate_walk_forward_splits(
-    start: date, end: date, window_days: int
-) -> list[WalkForwardSplit]:
+def _generate_walk_forward_splits(start: date, end: date, window_days: int) -> list[WalkForwardSplit]:
     """Generate non-overlapping train/validation splits."""
     splits = []
     current = start
@@ -975,12 +944,14 @@ def _generate_walk_forward_splits(
         val_start = current + timedelta(days=window_days)
         val_end = current + timedelta(days=window_days * 2 - 1)
 
-        splits.append(WalkForwardSplit(
-            train_start=train_start,
-            train_end=train_end,
-            val_start=val_start,
-            val_end=val_end,
-        ))
+        splits.append(
+            WalkForwardSplit(
+                train_start=train_start,
+                train_end=train_end,
+                val_start=val_start,
+                val_end=val_end,
+            )
+        )
 
         current += timedelta(days=window_days)
 
@@ -988,6 +959,7 @@ def _generate_walk_forward_splits(
 
 
 # ── Reporting ────────────────────────────────────────────────────
+
 
 async def print_leaderboard(pool: asyncpg.Pool, signal_type: str, top_n: int = 20) -> None:
     """Print top N runs ranked by Brier score."""
@@ -1010,16 +982,16 @@ async def print_leaderboard(pool: asyncpg.Pool, signal_type: str, top_n: int = 2
             top_n,
         )
 
-    print(f"\n{'='*100}")
+    print(f"\n{'=' * 100}")
     print(f"  Top {top_n} {signal_type} backtest runs (by Brier score)")
-    print(f"{'='*100}")
+    print(f"{'=' * 100}")
     print(
         f"  {'Rank':>4}  {'Brier':>7}  {'Acc':>6}  {'PnL':>8}  {'Fees':>6}  "
         f"{'Sharpe':>7}  {'MaxDD':>7}  {'PF':>5}  {'Signals':>7}  Params"
     )
     print(
-        f"  {'-'*4}  {'-'*7}  {'-'*6}  {'-'*8}  {'-'*6}  "
-        f"{'-'*7}  {'-'*7}  {'-'*5}  {'-'*7}  {'-'*30}"
+        f"  {'-' * 4}  {'-' * 7}  {'-' * 6}  {'-' * 8}  {'-' * 6}  "
+        f"{'-' * 7}  {'-' * 7}  {'-' * 5}  {'-' * 7}  {'-' * 30}"
     )
 
     for i, row in enumerate(rows, 1):
@@ -1034,7 +1006,7 @@ async def print_leaderboard(pool: asyncpg.Pool, signal_type: str, top_n: int = 2
 
         print(
             f"  {i:>4}  {row['brier_score']:>7.4f}  {row['accuracy']:>5.1%}  "
-            f"${row['simulated_pnl_cents']/100:>7.2f}  ${fees:>5.2f}  "
+            f"${row['simulated_pnl_cents'] / 100:>7.2f}  ${fees:>5.2f}  "
             f"{sharpe:>7.2f}  ${max_dd:>6.2f}  {pf:>5.2f}  "
             f"{row['total_signals']:>7}  {param_str}{is_wf}{desc}"
         )
@@ -1043,6 +1015,7 @@ async def print_leaderboard(pool: asyncpg.Pool, signal_type: str, top_n: int = 2
 
 
 # ── CLI entry point ──────────────────────────────────────────────
+
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Parameter sweep for model optimization")
@@ -1075,7 +1048,8 @@ async def main() -> None:
         await print_leaderboard(pool, args.type)
     elif args.walk_forward > 0:
         results = await sweep.walk_forward(
-            start, end,
+            start,
+            end,
             window_days=args.walk_forward,
             signal_type=args.type,
             max_combos=args.max_combos,
@@ -1086,18 +1060,15 @@ async def main() -> None:
         if args.type == "weather":
             if args.workers > 0:
                 results = await sweep.sweep_weather_parallel(
-                    start, end,
+                    start,
+                    end,
                     max_combos=args.max_combos,
                     max_workers=args.workers,
                 )
             else:
-                results = await sweep.sweep_weather(
-                    start, end, max_combos=args.max_combos
-                )
+                results = await sweep.sweep_weather(start, end, max_combos=args.max_combos)
         elif args.type == "crypto":
-            results = await sweep.sweep_crypto(
-                start, end, max_combos=args.max_combos
-            )
+            results = await sweep.sweep_crypto(start, end, max_combos=args.max_combos)
         else:
             print(f"Unknown signal type: {args.type}")
             await pool.close()

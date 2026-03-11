@@ -24,10 +24,7 @@ pub struct ClockCheck {
 /// This avoids requiring an NTP client library — HTTP Date headers are
 /// typically accurate to ~1 second.
 pub async fn check_clock_offset() -> ClockCheck {
-    let servers = [
-        "https://www.google.com",
-        "https://www.cloudflare.com",
-    ];
+    let servers = ["https://www.google.com", "https://www.cloudflare.com"];
 
     for url in &servers {
         match measure_offset(url).await {

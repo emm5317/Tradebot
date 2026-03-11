@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
-class SignalDirection(str, Enum):
+class SignalDirection(StrEnum):
     YES = "yes"
     NO = "no"
 
 
-class SignalAction(str, Enum):
+class SignalAction(StrEnum):
     ENTRY = "entry"
     EXIT = "exit"
 
@@ -34,7 +34,7 @@ class SignalSchema(BaseModel):
     spread: float = Field(ge=0.0, default=0.0)
     order_imbalance: float = Field(ge=0.0, le=1.0, default=0.5)
     model_components: dict | None = None
-    published_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    published_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class RejectedSignal(BaseModel):
@@ -50,7 +50,7 @@ class RejectedSignal(BaseModel):
     market_price: float | None = None
     edge: float | None = None
     minutes_remaining: float | None = None
-    evaluated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    evaluated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ModelState(BaseModel):
@@ -71,7 +71,7 @@ class ModelState(BaseModel):
     direction: str | None = None
     rejection_reason: str | None = None
     minutes_remaining: float | None = None
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class OrderbookState(BaseModel):

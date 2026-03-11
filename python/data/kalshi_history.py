@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
@@ -126,11 +126,7 @@ async def _pull_category(
             break
 
         # Filter to relevant category (Kalshi may not support server-side filtering)
-        relevant = [
-            m
-            for m in markets
-            if _matches_category(m, category)
-        ]
+        relevant = [m for m in markets if _matches_category(m, category)]
 
         if relevant:
             await _upsert_contracts(pool, relevant)
@@ -154,13 +150,17 @@ def _matches_category(market: dict, category: str) -> bool:
     ticker = (market.get("ticker") or "").upper()
 
     if category == "weather":
-        return cat == "weather" or any(
-            kw in title for kw in ["temperature", "wind", "rain", "snow", "weather"]
-        ) or ticker.startswith(("KXTEMP", "KXWIND", "KXRAIN", "KXSNOW"))
+        return (
+            cat == "weather"
+            or any(kw in title for kw in ["temperature", "wind", "rain", "snow", "weather"])
+            or ticker.startswith(("KXTEMP", "KXWIND", "KXRAIN", "KXSNOW"))
+        )
     elif category == "crypto":
-        return cat == "crypto" or any(
-            kw in title for kw in ["bitcoin", "btc", "crypto"]
-        ) or ticker.startswith(("KXBTC", "KXETH", "KXCRYPTO"))
+        return (
+            cat == "crypto"
+            or any(kw in title for kw in ["bitcoin", "btc", "crypto"])
+            or ticker.startswith(("KXBTC", "KXETH", "KXCRYPTO"))
+        )
     return cat == category
 
 
@@ -172,18 +172,14 @@ async def _upsert_contracts(pool: asyncpg.Pool, markets: list[dict]) -> None:
             if not ticker:
                 continue
 
-            settlement_time_str = market.get("close_time") or market.get(
-                "expected_expiration_time"
-            )
+            settlement_time_str = market.get("close_time") or market.get("expected_expiration_time")
             if not settlement_time_str:
                 continue
 
             try:
-                settlement_time = datetime.fromisoformat(
-                    settlement_time_str.replace("Z", "+00:00")
-                )
+                settlement_time = datetime.fromisoformat(settlement_time_str.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
-                settlement_time = datetime.now(timezone.utc)
+                settlement_time = datetime.now(UTC)
 
             settled_yes: bool | None = None
             result = market.get("result")
@@ -316,10 +312,7 @@ async def pull_active_contracts(
                     if not markets:
                         break
 
-                    relevant = [
-                        m for m in markets
-                        if any(_matches_category(m, cat) for cat in categories)
-                    ]
+                    relevant = [m for m in markets if any(_matches_category(m, cat) for cat in categories)]
 
                     if relevant:
                         await _upsert_contracts(pool, relevant)
@@ -430,9 +423,7 @@ async def pull_historical_prices(
                     params=params,
                 )
             except httpx.HTTPError as exc:
-                logger.warning(
-                    "price_history_error", ticker=ticker, error=str(exc)
-                )
+                logger.warning("price_history_error", ticker=ticker, error=str(exc))
                 break
 
             if resp.status_code == 429:
@@ -454,7 +445,7 @@ async def pull_historical_prices(
                 try:
                     ts = datetime.fromisoformat(created.replace("Z", "+00:00"))
                 except (ValueError, AttributeError):
-                    ts = datetime.now(timezone.utc)
+                    ts = datetime.now(UTC)
 
                 snapshots.append(
                     MarketSnapshot(
@@ -495,9 +486,7 @@ def _extract_city(market: dict) -> str | None:
         "Houston": "Houston",
     }
     for city in city_map:
-        if city.lower() in subtitle.lower() or city.lower() in market.get(
-            "title", ""
-        ).lower():
+        if city.lower() in subtitle.lower() or city.lower() in market.get("title", "").lower():
             return city_map[city]
     return None
 

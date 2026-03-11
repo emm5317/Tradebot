@@ -57,14 +57,21 @@ mod tests {
     fn test_metric_names_are_valid() {
         // Prometheus metric names must match [a-zA-Z_:][a-zA-Z0-9_:]*
         let names = [
-            EVAL_TOTAL, ORDERS_TOTAL, DECISION_LOG_DROPPED,
-            EVAL_DURATION, ORDER_LATENCY,
-            FEED_HEALTH_SCORE, DECISION_LOG_CHANNEL_USAGE,
-            SUPERVISOR_TASKS_ACTIVE, POSITIONS_OPEN, KILL_SWITCH_ACTIVE,
+            EVAL_TOTAL,
+            ORDERS_TOTAL,
+            DECISION_LOG_DROPPED,
+            EVAL_DURATION,
+            ORDER_LATENCY,
+            FEED_HEALTH_SCORE,
+            DECISION_LOG_CHANNEL_USAGE,
+            SUPERVISOR_TASKS_ACTIVE,
+            POSITIONS_OPEN,
+            KILL_SWITCH_ACTIVE,
         ];
         for name in &names {
             assert!(
-                name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'),
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'),
                 "invalid metric name: {name}"
             );
             assert!(

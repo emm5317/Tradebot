@@ -8,12 +8,12 @@ No API key required.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import structlog
 
-from data.mesonet import ASOSObservation, _safe_float
+from data.mesonet import ASOSObservation
 
 logger = structlog.get_logger()
 
@@ -78,9 +78,7 @@ async def fetch_nws_observation(
                 )
                 await asyncio.sleep(delay)
     else:
-        raise ConnectionError(
-            f"Failed to fetch NWS observation for {station} after 3 attempts"
-        ) from last_exc
+        raise ConnectionError(f"Failed to fetch NWS observation for {station} after 3 attempts") from last_exc
 
     data = resp.json()
     props = data.get("properties", {})
@@ -91,11 +89,11 @@ async def fetch_nws_observation(
     # Parse timestamp
     timestamp_str = props.get("timestamp")
     if timestamp_str:
-        observed_at = datetime.fromisoformat(timestamp_str).replace(tzinfo=timezone.utc)
+        observed_at = datetime.fromisoformat(timestamp_str).replace(tzinfo=UTC)
     else:
-        observed_at = datetime.now(timezone.utc)
+        observed_at = datetime.now(UTC)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     staleness = (now - observed_at).total_seconds()
 
     # Extract and convert units
@@ -125,13 +123,8 @@ async def fetch_all_nws_stations(
     and omitted from the result rather than failing the entire batch.
     """
     transport = httpx.AsyncHTTPTransport(retries=0)
-    async with httpx.AsyncClient(
-        transport=transport, timeout=httpx.Timeout(15.0)
-    ) as client:
-        tasks = {
-            station: fetch_nws_observation(client, station)
-            for station in stations
-        }
+    async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(15.0)) as client:
+        tasks = {station: fetch_nws_observation(client, station) for station in stations}
         results: dict[str, ASOSObservation] = {}
         for station, coro in tasks.items():
             try:

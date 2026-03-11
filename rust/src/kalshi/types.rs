@@ -31,9 +31,9 @@ pub struct Balance {
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderRequest {
     pub ticker: String,
-    pub action: String,       // "buy" or "sell"
-    pub side: String,         // "yes" or "no"
-    pub r#type: String,       // "market" or "limit"
+    pub action: String, // "buy" or "sell"
+    pub side: String,   // "yes" or "no"
+    pub r#type: String, // "market" or "limit"
     pub count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub yes_price: Option<i64>,

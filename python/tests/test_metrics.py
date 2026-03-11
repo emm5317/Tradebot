@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import math
 from datetime import date, timedelta
 
-import pytest
-
-from backtester.metrics import AdvancedMetrics, TradeRecord, compute_advanced_metrics
+from backtester.metrics import TradeRecord, compute_advanced_metrics
 
 
 def _make_trade(
@@ -51,9 +48,9 @@ class TestComputeAdvancedMetrics:
 
     def test_accuracy_with_mixed_trades(self):
         trades = [
-            _make_trade(day_offset=0, settled_yes=True, pnl_cents=10),   # win
-            _make_trade(day_offset=1, settled_yes=False, pnl_cents=-10), # loss
-            _make_trade(day_offset=2, settled_yes=True, pnl_cents=10),   # win
+            _make_trade(day_offset=0, settled_yes=True, pnl_cents=10),  # win
+            _make_trade(day_offset=1, settled_yes=False, pnl_cents=-10),  # loss
+            _make_trade(day_offset=2, settled_yes=True, pnl_cents=10),  # win
         ]
         m = compute_advanced_metrics(trades)
         assert abs(m.accuracy - 2 / 3) < 1e-9
@@ -111,10 +108,7 @@ class TestSharpeAndDrawdown:
 
     def test_sharpe_positive_for_mostly_profits(self):
         """Mostly profitable daily returns → positive Sharpe."""
-        trades = [
-            _make_trade(day_offset=i, pnl_cents=10 + (i % 3) * 5)
-            for i in range(10)
-        ]
+        trades = [_make_trade(day_offset=i, pnl_cents=10 + (i % 3) * 5) for i in range(10)]
         m = compute_advanced_metrics(trades)
         assert m.sharpe_ratio > 0
 
@@ -127,10 +121,10 @@ class TestSharpeAndDrawdown:
     def test_max_drawdown_from_peak(self):
         """Drawdown tracks peak-to-trough decline."""
         trades = [
-            _make_trade(day_offset=0, pnl_cents=100),   # cum: 100 (peak)
-            _make_trade(day_offset=1, pnl_cents=-30),    # cum: 70
-            _make_trade(day_offset=2, pnl_cents=-50),    # cum: 20 → DD = 80
-            _make_trade(day_offset=3, pnl_cents=200),    # cum: 220
+            _make_trade(day_offset=0, pnl_cents=100),  # cum: 100 (peak)
+            _make_trade(day_offset=1, pnl_cents=-30),  # cum: 70
+            _make_trade(day_offset=2, pnl_cents=-50),  # cum: 20 → DD = 80
+            _make_trade(day_offset=3, pnl_cents=200),  # cum: 220
         ]
         m = compute_advanced_metrics(trades)
         assert abs(m.max_drawdown_cents - 80) < 1e-9
@@ -229,9 +223,6 @@ class TestECE:
     def test_miscalibrated_high_ece(self):
         """Systematically wrong predictions → high ECE."""
         # Predict 0.9 but all settle NO
-        trades = [
-            _make_trade(day_offset=i, model_prob=0.9, settled_yes=False, pnl_cents=-10)
-            for i in range(10)
-        ]
+        trades = [_make_trade(day_offset=i, model_prob=0.9, settled_yes=False, pnl_cents=-10) for i in range(10)]
         m = compute_advanced_metrics(trades)
         assert m.expected_calibration_error > 0.5

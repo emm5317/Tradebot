@@ -12,12 +12,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-
-from rules.timezone import STATION_TIMEZONES, compute_day_boundaries
 
 logger = structlog.get_logger()
 
@@ -130,9 +127,7 @@ def parse_ticker(
     series_ticker = _extract_series_ticker(ticker)
 
     # Determine contract type
-    contract_type = _determine_contract_type(
-        ticker, title, category, series_config
-    )
+    contract_type = _determine_contract_type(ticker, title, category, series_config)
     if contract_type is None:
         return None
 
@@ -223,9 +218,7 @@ def _determine_contract_type(
         return "weather_min"
 
     # Weather category but can't determine max/min
-    if cat_lower == "weather" or any(
-        kw in title_lower for kw in ("temperature", "temp", "weather")
-    ):
+    if cat_lower == "weather" or any(kw in title_lower for kw in ("temperature", "temp", "weather")):
         return "weather_max"  # default to max if ambiguous
 
     return None

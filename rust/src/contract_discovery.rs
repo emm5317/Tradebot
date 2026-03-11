@@ -49,7 +49,8 @@ impl ContractDiscovery {
 
     /// Refresh the contract cache from the database.
     pub async fn refresh(&self, pool: &PgPool) {
-        let result: Result<Vec<(String, Option<f64>, DateTime<Utc>, Option<String>)>, _> = sqlx::query_as(
+        type ContractRow = (String, Option<f64>, DateTime<Utc>, Option<String>);
+        let result: Result<Vec<ContractRow>, _> = sqlx::query_as(
             r#"
             SELECT c.ticker,
                    COALESCE(cr.strike::float8, c.threshold::float8) AS strike,
@@ -106,8 +107,7 @@ impl ContractDiscovery {
 
                 // Subscribe new tickers to the Kalshi WS feed for orderbook data
                 if let Some(ref handle) = self.ws_handle {
-                    let tickers: Vec<String> =
-                        contracts.iter().map(|c| c.ticker.clone()).collect();
+                    let tickers: Vec<String> = contracts.iter().map(|c| c.ticker.clone()).collect();
                     if !tickers.is_empty() {
                         handle.subscribe(tickers);
                     }

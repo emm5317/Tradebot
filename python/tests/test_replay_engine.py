@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import json
-import math
-
-import pytest
 
 from backtester.replay import (
     ReplayConfig,
     ReplayEngine,
     ReplayResult,
-    SourceAttribution,
     ablate_and_reblend,
 )
 
-
 # ── 8.6a: Source ablation logic ──────────────────────────────────
+
 
 class TestAblateAndReblend:
     """Test the ablate_and_reblend function directly (no DB needed)."""
@@ -41,7 +37,7 @@ class TestAblateAndReblend:
         """With no sources ablated, result equals weighted average."""
         comp = self._make_components()
         result = ablate_and_reblend(comp, [])
-        expected = (0.45*0.65 + 0.25*0.70 + 0.20*0.60 + 0.10*0.55) / 1.0
+        expected = (0.45 * 0.65 + 0.25 * 0.70 + 0.20 * 0.60 + 0.10 * 0.55) / 1.0
         assert abs(result - expected) < 1e-9
 
     def test_ablate_hrrr(self):
@@ -49,7 +45,7 @@ class TestAblateAndReblend:
         comp = self._make_components()
         result = ablate_and_reblend(comp, ["hrrr"])
         # Remaining: physics(0.45), trend(0.20), climo(0.10) → total 0.75
-        expected = (0.45*0.65 + 0.20*0.60 + 0.10*0.55) / 0.75
+        expected = (0.45 * 0.65 + 0.20 * 0.60 + 0.10 * 0.55) / 0.75
         assert abs(result - expected) < 1e-9
 
     def test_ablate_multiple_sources(self):
@@ -57,7 +53,7 @@ class TestAblateAndReblend:
         comp = self._make_components()
         result = ablate_and_reblend(comp, ["hrrr", "trend"])
         # Remaining: physics(0.45), climo(0.10) → total 0.55
-        expected = (0.45*0.65 + 0.10*0.55) / 0.55
+        expected = (0.45 * 0.65 + 0.10 * 0.55) / 0.55
         assert abs(result - expected) < 1e-9
 
     def test_ablate_all_returns_default(self):
@@ -73,7 +69,7 @@ class TestAblateAndReblend:
         """JSON string components are parsed correctly."""
         comp = self._make_components()
         result = ablate_and_reblend(json.dumps(comp), [])
-        expected = (0.45*0.65 + 0.25*0.70 + 0.20*0.60 + 0.10*0.55) / 1.0
+        expected = (0.45 * 0.65 + 0.25 * 0.70 + 0.20 * 0.60 + 0.10 * 0.55) / 1.0
         assert abs(result - expected) < 1e-9
 
     def test_no_weights_key_returns_stored_prob(self):
@@ -102,7 +98,7 @@ class TestAblateAndReblend:
         }
         result = ablate_and_reblend(comp, ["basis"])
         # Remaining: n_d2(0.40), levy(0.30), funding(0.10) → total 0.80
-        expected = (0.40*0.60 + 0.30*0.55 + 0.10*0.50) / 0.80
+        expected = (0.40 * 0.60 + 0.30 * 0.55 + 0.10 * 0.50) / 0.80
         assert abs(result - expected) < 1e-9
 
     def test_ablate_physics_only(self):
@@ -110,11 +106,12 @@ class TestAblateAndReblend:
         comp = self._make_components(physics=0.80, hrrr=0.60, trend=0.50, climo=0.40)
         result = ablate_and_reblend(comp, ["physics"])
         remaining_w = 0.25 + 0.20 + 0.10  # 0.55
-        expected = (0.25*0.60 + 0.20*0.50 + 0.10*0.40) / remaining_w
+        expected = (0.25 * 0.60 + 0.20 * 0.50 + 0.10 * 0.40) / remaining_w
         assert abs(result - expected) < 1e-9
 
 
 # ── Attribution computation ──────────────────────────────────────
+
 
 class TestComputeAttribution:
     """Test attribution comparison logic."""
@@ -142,7 +139,7 @@ class TestComputeAttribution:
         """Source that lowers Brier → positive brier_delta."""
         engine = self._engine()
         baseline = self._make_result(brier=0.20, pnl=100)  # with source
-        ablated = self._make_result(brier=0.30, pnl=50)    # without source
+        ablated = self._make_result(brier=0.30, pnl=50)  # without source
         attr = engine.compute_attribution("hrrr", baseline, ablated)
         assert attr.brier_delta > 0  # positive = source helps
         assert attr.pnl_delta > 0
@@ -174,6 +171,7 @@ class TestComputeAttribution:
 
 
 # ── Ablation effect on Brier ─────────────────────────────────────
+
 
 class TestAblationBrierEffect:
     """Verify that ablation produces meaningful Brier score changes."""

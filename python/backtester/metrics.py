@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 
@@ -17,12 +17,12 @@ class TradeRecord:
     """A single trade for metric computation."""
 
     settlement_date: date
-    direction: str          # "yes" or "no"
-    model_prob: float       # raw probability (YES direction)
-    market_price: float     # entry price
-    edge: float             # |model_prob - market_price|
-    settled_yes: bool       # actual outcome
-    pnl_cents: float        # P&L in cents (after fees)
+    direction: str  # "yes" or "no"
+    model_prob: float  # raw probability (YES direction)
+    market_price: float  # entry price
+    edge: float  # |model_prob - market_price|
+    settled_yes: bool  # actual outcome
+    pnl_cents: float  # P&L in cents (after fees)
     fee_cents: float = 0.0  # fee paid
 
 
@@ -181,7 +181,7 @@ def compute_advanced_metrics(
 
         # Sortino: only downside deviation
         downside = [min(0.0, r - mean_ret) for r in daily_returns]
-        downside_var = sum(d ** 2 for d in downside) / (len(daily_returns) - 1)
+        downside_var = sum(d**2 for d in downside) / (len(daily_returns) - 1)
         downside_std = math.sqrt(downside_var) if downside_var > 0 else 0.0
         m.sortino_ratio = (mean_ret / downside_std * math.sqrt(252)) if downside_std > 0 else 0.0
 

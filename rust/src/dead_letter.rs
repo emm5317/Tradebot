@@ -21,8 +21,9 @@ impl std::fmt::Display for DeadLetterReason {
         match self {
             Self::DeserializationFailure(e) => write!(f, "deserialization_failure: {e}"),
             Self::RiskRejection(reason) => write!(f, "risk_rejection: {reason}"),
-            Self::OrderSubmissionFailed { ticker, attempts } =>
-                write!(f, "order_failed: {ticker} after {attempts} attempts"),
+            Self::OrderSubmissionFailed { ticker, attempts } => {
+                write!(f, "order_failed: {ticker} after {attempts} attempts")
+            }
             Self::UnknownSignalType(t) => write!(f, "unknown_signal_type: {t}"),
         }
     }
@@ -40,10 +41,7 @@ pub async fn send_dead_letter(
 
     // Publish to NATS dead-letter subject
     if let Err(e) = nats
-        .publish(
-            DEAD_LETTER_SUBJECT,
-            error_str.clone().into(),
-        )
+        .publish(DEAD_LETTER_SUBJECT, error_str.clone().into())
         .await
     {
         warn!(error = %e, "failed to publish dead letter to NATS");
@@ -52,7 +50,7 @@ pub async fn send_dead_letter(
     // Persist to database
     let result = sqlx::query(
         "INSERT INTO dead_letters (subject, payload, error, source) \
-         VALUES ($1, $2, $3, $4)"
+         VALUES ($1, $2, $3, $4)",
     )
     .bind(DEAD_LETTER_SUBJECT)
     .bind(payload)

@@ -18,7 +18,7 @@ use crate::lock_ext::RwLockExt;
 
 use crate::feed_health::FeedHealth;
 use crate::kalshi::orderbook::{OrderbookManager, Side};
-use crate::kalshi::trade_tape::{TradeTape, TradeRecord};
+use crate::kalshi::trade_tape::{TradeRecord, TradeTape};
 use crate::kalshi::websocket::WsFeedMessage;
 
 /// Snapshot of trade tape metrics extracted before async flush.
@@ -180,10 +180,18 @@ async fn flush_to_redis(
     tickers: &std::collections::HashSet<String>,
 ) {
     for ticker in tickers {
-        let mid = orderbooks.mid_price(ticker).map(|d| d.to_string().parse::<f64>().unwrap_or(0.5));
-        let spread = orderbooks.spread(ticker).map(|d| d.to_string().parse::<f64>().unwrap_or(0.0));
-        let best_bid = orderbooks.best_bid(ticker).map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
-        let best_ask = orderbooks.best_ask(ticker).map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
+        let mid = orderbooks
+            .mid_price(ticker)
+            .map(|d| d.to_string().parse::<f64>().unwrap_or(0.5));
+        let spread = orderbooks
+            .spread(ticker)
+            .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0));
+        let best_bid = orderbooks
+            .best_bid(ticker)
+            .map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
+        let best_ask = orderbooks
+            .best_ask(ticker)
+            .map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
 
         let bid_depth: i64 = orderbooks.best_bid(ticker).map(|(_, s)| s).unwrap_or(0);
         let ask_depth: i64 = orderbooks.best_ask(ticker).map(|(_, s)| s).unwrap_or(0);
@@ -214,11 +222,21 @@ async fn flush_to_redis(
 
         // Add ticker channel fields if available
         if let Some(ts) = ts {
-            if let Some(s) = ts.yes_bid_size { summary["best_bid_size"] = serde_json::json!(s); }
-            if let Some(s) = ts.yes_ask_size { summary["best_ask_size"] = serde_json::json!(s); }
-            if let Some(ref status) = ts.market_status { summary["market_status"] = serde_json::json!(status); }
-            if let Some(v) = ts.volume { summary["volume"] = serde_json::json!(v); }
-            if let Some(oi) = ts.open_interest { summary["open_interest"] = serde_json::json!(oi); }
+            if let Some(s) = ts.yes_bid_size {
+                summary["best_bid_size"] = serde_json::json!(s);
+            }
+            if let Some(s) = ts.yes_ask_size {
+                summary["best_ask_size"] = serde_json::json!(s);
+            }
+            if let Some(ref status) = ts.market_status {
+                summary["market_status"] = serde_json::json!(status);
+            }
+            if let Some(v) = ts.volume {
+                summary["volume"] = serde_json::json!(v);
+            }
+            if let Some(oi) = ts.open_interest {
+                summary["open_interest"] = serde_json::json!(oi);
+            }
 
             // 7.3a: Price momentum (linear slope over last 30s)
             let momentum = compute_price_momentum(&ts.last_price_history);
@@ -243,13 +261,15 @@ async fn flush_to_redis(
         let value = summary.to_string();
 
         // SET with 30s TTL — stale data auto-expires if WS disconnects
-        let result: Result<(), _> = redis.set(
-            &key,
-            value.as_str(),
-            Some(fred::types::Expiration::EX(30)),
-            None,
-            false,
-        ).await;
+        let result: Result<(), _> = redis
+            .set(
+                &key,
+                value.as_str(),
+                Some(fred::types::Expiration::EX(30)),
+                None,
+                false,
+            )
+            .await;
 
         if let Err(e) = result {
             warn!(ticker, error = %e, "failed to write orderbook to redis");
@@ -300,13 +320,15 @@ async fn check_stale_feeds(
         if is_stale {
             warn!(ticker, "orderbook data is stale");
             let key = format!("feed:status:{ticker}");
-            let _: Result<(), _> = redis.set(
-                &key,
-                "stale",
-                Some(fred::types::Expiration::EX(60)),
-                None,
-                false,
-            ).await;
+            let _: Result<(), _> = redis
+                .set(
+                    &key,
+                    "stale",
+                    Some(fred::types::Expiration::EX(60)),
+                    None,
+                    false,
+                )
+                .await;
         }
     }
 }
@@ -324,7 +346,10 @@ mod tests {
             history.push_back((base + Duration::from_secs(i * 2), 50 + i as i64 * 2));
         }
         let slope = compute_price_momentum(&history);
-        assert!(slope > 0.0, "slope should be positive for rising prices, got {slope}");
+        assert!(
+            slope > 0.0,
+            "slope should be positive for rising prices, got {slope}"
+        );
         // ~1 cent/second
         assert!((slope - 1.0).abs() < 0.1);
     }
@@ -337,7 +362,10 @@ mod tests {
             history.push_back((base + Duration::from_secs(i * 2), 60 - i as i64 * 2));
         }
         let slope = compute_price_momentum(&history);
-        assert!(slope < 0.0, "slope should be negative for falling prices, got {slope}");
+        assert!(
+            slope < 0.0,
+            "slope should be negative for falling prices, got {slope}"
+        );
     }
 
     #[test]
@@ -348,7 +376,10 @@ mod tests {
             history.push_back((base + Duration::from_secs(i * 2), 50));
         }
         let slope = compute_price_momentum(&history);
-        assert!(slope.abs() < 0.001, "slope should be ~0 for flat prices, got {slope}");
+        assert!(
+            slope.abs() < 0.001,
+            "slope should be ~0 for flat prices, got {slope}"
+        );
     }
 
     #[test]
@@ -375,7 +406,10 @@ mod tests {
         state.prev_open_interest = state.open_interest;
         state.open_interest = Some(120);
         assert_eq!(state.prev_open_interest, Some(100));
-        assert_eq!(state.open_interest.unwrap() - state.prev_open_interest.unwrap(), 20);
+        assert_eq!(
+            state.open_interest.unwrap() - state.prev_open_interest.unwrap(),
+            20
+        );
     }
 
     #[test]
@@ -385,12 +419,16 @@ mod tests {
 
         // Add old entries
         for i in 0..5 {
-            state.last_price_history.push_back((old + Duration::from_secs(i), 50));
+            state
+                .last_price_history
+                .push_back((old + Duration::from_secs(i), 50));
         }
         // Add recent entries
         let now = Instant::now();
         for i in 0..3 {
-            state.last_price_history.push_back((now - Duration::from_secs(i), 55));
+            state
+                .last_price_history
+                .push_back((now - Duration::from_secs(i), 55));
         }
 
         // Prune (mimicking what the handler does)

@@ -1,6 +1,6 @@
 """Tests for crypto fair-value engine."""
 
-from models.crypto_fv import CryptoFairValue, CryptoInputs, compute_crypto_fair_value
+from models.crypto_fv import CryptoInputs, compute_crypto_fair_value
 
 
 class TestShadowRTI:

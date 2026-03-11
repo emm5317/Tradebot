@@ -1,8 +1,8 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use rsa::RsaPrivateKey;
 use rsa::pss::{BlindedSigningKey, Signature};
 use rsa::signature::{RandomizedSigner, SignatureEncoding};
-use rsa::RsaPrivateKey;
 use sha2::Sha256;
 use std::sync::Arc;
 
@@ -25,13 +25,15 @@ impl KalshiAuth {
         })?;
 
         use rsa::pkcs8::DecodePrivateKey;
-        let private_key = RsaPrivateKey::from_pkcs8_pem(&pem_bytes).or_else(|_| {
-            // Fall back to PKCS#1 format (BEGIN RSA PRIVATE KEY)
-            use rsa::pkcs1::DecodeRsaPrivateKey;
-            RsaPrivateKey::from_pkcs1_pem(&pem_bytes)
-        }).map_err(|e| {
-            KalshiError::SigningError(format!("failed to parse PEM private key: {e}"))
-        })?;
+        let private_key = RsaPrivateKey::from_pkcs8_pem(&pem_bytes)
+            .or_else(|_| {
+                // Fall back to PKCS#1 format (BEGIN RSA PRIVATE KEY)
+                use rsa::pkcs1::DecodeRsaPrivateKey;
+                RsaPrivateKey::from_pkcs1_pem(&pem_bytes)
+            })
+            .map_err(|e| {
+                KalshiError::SigningError(format!("failed to parse PEM private key: {e}"))
+            })?;
 
         Ok(Self {
             api_key,
@@ -47,11 +49,7 @@ impl KalshiAuth {
     /// Sign a request and return the three auth headers.
     ///
     /// Message format: `{timestamp_ms}{METHOD}{path}`
-    pub fn sign_request(
-        &self,
-        method: &str,
-        path: &str,
-    ) -> Result<AuthHeaders, KalshiError> {
+    pub fn sign_request(&self, method: &str, path: &str) -> Result<AuthHeaders, KalshiError> {
         let timestamp_ms = chrono::Utc::now().timestamp_millis();
         let message = format!("{timestamp_ms}{method}{path}");
 

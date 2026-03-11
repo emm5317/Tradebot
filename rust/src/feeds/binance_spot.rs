@@ -13,8 +13,8 @@ use std::time::Duration;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::KeysInterface;
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -90,13 +90,7 @@ impl BinanceSpotState {
     /// Compute rolling 5-minute trade volume from recent closed bars + current bar.
     fn volume_5m(&self) -> f64 {
         // Sum volume from last 5 closed bars + current (in-progress) bar
-        let closed_vol: f64 = self
-            .bars_1m
-            .iter()
-            .rev()
-            .take(5)
-            .map(|b| b.volume)
-            .sum();
+        let closed_vol: f64 = self.bars_1m.iter().rev().take(5).map(|b| b.volume).sum();
         closed_vol + self.current_volume
     }
 
@@ -223,7 +217,12 @@ impl BinanceSpotFeed {
     }
 
     /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
-    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>, feed_health: Arc<FeedHealth>) {
+    pub async fn run(
+        &self,
+        redis: RedisClient,
+        crypto_state: Arc<CryptoState>,
+        feed_health: Arc<FeedHealth>,
+    ) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -233,7 +232,10 @@ impl BinanceSpotFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis, &crypto_state, &feed_health).await {
+            match self
+                .connect_and_stream(&redis, &crypto_state, &feed_health)
+                .await
+            {
                 Ok(()) => {
                     warn!("binance spot ws closed by server, will reconnect");
                     backoff_secs = 1;
@@ -456,7 +458,10 @@ mod tests {
         }
 
         if let Some(vol) = state.ewma_vol_30m {
-            assert!(vol < 0.01, "EWMA vol should be near 0 for constant price, got {vol}");
+            assert!(
+                vol < 0.01,
+                "EWMA vol should be near 0 for constant price, got {vol}"
+            );
         }
     }
 
@@ -490,7 +495,10 @@ mod tests {
 
         if let Some(vol) = state.realized_vol_30m {
             // Annualized vol from ~1% 1-min moves should be very high
-            assert!(vol > 1.0, "Annualized vol should be high for 1% per-minute moves, got {vol}");
+            assert!(
+                vol > 1.0,
+                "Annualized vol should be high for 1% per-minute moves, got {vol}"
+            );
         }
     }
 }

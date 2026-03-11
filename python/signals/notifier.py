@@ -49,18 +49,20 @@ class DiscordNotifier:
         action = signal.action.value.upper()
 
         embed = {
-            "embeds": [{
-                "title": f"{action}: {signal.ticker}",
-                "color": color,
-                "fields": [
-                    {"name": "Direction", "value": signal.direction.upper(), "inline": True},
-                    {"name": "Edge", "value": f"{signal.edge:.1%}", "inline": True},
-                    {"name": "Kelly", "value": f"{signal.kelly_fraction:.1%}", "inline": True},
-                    {"name": "Model", "value": f"{signal.model_prob:.1%}", "inline": True},
-                    {"name": "Market", "value": f"{signal.market_price:.1%}", "inline": True},
-                    {"name": "Minutes", "value": f"{signal.minutes_remaining:.1f}", "inline": True},
-                ],
-            }],
+            "embeds": [
+                {
+                    "title": f"{action}: {signal.ticker}",
+                    "color": color,
+                    "fields": [
+                        {"name": "Direction", "value": signal.direction.upper(), "inline": True},
+                        {"name": "Edge", "value": f"{signal.edge:.1%}", "inline": True},
+                        {"name": "Kelly", "value": f"{signal.kelly_fraction:.1%}", "inline": True},
+                        {"name": "Model", "value": f"{signal.model_prob:.1%}", "inline": True},
+                        {"name": "Market", "value": f"{signal.market_price:.1%}", "inline": True},
+                        {"name": "Minutes", "value": f"{signal.minutes_remaining:.1f}", "inline": True},
+                    ],
+                }
+            ],
         }
         await self._enqueue(embed)
 
@@ -75,11 +77,13 @@ class DiscordNotifier:
             description = f"{error}\n```{details}```"
 
         embed = {
-            "embeds": [{
-                "title": "Error",
-                "description": description,
-                "color": 0xFF0000,
-            }],
+            "embeds": [
+                {
+                    "title": "Error",
+                    "description": description,
+                    "color": 0xFF0000,
+                }
+            ],
         }
         await self._enqueue(embed)
 
@@ -92,17 +96,19 @@ class DiscordNotifier:
         color = 0x00FF00 if net_pnl >= 0 else 0xFF4444
 
         embed = {
-            "embeds": [{
-                "title": "Daily Summary",
-                "color": color,
-                "fields": [
-                    {"name": "Net P&L", "value": f"${net_pnl:+.2f}", "inline": True},
-                    {"name": "Signals", "value": str(summary.get("total_signals", 0)), "inline": True},
-                    {"name": "Orders", "value": str(summary.get("total_orders", 0)), "inline": True},
-                    {"name": "Wins", "value": str(summary.get("wins", 0)), "inline": True},
-                    {"name": "Losses", "value": str(summary.get("losses", 0)), "inline": True},
-                ],
-            }],
+            "embeds": [
+                {
+                    "title": "Daily Summary",
+                    "color": color,
+                    "fields": [
+                        {"name": "Net P&L", "value": f"${net_pnl:+.2f}", "inline": True},
+                        {"name": "Signals", "value": str(summary.get("total_signals", 0)), "inline": True},
+                        {"name": "Orders", "value": str(summary.get("total_orders", 0)), "inline": True},
+                        {"name": "Wins", "value": str(summary.get("wins", 0)), "inline": True},
+                        {"name": "Losses", "value": str(summary.get("losses", 0)), "inline": True},
+                    ],
+                }
+            ],
         }
         await self._enqueue(embed)
 

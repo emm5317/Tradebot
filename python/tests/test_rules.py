@@ -1,6 +1,6 @@
 """Tests for the contract rules resolver, ticker parser, and timezone utilities."""
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime
 
 from rules.resolver import ContractRules
 from rules.ticker_parser import (
@@ -12,7 +12,6 @@ from rules.ticker_parser import (
     parse_ticker,
 )
 from rules.timezone import STATION_TIMEZONES, compute_day_boundaries
-
 
 # ─── Ticker Parser Tests ─────────────────────────────────────────────
 
@@ -113,7 +112,7 @@ class TestParseTickerEdgeCases:
         assert result.contract_type == "crypto_binary"
 
     def test_all_stations_mapped(self):
-        for abbrev, (station, tz) in STATION_MAP.items():
+        for _abbrev, (station, tz) in STATION_MAP.items():
             assert station.startswith("K")
             assert "America/" in tz
 
@@ -224,15 +223,15 @@ class TestDayBoundaries:
 
     def test_all_station_timezones_valid(self):
         """All stations in STATION_TIMEZONES produce valid boundaries."""
-        for station, tz in STATION_TIMEZONES.items():
+        for _station, tz in STATION_TIMEZONES.items():
             start, end = compute_day_boundaries(tz, date(2024, 6, 15))
             assert end > start
             assert (end - start).total_seconds() == 86400
 
     def test_boundaries_are_utc(self):
         start, end = compute_day_boundaries("America/Chicago", date(2024, 1, 15))
-        assert start.tzinfo == timezone.utc
-        assert end.tzinfo == timezone.utc
+        assert start.tzinfo == UTC
+        assert end.tzinfo == UTC
 
 
 # ─── ContractRules Dataclass Tests ───────────────────────────────────
@@ -248,7 +247,7 @@ class TestContractRules:
             settlement_station=None,
             settlement_tz=None,
             strike=98500.0,
-            expiry_time=datetime(2026, 3, 8, 22, 0, tzinfo=timezone.utc),
+            expiry_time=datetime(2026, 3, 8, 22, 0, tzinfo=UTC),
             underlying="BTCUSD",
             constituent_exchanges=CFB_RTI_EXCHANGES,
         )
@@ -265,7 +264,7 @@ class TestContractRules:
             settlement_station="KORD",
             settlement_tz="America/Chicago",
             strike=45.0,
-            expiry_time=datetime(2026, 3, 8, 22, 0, tzinfo=timezone.utc),
+            expiry_time=datetime(2026, 3, 8, 22, 0, tzinfo=UTC),
         )
         assert rules.is_weather
         assert not rules.is_crypto

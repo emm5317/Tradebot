@@ -1,8 +1,5 @@
 """Tests for Binance BTC WebSocket Feed."""
 
-import math
-from datetime import datetime, timezone
-
 from data.binance_ws import BinanceFeed, CryptoState
 
 

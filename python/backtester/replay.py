@@ -17,9 +17,10 @@ import argparse
 import asyncio
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable
+from datetime import UTC, date, datetime
+from typing import Any
 
 import asyncpg
 import structlog
@@ -39,7 +40,7 @@ class ReplayConfig:
 
     start_time: datetime
     end_time: datetime
-    signal_type: str = "weather"   # "weather" or "crypto"
+    signal_type: str = "weather"  # "weather" or "crypto"
     ablation_sources: list[str] = field(default_factory=list)
     # Sources to ablate (remove) for attribution testing
     # e.g., ["hrrr", "coinbase"] to test without those sources
@@ -64,9 +65,9 @@ class SourceAttribution:
     """Marginal lift attribution for a data source."""
 
     source_name: str
-    brier_delta: float      # positive = source improves model
-    pnl_delta: int          # positive = source adds PnL
-    n_affected: int         # number of evaluations affected
+    brier_delta: float  # positive = source improves model
+    pnl_delta: int  # positive = source adds PnL
+    n_affected: int  # number of evaluations affected
 
 
 class ReplayEngine:
@@ -252,9 +253,7 @@ class ReplayEngine:
         attributions.sort(key=lambda a: a.brier_delta, reverse=True)
         return attributions
 
-    async def get_available_periods(
-        self, signal_type: str
-    ) -> list[tuple[datetime, datetime]]:
+    async def get_available_periods(self, signal_type: str) -> list[tuple[datetime, datetime]]:
         """Get available replay periods from stored evaluations."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -277,6 +276,7 @@ class ReplayEngine:
 
 
 # ── Source ablation logic ────────────────────────────────────────
+
 
 def ablate_and_reblend(
     components: dict | str | None,
@@ -337,6 +337,7 @@ def ablate_and_reblend(
 
 # ── CLI entry point ──────────────────────────────────────────────
 
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Replay engine for source attribution")
     parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
@@ -348,36 +349,33 @@ async def main() -> None:
     args = parser.parse_args()
 
     from config import get_settings
+
     settings = get_settings()
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
 
     fee_model = FeeModel() if not args.no_fees else FeeModel(fee_type="flat", flat_fee_cents=0)
     engine = ReplayEngine(pool, fee_model=fee_model)
 
-    start = datetime.combine(
-        date.fromisoformat(args.start), datetime.min.time(), tzinfo=timezone.utc
-    )
-    end = datetime.combine(
-        date.fromisoformat(args.end), datetime.max.time(), tzinfo=timezone.utc
-    )
+    start = datetime.combine(date.fromisoformat(args.start), datetime.min.time(), tzinfo=UTC)
+    end = datetime.combine(date.fromisoformat(args.end), datetime.max.time(), tzinfo=UTC)
 
     if args.attribution:
         attributions = await engine.run_full_attribution(start, end, args.type)
         if not attributions:
             print("No model evaluations found for the given period.")
         else:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"  Source Attribution: {args.type} ({args.start} to {args.end})")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             print(f"  {'Source':<12}  {'Brier Delta':>12}  {'PnL Delta':>10}  {'Affected':>8}")
-            print(f"  {'-'*12}  {'-'*12}  {'-'*10}  {'-'*8}")
+            print(f"  {'-' * 12}  {'-' * 12}  {'-' * 10}  {'-' * 8}")
             for attr in attributions:
                 sign = "+" if attr.brier_delta > 0 else ""
                 pnl_sign = "+" if attr.pnl_delta > 0 else ""
                 print(
                     f"  {attr.source_name:<12}  "
                     f"{sign}{attr.brier_delta:>11.4f}  "
-                    f"{pnl_sign}${attr.pnl_delta/100:>8.2f}  "
+                    f"{pnl_sign}${attr.pnl_delta / 100:>8.2f}  "
                     f"{attr.n_affected:>8}"
                 )
             print()
@@ -389,13 +387,13 @@ async def main() -> None:
             ablation_sources=args.ablate,
         )
         result = await engine.replay(config)
-        print(f"\nReplay Results:")
+        print("\nReplay Results:")
         print(f"  Evaluations: {result.n_evaluations}")
         print(f"  Contracts:   {result.n_contracts}")
         print(f"  Brier Score: {result.brier_score:.4f}")
         print(f"  Log Loss:    {result.log_loss:.4f}")
         print(f"  Win Rate:    {result.win_rate:.1%}")
-        print(f"  P&L:         ${result.pnl_cents/100:.2f}")
+        print(f"  P&L:         ${result.pnl_cents / 100:.2f}")
         if args.ablate:
             print(f"  Ablated:     {', '.join(args.ablate)}")
         print()

@@ -8,8 +8,8 @@
 //! supervisor_tasks_active gauge via metrics crate.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use tokio::task::JoinSet;
@@ -67,17 +67,19 @@ impl TaskSupervisor {
         criticality: TaskCriticality,
         fut: impl std::future::Future<Output = ()> + Send + 'static,
     ) {
-        self.meta.insert(name, TaskMeta {
-            criticality,
-            started_at: Instant::now(),
-        });
+        self.meta.insert(
+            name,
+            TaskMeta {
+                criticality,
+                started_at: Instant::now(),
+            },
+        );
         let abort_handle = self.join_set.spawn(async move {
             fut.await;
             name
         });
         self.id_to_name.insert(abort_handle.id(), name);
-        metrics::gauge!(metrics_registry::SUPERVISOR_TASKS_ACTIVE)
-            .set(self.join_set.len() as f64);
+        metrics::gauge!(metrics_registry::SUPERVISOR_TASKS_ACTIVE).set(self.join_set.len() as f64);
         info!(task = name, criticality = ?criticality, "task spawned under supervision");
     }
 
@@ -132,7 +134,9 @@ impl TaskSupervisor {
     }
 
     fn handle_task_exit(&self, name: &str, panicked: bool) {
-        let criticality = self.meta.get(name)
+        let criticality = self
+            .meta
+            .get(name)
             .map(|m| m.criticality)
             .unwrap_or(TaskCriticality::Critical);
 
@@ -140,8 +144,7 @@ impl TaskSupervisor {
             TaskCriticality::Critical => {
                 error!(
                     task = name,
-                    panicked,
-                    "CRITICAL task died — activating kill switch and shutting down"
+                    panicked, "CRITICAL task died — activating kill switch and shutting down"
                 );
                 self.kill_switch.kill_all.store(true, Ordering::Relaxed);
                 self.cancel.cancel();
@@ -162,8 +165,7 @@ impl TaskSupervisor {
             TaskCriticality::NonCritical => {
                 warn!(
                     task = name,
-                    panicked,
-                    "non-critical task died — trading continues"
+                    panicked, "non-critical task died — trading continues"
                 );
             }
         }
@@ -196,8 +198,14 @@ mod tests {
 
         sup.run().await;
 
-        assert!(cancel.is_cancelled(), "cancel should be triggered by critical task death");
-        assert!(ks.kill_all.load(Ordering::Relaxed), "kill_all should be activated");
+        assert!(
+            cancel.is_cancelled(),
+            "cancel should be triggered by critical task death"
+        );
+        assert!(
+            ks.kill_all.load(Ordering::Relaxed),
+            "kill_all should be activated"
+        );
     }
 
     #[tokio::test]
@@ -219,7 +227,10 @@ mod tests {
 
         sup.run().await;
 
-        assert!(!ks.kill_all.load(Ordering::Relaxed), "kill_all should NOT be activated for non-critical");
+        assert!(
+            !ks.kill_all.load(Ordering::Relaxed),
+            "kill_all should NOT be activated for non-critical"
+        );
     }
 
     #[tokio::test]
@@ -245,7 +256,10 @@ mod tests {
         sup.run().await;
 
         assert!(cancel.is_cancelled());
-        assert!(!ks.kill_all.load(Ordering::Relaxed), "kill_all should NOT be set for external cancel");
+        assert!(
+            !ks.kill_all.load(Ordering::Relaxed),
+            "kill_all should NOT be set for external cancel"
+        );
         assert_eq!(sup.active_count(), 0, "all tasks should be drained");
     }
 

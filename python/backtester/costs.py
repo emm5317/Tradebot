@@ -18,10 +18,10 @@ class FeeModel:
     """Kalshi fee model for backtesting."""
 
     fee_type: str = "quadratic"
-    taker_fee_multiplier: float = 0.07   # 7% quadratic multiplier (Kalshi default)
+    taker_fee_multiplier: float = 0.07  # 7% quadratic multiplier (Kalshi default)
     maker_fee_multiplier: float = 0.035  # 3.5% maker discount
     flat_fee_cents: int = 2
-    assume_taker: bool = True            # conservative: assume we take liquidity
+    assume_taker: bool = True  # conservative: assume we take liquidity
 
     def compute_fee(self, price: float, count: int = 1) -> float:
         """Compute fee in cents for a trade.
@@ -36,10 +36,7 @@ class FeeModel:
         if self.fee_type == "flat":
             return self.flat_fee_cents * count
 
-        multiplier = (
-            self.taker_fee_multiplier if self.assume_taker
-            else self.maker_fee_multiplier
-        )
+        multiplier = self.taker_fee_multiplier if self.assume_taker else self.maker_fee_multiplier
         # Quadratic: multiplier × price × (1 - price) × count × 100 (cents)
         return multiplier * price * (1.0 - price) * count * 100
 

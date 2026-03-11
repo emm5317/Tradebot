@@ -147,31 +147,31 @@ async fn flush_batch(pool: &PgPool, batch: &mut Vec<DecisionEntry>) {
             micro_total, micro_trade, micro_spread, micro_depth, \
             micro_vwap, micro_momentum, micro_vol_surge, \
             signal_id, eval_latency_ms\
-        ) "
+        ) ",
     );
 
     qb.push_values(batch.iter(), |mut b, entry| {
         b.push_bind(&entry.ticker)
-         .push_bind(&entry.signal_type)
-         .push_bind("rust")
-         .push_bind(&entry.outcome)
-         .push_bind(&entry.rejection_reason)
-         .push_bind(entry.model_prob.map(|v| v as f32))
-         .push_bind(entry.market_price.map(|v| v as f32))
-         .push_bind(entry.edge.map(|v| v as f32))
-         .push_bind(entry.adjusted_edge.map(|v| v as f32))
-         .push_bind(&entry.direction)
-         .push_bind(entry.minutes_remaining.map(|v| v as f32))
-         .push_bind(entry.confidence.map(|v| v as f32))
-         .push_bind(entry.micro_total.map(|v| v as f32))
-         .push_bind(entry.micro_trade.map(|v| v as f32))
-         .push_bind(entry.micro_spread.map(|v| v as f32))
-         .push_bind(entry.micro_depth.map(|v| v as f32))
-         .push_bind(entry.micro_vwap.map(|v| v as f32))
-         .push_bind(entry.micro_momentum.map(|v| v as f32))
-         .push_bind(entry.micro_vol_surge.map(|v| v as f32))
-         .push_bind(entry.signal_id)
-         .push_bind(entry.eval_latency_ms.map(|v| v as f32));
+            .push_bind(&entry.signal_type)
+            .push_bind("rust")
+            .push_bind(&entry.outcome)
+            .push_bind(&entry.rejection_reason)
+            .push_bind(entry.model_prob.map(|v| v as f32))
+            .push_bind(entry.market_price.map(|v| v as f32))
+            .push_bind(entry.edge.map(|v| v as f32))
+            .push_bind(entry.adjusted_edge.map(|v| v as f32))
+            .push_bind(&entry.direction)
+            .push_bind(entry.minutes_remaining.map(|v| v as f32))
+            .push_bind(entry.confidence.map(|v| v as f32))
+            .push_bind(entry.micro_total.map(|v| v as f32))
+            .push_bind(entry.micro_trade.map(|v| v as f32))
+            .push_bind(entry.micro_spread.map(|v| v as f32))
+            .push_bind(entry.micro_depth.map(|v| v as f32))
+            .push_bind(entry.micro_vwap.map(|v| v as f32))
+            .push_bind(entry.micro_momentum.map(|v| v as f32))
+            .push_bind(entry.micro_vol_surge.map(|v| v as f32))
+            .push_bind(entry.signal_id)
+            .push_bind(entry.eval_latency_ms.map(|v| v as f32));
     });
 
     match qb.build().execute(pool).await {

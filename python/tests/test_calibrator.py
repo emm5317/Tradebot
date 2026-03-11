@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from calibrator.daemon import CalibrationDaemon, _parse_update_count
 
 
@@ -70,46 +68,26 @@ class TestOutcomeSettlement:
         """YES direction + settled_yes=true → win."""
         direction = "yes"
         settled_yes = True
-        outcome = (
-            "win"
-            if (direction == "yes" and settled_yes)
-            or (direction == "no" and not settled_yes)
-            else "loss"
-        )
+        outcome = "win" if (direction == "yes" and settled_yes) or (direction == "no" and not settled_yes) else "loss"
         assert outcome == "win"
 
     def test_win_no_settled_no(self):
         """NO direction + settled_yes=false → win."""
         direction = "no"
         settled_yes = False
-        outcome = (
-            "win"
-            if (direction == "yes" and settled_yes)
-            or (direction == "no" and not settled_yes)
-            else "loss"
-        )
+        outcome = "win" if (direction == "yes" and settled_yes) or (direction == "no" and not settled_yes) else "loss"
         assert outcome == "win"
 
     def test_loss_yes_settled_no(self):
         """YES direction + settled_yes=false → loss."""
         direction = "yes"
         settled_yes = False
-        outcome = (
-            "win"
-            if (direction == "yes" and settled_yes)
-            or (direction == "no" and not settled_yes)
-            else "loss"
-        )
+        outcome = "win" if (direction == "yes" and settled_yes) or (direction == "no" and not settled_yes) else "loss"
         assert outcome == "loss"
 
     def test_loss_no_settled_yes(self):
         """NO direction + settled_yes=true → loss."""
         direction = "no"
         settled_yes = True
-        outcome = (
-            "win"
-            if (direction == "yes" and settled_yes)
-            or (direction == "no" and not settled_yes)
-            else "loss"
-        )
+        outcome = "win" if (direction == "yes" and settled_yes) or (direction == "no" and not settled_yes) else "loss"
         assert outcome == "loss"

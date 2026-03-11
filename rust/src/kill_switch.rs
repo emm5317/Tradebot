@@ -3,14 +3,14 @@
 //! Provides global and per-strategy kill switches accessible via HTTP endpoints.
 //! State is backed by `AtomicBool` for lock-free reads from the execution hot path.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{get, post};
-use axum::Router;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 

@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use axum::Router;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::get;
-use axum::Router;
 use serde::Serialize;
 
 use crate::config::Config;
@@ -266,10 +266,24 @@ struct SignalRow {
 }
 
 async fn api_signals(State(st): State<DashboardState>) -> Json<Vec<SignalRow>> {
-    let rows = sqlx::query_as::<_, (
-        i64, chrono::DateTime<chrono::Utc>, String, String, String,
-        f32, f32, f32, f32, f32, bool, Option<String>, Option<String>,
-    )>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            chrono::DateTime<chrono::Utc>,
+            String,
+            String,
+            String,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            bool,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         r#"
         SELECT id, created_at, ticker, signal_type, direction,
                model_prob, market_price, edge, kelly_fraction,
@@ -320,10 +334,19 @@ struct OrderRow {
 }
 
 async fn api_orders(State(st): State<DashboardState>) -> Json<Vec<OrderRow>> {
-    let rows = sqlx::query_as::<_, (
-        i64, chrono::DateTime<chrono::Utc>, String, String,
-        i32, Option<f32>, String, Option<i32>,
-    )>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            chrono::DateTime<chrono::Utc>,
+            String,
+            String,
+            i32,
+            Option<f32>,
+            String,
+            Option<i32>,
+        ),
+    >(
         r#"
         SELECT id, created_at, ticker, direction,
                size_cents, fill_price, status, pnl_cents

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -90,8 +90,11 @@ async def aggregate_settlement_summary(
             station = row["station"]
             if station not in results:
                 results[station] = {
-                    "asos_max_f": None, "asos_min_f": None,
-                    "obs_count": 0, "first_obs_at": None, "last_obs_at": None,
+                    "asos_max_f": None,
+                    "asos_min_f": None,
+                    "obs_count": 0,
+                    "first_obs_at": None,
+                    "last_obs_at": None,
                 }
             # Convert C to F
             if row["metar_max_c"] is not None:
@@ -181,7 +184,7 @@ async def aggregate_settlement_summary(
 
 async def backfill(pool: asyncpg.Pool, days: int) -> None:
     """Backfill settlement summaries for the last N days."""
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
 
     for i in range(days, 0, -1):
         target = today - timedelta(days=i)
@@ -208,7 +211,7 @@ async def main() -> None:
         if args.date:
             target = date.fromisoformat(args.date)
         else:
-            target = datetime.now(timezone.utc).date() - timedelta(days=1)
+            target = datetime.now(UTC).date() - timedelta(days=1)
 
         results = await aggregate_settlement_summary(pool, target)
         print(f"Aggregated {len(results)} stations for {target}")

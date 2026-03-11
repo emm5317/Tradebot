@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-import json
-from datetime import date, datetime, timedelta, timezone
-from unittest.mock import AsyncMock
+from datetime import UTC, date, datetime
 
 import pytest
 
 from backtester.sweep import (
-    ParameterSweep,
     SweepResult,
-    WalkForwardSplit,
     _generate_combinations,
     _generate_walk_forward_splits,
 )
 
-
 # ── Combination generation ───────────────────────────────────────
+
 
 class TestGenerateCombinations:
     def test_single_param(self):
@@ -46,6 +42,7 @@ class TestGenerateCombinations:
 
 
 # ── Walk-forward splits ─────────────────────────────────────────
+
 
 class TestWalkForwardSplits:
     def test_basic_splits(self):
@@ -84,6 +81,7 @@ class TestWalkForwardSplits:
 
 # ── SweepResult ──────────────────────────────────────────────────
 
+
 class TestSweepResult:
     def test_defaults(self):
         r = SweepResult(run_id="abc", params={"sigma_scale": 1.0})
@@ -109,6 +107,7 @@ class TestSweepResult:
 
 # ── Settlement summary ──────────────────────────────────────────
 
+
 class TestSettlementSummary:
     @pytest.mark.asyncio
     async def test_aggregate_with_mock_pool(self):
@@ -116,9 +115,14 @@ class TestSettlementSummary:
 
         # Build a mock pool that returns realistic query results
         asos_rows = [
-            {"station": "KORD", "max_f": 75.0, "min_f": 55.0,
-             "obs_count": 24, "first_obs": datetime(2026, 3, 7, 6, 0, tzinfo=timezone.utc),
-             "last_obs": datetime(2026, 3, 7, 23, 0, tzinfo=timezone.utc)},
+            {
+                "station": "KORD",
+                "max_f": 75.0,
+                "min_f": 55.0,
+                "obs_count": 24,
+                "first_obs": datetime(2026, 3, 7, 6, 0, tzinfo=UTC),
+                "last_obs": datetime(2026, 3, 7, 23, 0, tzinfo=UTC),
+            },
         ]
         metar_rows = [
             {"station": "KORD", "metar_max_c": 24, "metar_min_c": 13},
@@ -147,6 +151,7 @@ class TestSettlementSummary:
         class MockCtx:
             async def __aenter__(self):
                 return MockConn()
+
             async def __aexit__(self, *a):
                 pass
 
@@ -167,9 +172,14 @@ class TestSettlementSummary:
         from analytics.settlement_summary import aggregate_settlement_summary
 
         asos_rows = [
-            {"station": "KJFK", "max_f": 68.0, "min_f": 52.0,
-             "obs_count": 20, "first_obs": datetime(2026, 3, 7, 6, 0, tzinfo=timezone.utc),
-             "last_obs": datetime(2026, 3, 7, 22, 0, tzinfo=timezone.utc)},
+            {
+                "station": "KJFK",
+                "max_f": 68.0,
+                "min_f": 52.0,
+                "obs_count": 20,
+                "first_obs": datetime(2026, 3, 7, 6, 0, tzinfo=UTC),
+                "last_obs": datetime(2026, 3, 7, 22, 0, tzinfo=UTC),
+            },
         ]
 
         call_count = 0
@@ -188,6 +198,7 @@ class TestSettlementSummary:
         class MockCtx:
             async def __aenter__(self):
                 return MockConn()
+
             async def __aexit__(self, *a):
                 pass
 

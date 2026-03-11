@@ -14,12 +14,12 @@ Improvements over spec:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
 
-from models.physics import StationCalibration, climatological_probability
+from models.physics import climatological_probability
 from models.weather_fv import WeatherFairValue, WeatherState, compute_weather_fair_value
 from signals.types import (
     Contract,
@@ -96,7 +96,7 @@ class WeatherSignalEvaluator:
 
             self._weather_states[key] = WeatherState(
                 station=contract.station or "KORD",
-                obs_date=datetime.now(timezone.utc).date().isoformat(),
+                obs_date=datetime.now(UTC).date().isoformat(),
                 contract_type=contract_type,
                 strike_f=contract.threshold or 0.0,
             )
@@ -118,7 +118,7 @@ class WeatherSignalEvaluator:
             Exactly one of signal/rejection will be non-None (or both None
             if outside time window).
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         minutes = (contract.settlement_time - now).total_seconds() / 60.0
 
         # Build model state (always returned for UI)
@@ -194,8 +194,12 @@ class WeatherSignalEvaluator:
 
         # Compute climo probability for the fair value engine
         p_climo = climatological_probability(
-            station, hour, month, contract.threshold,
-            observation.temperature_f, self.climo_table,
+            station,
+            hour,
+            month,
+            contract.threshold,
+            observation.temperature_f,
+            self.climo_table,
         )
 
         # Infer contract type
@@ -232,9 +236,7 @@ class WeatherSignalEvaluator:
         model_state.edge = raw_edge
 
         # 7. Spread-adjusted edge
-        effective_edge = compute_effective_edge(
-            raw_edge, orderbook.spread, _WIDE_SPREAD_THRESHOLD
-        )
+        effective_edge = compute_effective_edge(raw_edge, orderbook.spread, _WIDE_SPREAD_THRESHOLD)
 
         # Now check cooldown with bypass for strong edge
         if cooldown_active:
@@ -340,7 +342,7 @@ class WeatherSignalEvaluator:
 
         Returns an EXIT signal if edge has flipped against the held position.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         minutes = (contract.settlement_time - now).total_seconds() / 60.0
 
         if minutes < _EXIT_MIN_MINUTES:
@@ -364,8 +366,12 @@ class WeatherSignalEvaluator:
         weather_state = self._get_weather_state(contract)
 
         p_climo = climatological_probability(
-            station, hour, month, contract.threshold,
-            observation.temperature_f, self.climo_table,
+            station,
+            hour,
+            month,
+            contract.threshold,
+            observation.temperature_f,
+            self.climo_table,
         )
 
         cat = (contract.category or "").lower()
@@ -424,5 +430,3 @@ class WeatherSignalEvaluator:
     def clear_cooldown(self, ticker: str) -> None:
         """Clear cooldown for a ticker (e.g., after position closed)."""
         self._recent_signals.pop(ticker, None)
-
-

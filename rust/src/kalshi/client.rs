@@ -70,7 +70,10 @@ impl KalshiClient {
                         return resp.json::<T>().await.map_err(KalshiError::NetworkError);
                     }
 
-                    let body = resp.text().await.unwrap_or_else(|e| format!("<read error: {e}>"));
+                    let body = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|e| format!("<read error: {e}>"));
                     let err = parse_error_response(status.as_u16(), &body);
                     if status.is_server_error() && attempt < 2 {
                         let delay = Duration::from_secs(1 << attempt);
@@ -110,7 +113,14 @@ impl KalshiClient {
             let headers = self.auth_headers("POST", path)?;
             let start = std::time::Instant::now();
 
-            match self.http.post(&url).headers(headers).json(body).send().await {
+            match self
+                .http
+                .post(&url)
+                .headers(headers)
+                .json(body)
+                .send()
+                .await
+            {
                 Ok(resp) => {
                     let status = resp.status();
                     let latency = start.elapsed();
@@ -120,7 +130,10 @@ impl KalshiClient {
                         return resp.json::<T>().await.map_err(KalshiError::NetworkError);
                     }
 
-                    let body = resp.text().await.unwrap_or_else(|e| format!("<read error: {e}>"));
+                    let body = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|e| format!("<read error: {e}>"));
                     let err = parse_error_response(status.as_u16(), &body);
                     if status.is_server_error() && attempt < 2 {
                         let delay = Duration::from_secs(1 << attempt);
@@ -169,7 +182,10 @@ impl KalshiClient {
                         return resp.json::<T>().await.map_err(KalshiError::NetworkError);
                     }
 
-                    let body = resp.text().await.unwrap_or_else(|e| format!("<read error: {e}>"));
+                    let body = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|e| format!("<read error: {e}>"));
                     let err = parse_error_response(status.as_u16(), &body);
                     if status.is_server_error() && attempt < 1 {
                         let delay = Duration::from_secs(1);
@@ -217,10 +233,7 @@ impl KalshiClient {
 
     /// Fetch a single market by ticker.
     pub async fn get_market(&self, ticker: &str) -> Result<Market, KalshiError> {
-        let path = format!(
-            "/trade-api/v2/markets/{}",
-            urlencoding::encode(ticker)
-        );
+        let path = format!("/trade-api/v2/markets/{}", urlencoding::encode(ticker));
         let resp: MarketResponse = self.get(&path).await?;
         Ok(resp.market)
     }
@@ -249,8 +262,7 @@ impl KalshiClient {
 
     /// Get all open positions.
     pub async fn get_positions(&self) -> Result<Vec<Position>, KalshiError> {
-        let resp: PositionsResponse =
-            self.get("/trade-api/v2/portfolio/positions").await?;
+        let resp: PositionsResponse = self.get("/trade-api/v2/portfolio/positions").await?;
         Ok(resp.market_positions)
     }
 

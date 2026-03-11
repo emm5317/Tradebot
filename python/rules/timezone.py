@@ -11,7 +11,7 @@ always using the zone's standard (non-DST) UTC offset.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 
@@ -37,9 +37,7 @@ def compute_day_boundaries(
     std_offset = _standard_utc_offset(station_tz)
 
     # Midnight LST on target_date, expressed as UTC
-    day_start_utc = datetime.combine(
-        target_date, time(0, 0), tzinfo=timezone.utc
-    ) - std_offset
+    day_start_utc = datetime.combine(target_date, time(0, 0), tzinfo=UTC) - std_offset
 
     day_end_utc = day_start_utc + timedelta(days=1)
 

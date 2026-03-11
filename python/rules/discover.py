@@ -15,7 +15,6 @@ import json
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
 
 import asyncpg
 import structlog
@@ -51,9 +50,7 @@ async def discover_from_db(settings: Settings) -> dict[str, list[dict]]:
                 "city": r["city"],
                 "station": r["station"],
                 "threshold": r["threshold"],
-                "settlement_time": r["settlement_time"].isoformat()
-                if r["settlement_time"]
-                else None,
+                "settlement_time": r["settlement_time"].isoformat() if r["settlement_time"] else None,
                 "status": r["status"],
                 "settled_yes": r["settled_yes"],
             }
@@ -99,7 +96,7 @@ def _extract_prefix(ticker: str) -> str:
 def print_discovery_report(groups: dict[str, list[dict]]) -> None:
     """Print a human-readable report of discovered ticker formats."""
     print(f"\n{'=' * 70}")
-    print(f"TICKER FORMAT DISCOVERY REPORT")
+    print("TICKER FORMAT DISCOVERY REPORT")
     print(f"{'=' * 70}")
     print(f"Total tickers analyzed: {sum(len(v) for v in groups.values())}")
     print(f"Unique series prefixes: {len(groups)}")
@@ -112,7 +109,7 @@ def print_discovery_report(groups: dict[str, list[dict]]) -> None:
 
         # Show sample tickers
         samples = tickers[:5]
-        print(f"  Samples:")
+        print("  Samples:")
         for s in samples:
             print(f"    {s['ticker']}")
             if s.get("title"):
@@ -149,27 +146,27 @@ def _analyze_pattern(prefix: str, tickers: list[dict]) -> None:
 
         # Classify segment type
         if all(re.match(r"\d{2}[A-Z]{3}\d{2}", v) for v in unique):
-            print(f"    [{i+1}] DATE: {list(unique)[:5]}")
+            print(f"    [{i + 1}] DATE: {list(unique)[:5]}")
         elif all(re.match(r"[TB]\d+", v) for v in unique):
-            strikes = sorted(
-                float(v.lstrip("TBtb")) for v in unique if v.lstrip("TBtb").isdigit()
-            )
-            print(f"    [{i+1}] STRIKE: range {strikes[0]}-{strikes[-1]} ({len(unique)} unique)")
+            strikes = sorted(float(v.lstrip("TBtb")) for v in unique if v.lstrip("TBtb").isdigit())
+            print(f"    [{i + 1}] STRIKE: range {strikes[0]}-{strikes[-1]} ({len(unique)} unique)")
         elif all(v in ("CHI", "NYC", "DEN", "LAX", "HOU", "ORD", "JFK", "IAH") for v in unique):
-            print(f"    [{i+1}] CITY: {sorted(unique)}")
+            print(f"    [{i + 1}] CITY: {sorted(unique)}")
         elif all(v.isdigit() for v in unique):
             vals = sorted(float(v) for v in unique)
-            print(f"    [{i+1}] NUMERIC: range {vals[0]}-{vals[-1]} ({len(unique)} unique)")
+            print(f"    [{i + 1}] NUMERIC: range {vals[0]}-{vals[-1]} ({len(unique)} unique)")
         else:
-            print(f"    [{i+1}] OTHER: {list(unique)[:10]}")
+            print(f"    [{i + 1}] OTHER: {list(unique)[:10]}")
 
     # Generate suggested SERIES_CONFIG entry
     categories = {t.get("category", "").lower() for t in tickers}
     print(f"  Categories: {categories}")
-    print(f"  Suggested config:")
+    print("  Suggested config:")
 
     if "crypto" in categories or any("btc" in t.get("title", "").lower() for t in tickers):
-        print(f'    "{prefix}": {{"contract_type": "crypto_binary", "settlement_source": "cfb_rti", "underlying": "BTCUSD"}}')
+        print(
+            f'    "{prefix}": {{"contract_type": "crypto_binary", "settlement_source": "cfb_rti", "underlying": "BTCUSD"}}'
+        )
     elif "weather" in categories:
         print(f'    "{prefix}": {{"settlement_source": "nws_cli_dsm"}}')
     else:
@@ -197,7 +194,7 @@ async def main() -> None:
         }
         with open("ticker_discovery.json", "w") as f:
             json.dump(output, f, indent=2)
-        print(f"\nMachine-readable output saved to ticker_discovery.json")
+        print("\nMachine-readable output saved to ticker_discovery.json")
     else:
         print("Usage: python -m rules.discover [--from-db]")
 

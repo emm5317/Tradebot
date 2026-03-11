@@ -10,8 +10,8 @@ use std::time::Duration;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::KeysInterface;
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -36,7 +36,12 @@ impl DeribitFeed {
     }
 
     /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
-    pub async fn run(&self, redis: RedisClient, crypto_state: Arc<CryptoState>, feed_health: Arc<FeedHealth>) {
+    pub async fn run(
+        &self,
+        redis: RedisClient,
+        crypto_state: Arc<CryptoState>,
+        feed_health: Arc<FeedHealth>,
+    ) {
         let mut backoff_secs = 1u64;
         let max_backoff = 30u64;
 
@@ -46,7 +51,10 @@ impl DeribitFeed {
                 return;
             }
 
-            match self.connect_and_stream(&redis, &crypto_state, &feed_health).await {
+            match self
+                .connect_and_stream(&redis, &crypto_state, &feed_health)
+                .await
+            {
                 Ok(()) => {
                     warn!("deribit ws closed by server, will reconnect");
                     backoff_secs = 1;
@@ -139,10 +147,7 @@ fn parse_deribit_message(text: &str, state: &mut DeribitState) {
         None => return,
     };
 
-    let channel = params
-        .get("channel")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let channel = params.get("channel").and_then(|v| v.as_str()).unwrap_or("");
 
     if channel == "deribit_volatility_index.btc_usd" {
         if let Some(data) = params.get("data") {

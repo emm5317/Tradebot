@@ -22,14 +22,18 @@ pub trait RwLockExt<T> {
 impl<T> RwLockExt<T> for RwLock<T> {
     fn read_or_recover(&self) -> RwLockReadGuard<'_, T> {
         self.read().unwrap_or_else(|poisoned| {
-            error!("RwLock read poisoned — recovering (a thread panicked while holding write lock)");
+            error!(
+                "RwLock read poisoned — recovering (a thread panicked while holding write lock)"
+            );
             poisoned.into_inner()
         })
     }
 
     fn write_or_recover(&self) -> RwLockWriteGuard<'_, T> {
         self.write().unwrap_or_else(|poisoned| {
-            error!("RwLock write poisoned — recovering (a thread panicked while holding write lock)");
+            error!(
+                "RwLock write poisoned — recovering (a thread panicked while holding write lock)"
+            );
             poisoned.into_inner()
         })
     }

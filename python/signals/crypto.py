@@ -13,7 +13,7 @@ Improvements over spec:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 
@@ -66,7 +66,7 @@ class BlackoutWindow:
         self.end = end
 
     def is_active(self, at: datetime | None = None) -> bool:
-        at = at or datetime.now(timezone.utc)
+        at = at or datetime.now(UTC)
         return self.start <= at <= self.end
 
 
@@ -95,7 +95,7 @@ class CryptoSignalEvaluator:
         Returns:
             Tuple of (signal_or_none, rejection_or_none, model_state).
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         minutes = (contract.settlement_time - now).total_seconds() / 60.0
 
         # Use contract threshold as strike, or explicit override
@@ -193,9 +193,7 @@ class CryptoSignalEvaluator:
         model_state.edge = raw_edge
 
         # 9. Spread-adjusted edge
-        effective_edge = compute_effective_edge(
-            raw_edge, orderbook.spread, _WIDE_SPREAD_THRESHOLD
-        )
+        effective_edge = compute_effective_edge(raw_edge, orderbook.spread, _WIDE_SPREAD_THRESHOLD)
 
         if effective_edge < _MIN_EDGE:
             rejection = RejectedSignal(
@@ -270,7 +268,7 @@ class CryptoSignalEvaluator:
         strike: float | None = None,
     ) -> SignalSchema | None:
         """Re-evaluate open crypto position for exit."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         minutes = (contract.settlement_time - now).total_seconds() / 60.0
 
         if minutes < _EXIT_MIN_MINUTES:
@@ -366,5 +364,3 @@ async def load_blackout_windows(pool) -> list[BlackoutWindow]:
     except Exception:
         logger.warning("blackout_table_missing", msg="no blackout_events table, using empty list")
         return []
-
-
