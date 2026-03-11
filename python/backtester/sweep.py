@@ -29,6 +29,7 @@ from config import get_settings
 from data.mesonet import ASOSObservation
 from models.physics import StationCalibration
 from models.weather_fv import compute_weather_fair_value
+from rules.ticker_parser import _extract_weather_strike
 
 logger = structlog.get_logger()
 
@@ -592,6 +593,12 @@ class ParameterSweep:
             if settled_yes is None:
                 continue
 
+            threshold = contract["threshold"]
+            if threshold is None:
+                threshold = _extract_weather_strike(contract["ticker"], contract.get("title", ""))
+            if threshold is None:
+                continue
+
             result.total_contracts += 1
 
             snapshots = await self._fetch_snapshots(contract["ticker"], contract["settlement_time"])
@@ -619,7 +626,7 @@ class ParameterSweep:
 
                 fv = compute_weather_fair_value(
                     contract_type=contract_type,
-                    strike_f=float(contract["threshold"]),
+                    strike_f=float(threshold),
                     current_temp_f=obs.temperature_f,
                     minutes_remaining=minutes_remaining,
                     station_cal=cal,
