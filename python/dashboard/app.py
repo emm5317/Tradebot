@@ -138,8 +138,14 @@ async def model_state():
 
 
 @app.get("/api/signals")
-async def recent_signals(limit: int = 50, signal_type: str | None = None):
-    """Fetch recent signals from DB."""
+async def recent_signals(
+    limit: int = 50,
+    offset: int = 0,
+    signal_type: str | None = None,
+    acted_on: bool | None = None,
+    hours: int | None = None,
+):
+    """Fetch recent signals from DB with filtering and pagination."""
     assert pool is not None
 
     query = """
@@ -148,11 +154,13 @@ async def recent_signals(limit: int = 50, signal_type: str | None = None):
                rejection_reason, created_at
         FROM signals
         WHERE ($1::text IS NULL OR signal_type = $1)
+          AND ($3::boolean IS NULL OR acted_on = $3)
+          AND ($4::int IS NULL OR created_at >= NOW() - make_interval(hours => $4))
         ORDER BY created_at DESC
-        LIMIT $2
+        LIMIT $2 OFFSET $5
     """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(query, signal_type, limit)
+        rows = await conn.fetch(query, signal_type, limit, acted_on, hours, offset)
 
     return [dict(r) for r in rows]
 
@@ -372,6 +380,190 @@ async def system_status():
                     result["avg_latency_ms"] = lat_row["avg_lat"]
     except Exception:
         logger.warning("system_status_db_error")
+
+    return result
+
+
+@app.get("/api/decision-breakdown")
+async def decision_breakdown(hours: int = 24):
+    """Rejection reason breakdown from decision_log."""
+    assert pool is not None
+
+    query = """
+        SELECT rejection_reason, COUNT(*) as count
+        FROM decision_log
+        WHERE outcome = 'rejected'
+          AND rejection_reason IS NOT NULL
+          AND created_at >= NOW() - make_interval(hours => $1)
+        GROUP BY rejection_reason
+        ORDER BY count DESC
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, hours)
+
+    total = sum(r["count"] for r in rows) or 1
+    return [
+        {"reason": r["rejection_reason"], "count": r["count"], "pct": r["count"] / total}
+        for r in rows
+    ]
+
+
+@app.get("/api/orders")
+async def orders_list(limit: int = 50, offset: int = 0, hours: int | None = None):
+    """Fetch order history with pagination."""
+    assert pool is not None
+
+    query = """
+        SELECT id, ticker, direction, order_type, size_cents, fill_price,
+               status, outcome, pnl_cents, latency_ms, created_at, filled_at
+        FROM orders
+        WHERE ($1::int IS NULL OR created_at >= NOW() - make_interval(hours => $1))
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, hours, limit, offset)
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/execution-stats")
+async def execution_stats(hours: int = 24):
+    """Execution quality metrics from orders table."""
+    assert pool is not None
+
+    async with pool.acquire() as conn:
+        # Aggregate stats
+        row = await conn.fetchrow("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE status = 'filled') as filled,
+                COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled,
+                COUNT(*) FILTER (WHERE status = 'failed') as failed,
+                COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                AVG(latency_ms) FILTER (WHERE latency_ms IS NOT NULL) as avg_latency,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms)
+                    FILTER (WHERE latency_ms IS NOT NULL) as p50_latency,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms)
+                    FILTER (WHERE latency_ms IS NOT NULL) as p95_latency,
+                PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)
+                    FILTER (WHERE latency_ms IS NOT NULL) as p99_latency,
+                AVG(fill_price - s.market_price) FILTER (WHERE o.status = 'filled')
+                    as avg_slippage
+            FROM orders o
+            LEFT JOIN signals s ON o.signal_id = s.id
+            WHERE o.created_at >= NOW() - make_interval(hours => $1)
+        """, hours)
+
+        # Latency histogram (10 buckets)
+        lat_rows = await conn.fetch("""
+            SELECT latency_ms FROM orders
+            WHERE latency_ms IS NOT NULL
+              AND created_at >= NOW() - make_interval(hours => $1)
+            ORDER BY latency_ms
+        """, hours)
+
+    total = row["total"] or 0
+    filled = row["filled"] or 0
+    cancelled = row["cancelled"] or 0
+
+    # Build histogram from raw latencies
+    latencies = [float(r["latency_ms"]) for r in lat_rows]
+    histogram = []
+    if latencies:
+        lo, hi = min(latencies), max(latencies)
+        if lo == hi:
+            histogram = [len(latencies)]
+        else:
+            n_bins = 10
+            bin_width = (hi - lo) / n_bins
+            histogram = [0] * n_bins
+            for v in latencies:
+                idx = min(int((v - lo) / bin_width), n_bins - 1)
+                histogram[idx] += 1
+
+    return {
+        "total_orders": total,
+        "fill_rate": filled / total if total > 0 else 0,
+        "cancel_rate": cancelled / total if total > 0 else 0,
+        "avg_latency_ms": round(row["avg_latency"]) if row["avg_latency"] else None,
+        "p50_latency_ms": round(row["p50_latency"]) if row["p50_latency"] else None,
+        "p95_latency_ms": round(row["p95_latency"]) if row["p95_latency"] else None,
+        "p99_latency_ms": round(row["p99_latency"]) if row["p99_latency"] else None,
+        "avg_slippage": round(float(row["avg_slippage"]), 4) if row["avg_slippage"] else None,
+        "state_counts": {
+            "filled": filled,
+            "cancelled": cancelled,
+            "failed": row["failed"] or 0,
+            "pending": row["pending"] or 0,
+        },
+        "latency_histogram": histogram,
+        "latency_min": round(min(latencies)) if latencies else None,
+        "latency_max": round(max(latencies)) if latencies else None,
+    }
+
+
+@app.get("/api/microstructure")
+async def microstructure(hours: int = 1):
+    """Recent microstructure adjustments from decision_log."""
+    assert pool is not None
+
+    components = ["micro_trade", "micro_spread", "micro_depth",
+                  "micro_vwap", "micro_momentum", "micro_vol_surge"]
+
+    async with pool.acquire() as conn:
+        # Latest values
+        last_row = await conn.fetchrow("""
+            SELECT micro_trade, micro_spread, micro_depth,
+                   micro_vwap, micro_momentum, micro_vol_surge, micro_total
+            FROM decision_log
+            WHERE micro_total IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+
+        # Averages over window
+        avg_row = await conn.fetchrow("""
+            SELECT AVG(micro_trade) as avg_trade,
+                   AVG(micro_spread) as avg_spread,
+                   AVG(micro_depth) as avg_depth,
+                   AVG(micro_vwap) as avg_vwap,
+                   AVG(micro_momentum) as avg_momentum,
+                   AVG(micro_vol_surge) as avg_vol_surge,
+                   AVG(micro_total) as avg_total
+            FROM decision_log
+            WHERE micro_total IS NOT NULL
+              AND created_at >= NOW() - make_interval(hours => $1)
+        """, hours)
+
+    result = []
+    names = {
+        "micro_trade": "trade_flow",
+        "micro_spread": "spread_adj",
+        "micro_depth": "depth_adj",
+        "micro_vwap": "vwap_signal",
+        "micro_momentum": "momentum",
+        "micro_vol_surge": "vol_surge",
+    }
+
+    for col in components:
+        last_val = float(last_row[col]) if last_row and last_row[col] is not None else None
+        avg_col = f"avg_{col.replace('micro_', '')}"
+        avg_val = float(avg_row[avg_col]) if avg_row and avg_row[avg_col] is not None else None
+        result.append({
+            "component": names.get(col, col),
+            "last": round(last_val, 4) if last_val is not None else None,
+            "avg": round(avg_val, 4) if avg_val is not None else None,
+        })
+
+    # Add total
+    last_total = float(last_row["micro_total"]) if last_row and last_row["micro_total"] is not None else None
+    avg_total = float(avg_row["avg_total"]) if avg_row and avg_row["avg_total"] is not None else None
+    result.append({
+        "component": "TOTAL",
+        "last": round(last_total, 4) if last_total is not None else None,
+        "avg": round(avg_total, 4) if avg_total is not None else None,
+    })
 
     return result
 

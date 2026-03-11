@@ -1,14 +1,496 @@
 {% extends "base.html" %}
 {% block title_suffix %} — Execution{% endblock %}
+
 {% block content %}
-<div class="t-grid" style="grid-template-columns:1fr;">
+<div class="t-grid" style="grid-template-columns:1fr 1fr; grid-template-rows:auto 1fr;">
+
+    <!-- ── Execution Metrics (top-left) ─────────────────── -->
     <div class="t-panel">
         <div class="t-panel-header">
-            <div class="t-panel-title">Execution Quality</div>
+            <div class="t-panel-title">Execution Metrics</div>
+            <div class="t-panel-meta" id="meta-exec"></div>
+        </div>
+        <div class="t-panel-body" id="panel-exec-metrics"></div>
+    </div>
+
+    <!-- ── Latency Distribution (top-right) ─────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Latency Distribution</div>
         </div>
         <div class="t-panel-body">
-            <div class="t-empty">Phase 11.2 — Fill rates, latency distribution, order state flow, microstructure</div>
+            <canvas id="latency-histogram" style="width:100%; height:120px;"></canvas>
+            <div id="latency-percentiles" style="margin-top:var(--t-sp-md);"></div>
         </div>
     </div>
+
+    <!-- ── Order State Flow (mid-left) ──────────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Order State Flow</div>
+        </div>
+        <div class="t-panel-body" id="panel-state-flow"></div>
+    </div>
+
+    <!-- ── Microstructure (mid-right) ───────────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Microstructure Adjustments</div>
+            <div class="t-panel-meta" id="meta-micro"></div>
+        </div>
+        <div class="t-panel-body" id="panel-micro"></div>
+    </div>
+
+    <!-- ── Order Log (bottom full-width) ────────────────── -->
+    <div class="t-panel" style="grid-column:1/-1;">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Order Log</div>
+            <div style="display:flex; gap:var(--t-sp-md); align-items:center;">
+                <div class="t-panel-meta" id="meta-orders"></div>
+                <div style="display:flex; gap:var(--t-sp-sm);">
+                    <button class="t-btn" id="btn-prev-o" onclick="orderPageChange(-1)" disabled>&laquo; Prev</button>
+                    <span class="t-muted-txt" id="order-page-info" style="font-size:var(--t-fs-xs); line-height:22px;"></span>
+                    <button class="t-btn" id="btn-next-o" onclick="orderPageChange(1)">Next &raquo;</button>
+                </div>
+            </div>
+        </div>
+        <div class="t-panel-body" id="panel-order-log"></div>
+    </div>
 </div>
+
+<style>
+.t-btn {
+    background: var(--t-bg-panel);
+    color: var(--t-muted);
+    border: 1px solid var(--t-border);
+    padding: 2px 8px;
+    font-family: var(--t-font);
+    font-size: var(--t-fs-xs);
+    cursor: pointer;
+}
+.t-btn:hover:not(:disabled) { color: var(--t-text); border-color: var(--t-border-lit); }
+.t-btn:disabled { opacity: 0.3; cursor: default; }
+
+.t-metric-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--t-sp-md) var(--t-sp-xl);
+}
+.t-metric {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.t-metric-label {
+    font-size: var(--t-fs-xs);
+    color: var(--t-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.t-metric-value {
+    font-size: var(--t-fs-lg);
+    font-weight: 700;
+    color: var(--t-amber);
+}
+.t-metric-value.small {
+    font-size: var(--t-fs-md);
+    font-weight: 500;
+}
+
+.t-flow {
+    display: flex;
+    align-items: center;
+    gap: var(--t-sp-sm);
+    flex-wrap: wrap;
+    font-size: var(--t-fs-md);
+}
+.t-flow-node {
+    padding: 4px 10px;
+    border: 1px solid var(--t-border);
+    background: var(--t-bg-panel);
+    text-align: center;
+    min-width: 60px;
+}
+.t-flow-node.terminal { border-color: var(--t-border-lit); }
+.t-flow-arrow {
+    color: var(--t-dim);
+    font-size: var(--t-fs-sm);
+}
+.t-flow-count {
+    font-weight: 700;
+    color: var(--t-amber);
+}
+.t-flow-label {
+    font-size: var(--t-fs-xs);
+    color: var(--t-muted);
+    display: block;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.t-micro-row {
+    display: flex;
+    align-items: center;
+    gap: var(--t-sp-md);
+    padding: 3px 0;
+    border-bottom: 1px solid #1a1a1a;
+    font-size: var(--t-fs-base);
+}
+.t-micro-name {
+    width: 90px;
+    color: var(--t-text);
+    font-weight: 500;
+}
+.t-micro-bar-track {
+    flex: 1;
+    height: 6px;
+    background: var(--t-border);
+    border-radius: 1px;
+    position: relative;
+    overflow: hidden;
+}
+.t-micro-bar-fill {
+    position: absolute;
+    height: 100%;
+    border-radius: 1px;
+}
+.t-micro-val {
+    width: 50px;
+    text-align: right;
+    font-size: var(--t-fs-sm);
+}
+.t-micro-avg {
+    width: 55px;
+    text-align: right;
+    font-size: var(--t-fs-xs);
+    color: var(--t-muted);
+}
+.t-micro-row.total {
+    border-top: 1px solid var(--t-border);
+    border-bottom: none;
+    padding-top: var(--t-sp-sm);
+    margin-top: var(--t-sp-sm);
+}
+.t-micro-row.total .t-micro-name {
+    font-weight: 700;
+    color: var(--t-amber);
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var ORDER_PAGE_SIZE = 50;
+    var orderPage = 0;
+    var cachedStats = null;
+    var cachedMicro = [];
+    var cachedOrders = [];
+
+    Terminal.sortState.order_log = { col: 0, dir: -1 };
+
+    window.orderPageChange = function(delta) {
+        orderPage = Math.max(0, orderPage + delta);
+        fetchOrders();
+    };
+
+    // ── Execution Metrics ────────────────────────────────────────
+    function fetchStats() {
+        Terminal.fetchJSON('/api/execution-stats?hours=24').then(function(data) {
+            if (!data) return;
+            cachedStats = data;
+            renderStats();
+            renderHistogram();
+            renderStateFlow();
+        });
+    }
+
+    function renderStats() {
+        var el = document.getElementById('panel-exec-metrics');
+        var d = cachedStats;
+        if (!d) { el.innerHTML = '<div class="t-empty">no data</div>'; return; }
+
+        var slipStr = d.avg_slippage !== null ? (d.avg_slippage >= 0 ? '+' : '') + (d.avg_slippage * 100).toFixed(1) + 'c' : '\u2013';
+        var slipCls = d.avg_slippage === null ? '' : d.avg_slippage > 0 ? 't-negative' : 't-positive';
+
+        el.innerHTML = '<div class="t-metric-grid">' +
+            '<div class="t-metric">' +
+                '<span class="t-metric-label">Fill Rate</span>' +
+                '<span class="t-metric-value ' + (d.fill_rate >= 0.8 ? 't-positive' : 't-warn') + '">' + (d.fill_rate * 100).toFixed(1) + '%</span>' +
+            '</div>' +
+            '<div class="t-metric">' +
+                '<span class="t-metric-label">Avg Latency</span>' +
+                '<span class="t-metric-value">' + (d.avg_latency_ms !== null ? d.avg_latency_ms + 'ms' : '\u2013') + '</span>' +
+            '</div>' +
+            '<div class="t-metric">' +
+                '<span class="t-metric-label">Avg Slippage</span>' +
+                '<span class="t-metric-value small ' + slipCls + '">' + slipStr + '</span>' +
+            '</div>' +
+            '<div class="t-metric">' +
+                '<span class="t-metric-label">Orders (24h)</span>' +
+                '<span class="t-metric-value">' + d.total_orders + '</span>' +
+            '</div>' +
+            '<div class="t-metric">' +
+                '<span class="t-metric-label">Cancel Rate</span>' +
+                '<span class="t-metric-value small ' + (d.cancel_rate > 0.15 ? 't-warn' : '') + '">' + (d.cancel_rate * 100).toFixed(1) + '%</span>' +
+            '</div>' +
+            '<div class="t-metric">' +
+                '<span class="t-metric-label">Failed</span>' +
+                '<span class="t-metric-value small ' + (d.state_counts.failed > 0 ? 't-negative' : '') + '">' + d.state_counts.failed + '</span>' +
+            '</div>' +
+        '</div>';
+        Terminal.touchMeta('exec');
+    }
+
+    // ── Latency Histogram ────────────────────────────────────────
+    function renderHistogram() {
+        var canvas = document.getElementById('latency-histogram');
+        var d = cachedStats;
+        if (!canvas || !d || !d.latency_histogram || !d.latency_histogram.length) return;
+
+        var data = d.latency_histogram;
+        var ctx = canvas.getContext('2d');
+        var w = canvas.width = canvas.offsetWidth;
+        var h = canvas.height = 120;
+
+        ctx.clearRect(0, 0, w, h);
+
+        var maxVal = Math.max.apply(null, data) || 1;
+        var barW = Math.floor((w - 20) / data.length) - 2;
+        var startX = 10;
+
+        data.forEach(function(val, i) {
+            var barH = (val / maxVal) * (h - 24);
+            var x = startX + i * (barW + 2);
+            var y = h - 12 - barH;
+
+            ctx.fillStyle = '#ff8c00';
+            ctx.fillRect(x, y, barW, barH);
+
+            // Count label on top
+            if (val > 0) {
+                ctx.fillStyle = '#c0c0c0';
+                ctx.font = '9px IBM Plex Mono, monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(val, x + barW / 2, y - 2);
+            }
+        });
+
+        // X-axis labels
+        if (d.latency_min !== null && d.latency_max !== null) {
+            ctx.fillStyle = '#606060';
+            ctx.font = '9px IBM Plex Mono, monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(d.latency_min + 'ms', startX, h - 1);
+            ctx.textAlign = 'right';
+            ctx.fillText(d.latency_max + 'ms', w - 10, h - 1);
+        }
+
+        // Percentiles
+        var percEl = document.getElementById('latency-percentiles');
+        if (percEl) {
+            percEl.innerHTML =
+                '<span style="font-size:var(--t-fs-xs); color:var(--t-muted);">' +
+                'P50: <span class="t-bright">' + (d.p50_latency_ms !== null ? d.p50_latency_ms + 'ms' : '\u2013') + '</span> \u2003' +
+                'P95: <span class="t-bright">' + (d.p95_latency_ms !== null ? d.p95_latency_ms + 'ms' : '\u2013') + '</span> \u2003' +
+                'P99: <span class="t-bright">' + (d.p99_latency_ms !== null ? d.p99_latency_ms + 'ms' : '\u2013') + '</span>' +
+                '</span>';
+        }
+    }
+
+    // ── State Flow ───────────────────────────────────────────────
+    function renderStateFlow() {
+        var el = document.getElementById('panel-state-flow');
+        var d = cachedStats;
+        if (!d) { el.innerHTML = '<div class="t-empty">no data</div>'; return; }
+
+        var sc = d.state_counts;
+        var total = d.total_orders;
+
+        el.innerHTML =
+            '<div class="t-flow">' +
+                '<div class="t-flow-node">' +
+                    '<span class="t-flow-count">' + total + '</span>' +
+                    '<span class="t-flow-label">submitted</span>' +
+                '</div>' +
+                '<span class="t-flow-arrow">\u2192</span>' +
+                '<div class="t-flow-node terminal" style="border-left-color:var(--t-green);">' +
+                    '<span class="t-flow-count t-positive">' + sc.filled + '</span>' +
+                    '<span class="t-flow-label">filled</span>' +
+                '</div>' +
+            '</div>' +
+            '<div style="margin-top:var(--t-sp-md);"></div>' +
+            '<div class="t-flow" style="padding-left:60px;">' +
+                '<span class="t-flow-arrow" style="visibility:hidden;">\u2192</span>' +
+                '<span class="t-flow-arrow">\u2198</span>' +
+                '<div class="t-flow-node terminal" style="border-left-color:var(--t-yellow);">' +
+                    '<span class="t-flow-count t-warn">' + sc.cancelled + '</span>' +
+                    '<span class="t-flow-label">cancelled</span>' +
+                '</div>' +
+                '<div class="t-flow-node terminal" style="border-left-color:var(--t-red);">' +
+                    '<span class="t-flow-count t-negative">' + sc.failed + '</span>' +
+                    '<span class="t-flow-label">failed</span>' +
+                '</div>' +
+                '<div class="t-flow-node terminal">' +
+                    '<span class="t-flow-count">' + sc.pending + '</span>' +
+                    '<span class="t-flow-label">pending</span>' +
+                '</div>' +
+            '</div>' +
+            '<div style="margin-top:var(--t-sp-lg); font-size:var(--t-fs-xs); color:var(--t-muted);">' +
+                'Fill: ' + (total > 0 ? (sc.filled / total * 100).toFixed(0) : 0) + '% \u2003' +
+                'Cancel: ' + (total > 0 ? (sc.cancelled / total * 100).toFixed(0) : 0) + '% \u2003' +
+                'Fail: ' + (total > 0 ? (sc.failed / total * 100).toFixed(0) : 0) + '%' +
+            '</div>';
+    }
+
+    // ── Microstructure ───────────────────────────────────────────
+    function fetchMicro() {
+        Terminal.fetchJSON('/api/microstructure?hours=1').then(function(data) {
+            if (!data) return;
+            cachedMicro = data;
+            renderMicro();
+        });
+    }
+
+    function renderMicro() {
+        var el = document.getElementById('panel-micro');
+        if (!cachedMicro.length) {
+            el.innerHTML = '<div class="t-empty">no microstructure data</div>';
+            Terminal.touchMeta('micro');
+            return;
+        }
+
+        var maxAbs = 0;
+        cachedMicro.forEach(function(m) {
+            if (m.last !== null) maxAbs = Math.max(maxAbs, Math.abs(m.last));
+            if (m.avg !== null) maxAbs = Math.max(maxAbs, Math.abs(m.avg));
+        });
+        if (maxAbs === 0) maxAbs = 0.02;
+
+        // Header
+        var html = '<div class="t-micro-row" style="border-bottom:1px solid var(--t-border);">' +
+            '<span class="t-micro-name" style="color:var(--t-muted); font-size:var(--t-fs-xs); text-transform:uppercase; letter-spacing:1px;">Component</span>' +
+            '<div class="t-micro-bar-track" style="visibility:hidden;"></div>' +
+            '<span class="t-micro-val" style="color:var(--t-muted); font-size:var(--t-fs-xs); text-transform:uppercase;">Last</span>' +
+            '<span class="t-micro-avg" style="text-transform:uppercase; letter-spacing:1px;">Avg 1h</span>' +
+        '</div>';
+
+        cachedMicro.forEach(function(m) {
+            var isTotal = m.component === 'TOTAL';
+            var val = m.last !== null ? m.last : 0;
+            var barPct = Math.abs(val) / maxAbs * 50;
+            var barLeft = val >= 0 ? 50 : 50 - barPct;
+            var barColor = val >= 0 ? 'var(--t-green)' : 'var(--t-red)';
+            var valStr = m.last !== null ? (m.last >= 0 ? '+' : '') + m.last.toFixed(4) : '\u2013';
+            var avgStr = m.avg !== null ? (m.avg >= 0 ? '+' : '') + m.avg.toFixed(4) : '\u2013';
+            var valCls = m.last === null ? '' : m.last >= 0 ? 't-positive' : 't-negative';
+            var rowCls = isTotal ? 't-micro-row total' : 't-micro-row';
+
+            html += '<div class="' + rowCls + '">' +
+                '<span class="t-micro-name">' + m.component + '</span>' +
+                '<div class="t-micro-bar-track">' +
+                    '<div class="t-micro-bar-fill" style="left:' + barLeft.toFixed(1) + '%; width:' + barPct.toFixed(1) + '%; background:' + barColor + ';"></div>' +
+                    '<div style="position:absolute; left:50%; top:-1px; width:1px; height:8px; background:var(--t-dim);"></div>' +
+                '</div>' +
+                '<span class="t-micro-val ' + valCls + '">' + valStr + '</span>' +
+                '<span class="t-micro-avg">' + avgStr + '</span>' +
+            '</div>';
+        });
+
+        el.innerHTML = html;
+        Terminal.touchMeta('micro');
+    }
+
+    // ── Order Log ────────────────────────────────────────────────
+    function fetchOrders() {
+        var url = '/api/orders?limit=' + ORDER_PAGE_SIZE + '&offset=' + (orderPage * ORDER_PAGE_SIZE) + '&hours=168';
+        Terminal.fetchJSON(url).then(function(data) {
+            if (!data) return;
+            cachedOrders = data;
+            renderOrders();
+
+            document.getElementById('btn-prev-o').disabled = orderPage === 0;
+            document.getElementById('btn-next-o').disabled = data.length < ORDER_PAGE_SIZE;
+            document.getElementById('order-page-info').textContent = 'page ' + (orderPage + 1);
+        });
+    }
+
+    function renderOrders() {
+        var el = document.getElementById('panel-order-log');
+        if (!cachedOrders.length) {
+            el.innerHTML = '<div class="t-empty">no orders</div>';
+            Terminal.touchMeta('orders');
+            return;
+        }
+
+        var cols = [
+            { label: 'Time',    fn: function(o) { return new Date(o.created_at).getTime(); } },
+            { label: 'Ticker',  fn: function(o) { return o.ticker; } },
+            { label: 'Dir',     fn: function(o) { return o.direction; } },
+            { label: 'Size',    fn: function(o) { return o.size_cents; } },
+            { label: 'Fill',    fn: function(o) { return o.fill_price || 0; } },
+            { label: 'Status',  fn: function(o) { return o.status; } },
+            { label: 'Outcome', fn: function(o) { return o.outcome || ''; } },
+            { label: 'Lat',     fn: function(o) { return o.latency_ms || 0; } },
+            { label: 'P&L',     fn: function(o) { return o.pnl_cents || 0; } },
+        ];
+
+        var sorted = Terminal.applySort(cachedOrders, 'order_log', cols);
+        var st = Terminal.sortState.order_log;
+
+        var html = '<table class="t-table"><thead><tr>';
+        cols.forEach(function(c, i) {
+            var cls = i === st.col ? (st.dir === 1 ? 'sort-asc' : 'sort-desc') : '';
+            html += '<th class="' + cls + '" data-col="' + i + '">' + c.label + '</th>';
+        });
+        html += '</tr></thead><tbody>';
+
+        sorted.forEach(function(o, idx) {
+            var ts = new Date(o.created_at);
+            var timeStr = ts.getUTCHours().toString().padStart(2,'0') + ':' +
+                          ts.getUTCMinutes().toString().padStart(2,'0') + ':' +
+                          ts.getUTCSeconds().toString().padStart(2,'0');
+            var statusCls = o.status === 'filled' ? 't-positive' :
+                           o.status === 'cancelled' ? 't-warn' :
+                           o.status === 'failed' ? 't-negative' : 't-muted-txt';
+            var outcomeCls = o.outcome === 'win' ? 't-positive' :
+                            o.outcome === 'loss' ? 't-negative' : 't-muted-txt';
+            var pnl = o.pnl_cents;
+            var pnlStr = pnl !== null ? Terminal.formatPnl(pnl) : '\u2013';
+            var pnlCls = pnl !== null ? Terminal.pnlClass(pnl) : 't-muted-txt';
+
+            html += '<tr class="t-row-new" style="animation-delay:' + (idx * 0.008) + 's">' +
+                '<td class="t-muted-txt">' + timeStr + '</td>' +
+                '<td class="t-ticker">' + o.ticker + '</td>' +
+                '<td class="' + (o.direction === 'yes' ? 't-yes' : 't-no') + '">' + o.direction + '</td>' +
+                '<td>$' + (o.size_cents / 100).toFixed(2) + '</td>' +
+                '<td>' + (o.fill_price ? (o.fill_price * 100).toFixed(0) + 'c' : '\u2013') + '</td>' +
+                '<td class="' + statusCls + '">' + o.status + '</td>' +
+                '<td class="' + outcomeCls + '">' + (o.outcome || '\u2013') + '</td>' +
+                '<td class="t-muted-txt">' + (o.latency_ms ? Math.round(o.latency_ms) + 'ms' : '\u2013') + '</td>' +
+                '<td class="' + pnlCls + '">' + pnlStr + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table>';
+
+        el.innerHTML = html;
+        Terminal.bindSort(el, 'order_log', renderOrders);
+        Terminal.touchMeta('orders');
+    }
+
+    // ── Refresh ──────────────────────────────────────────────────
+    function fetchAll() {
+        fetchStats();
+        fetchMicro();
+        fetchOrders();
+    }
+
+    Terminal.refreshPage = fetchAll;
+
+    fetchAll();
+    setInterval(fetchStats, 15000);
+    setInterval(fetchMicro, 10000);
+    setInterval(fetchOrders, 15000);
+})();
+</script>
 {% endblock %}
