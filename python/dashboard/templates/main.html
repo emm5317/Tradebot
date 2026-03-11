@@ -1,0 +1,376 @@
+{% extends "base.html" %}
+
+{% block title_suffix %} — Main{% endblock %}
+
+{% block content %}
+<div class="t-grid t-grid-2c-top-1c-bot">
+
+    <!-- ── Active Contracts (top-left) ──────────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Active Contracts <span class="t-live"></span></div>
+            <div class="t-panel-meta" id="meta-contracts"></div>
+        </div>
+        <div class="t-panel-body" id="panel-contracts"></div>
+    </div>
+
+    <!-- ── Positions + Daily Summary (top-right) ────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Positions</div>
+            <div class="t-panel-meta" id="meta-positions"></div>
+        </div>
+        <div class="t-panel-body">
+            <div id="panel-positions"></div>
+            <div style="margin-top:var(--t-sp-lg); padding-top:var(--t-sp-lg); border-top:1px solid var(--t-border);">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--t-sp-md);">
+                    <span style="font-size:var(--t-fs-sm); color:var(--t-muted); text-transform:uppercase; letter-spacing:2px; font-weight:600;">Daily Summary</span>
+                    <canvas id="pnl-sparkline" class="t-sparkline" style="width:120px; height:24px;"></canvas>
+                </div>
+                <div id="panel-summary"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Recent Signals (bottom full-width) ───────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Recent Signals</div>
+            <div class="t-panel-meta" id="meta-signals"></div>
+        </div>
+        <div class="t-panel-body" id="panel-signals"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var EDGE_MIN = 0.05;
+
+    // ── Cached Data ──────────────────────────────────────────────
+    var cachedContracts = [];
+    var cachedSignals = [];
+    var cachedPositions = [];
+    var cachedSummary = [];
+
+    // ── Sort States ──────────────────────────────────────────────
+    Terminal.sortState.signals   = { col: 0, dir: -1 };
+    Terminal.sortState.positions = { col: 0, dir: 1 };
+    Terminal.sortState.summary   = { col: 0, dir: -1 };
+
+    // ── Contracts ────────────────────────────────────────────────
+    function fetchContracts() {
+        Terminal.fetchJSON('/api/model-state').then(function(data) {
+            if (!data) return;
+            cachedContracts = data;
+            renderContracts();
+        });
+    }
+
+    function renderContracts() {
+        var el = document.getElementById('panel-contracts');
+        if (!cachedContracts.length) {
+            el.innerHTML = '<div class="t-empty">no active contracts</div>';
+            Terminal.touchMeta('contracts');
+            return;
+        }
+
+        el.innerHTML = '<div class="t-model-cards">' + cachedContracts.map(function(s) {
+            var dir = s.direction || '?';
+            var prob = s.model_prob || 0;
+            var edge = s.edge || 0;
+            var edgeFrac = Math.min(edge / 0.15, 1);
+            var edgeFill = edge >= EDGE_MIN ? 'green' : 'amber';
+            var threshPct = (EDGE_MIN / 0.15) * 100;
+            var cardClass = edge >= EDGE_MIN ? 'has-edge' : 'low-edge';
+
+            var rej = s.rejection_reason
+                ? '<div class="t-card-rejection ' + Terminal.rejClass(s.rejection_reason) + '">' + s.rejection_reason + '</div>'
+                : '';
+
+            return '<div class="t-model-card ' + cardClass + '">' +
+                '<div class="t-card-top">' +
+                    '<span class="t-card-ticker">' + s.ticker + '</span>' +
+                    '<span class="t-card-dir ' + (dir === 'yes' ? 't-yes' : 't-no') + '">' + dir.toUpperCase() + '</span>' +
+                '</div>' +
+                '<div class="t-card-bars">' +
+                    '<div class="t-bar-row">' +
+                        '<span class="t-bar-label">Prob</span>' +
+                        '<div class="t-bar-track"><div class="t-bar-fill ' + (dir === 'yes' ? 'green' : 'red') + '" style="width:' + (prob * 100).toFixed(1) + '%"></div></div>' +
+                        '<span class="t-bar-value">' + (prob * 100).toFixed(1) + '%</span>' +
+                    '</div>' +
+                    '<div class="t-bar-row">' +
+                        '<span class="t-bar-label">Edge</span>' +
+                        '<div class="t-bar-track">' +
+                            '<div class="t-bar-fill ' + edgeFill + '" style="width:' + (edgeFrac * 100).toFixed(1) + '%"></div>' +
+                            '<div class="t-bar-threshold" style="left:' + threshPct.toFixed(1) + '%"></div>' +
+                        '</div>' +
+                        '<span class="t-bar-value ' + (edge >= EDGE_MIN ? 't-positive' : 't-warn') + '">' + (edge * 100).toFixed(1) + '%</span>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="t-card-details">' +
+                    '<div class="t-card-detail"><span class="t-card-detail-label">MKT</span><span class="t-card-detail-value">' + ((s.market_price || 0) * 100).toFixed(1) + '%</span></div>' +
+                    '<div class="t-card-detail"><span class="t-card-detail-label">MIN</span><span class="t-card-detail-value">' + (s.minutes_remaining ? s.minutes_remaining.toFixed(0) : '\u2013') + '</span></div>' +
+                '</div>' +
+                rej +
+            '</div>';
+        }).join('') + '</div>';
+        Terminal.touchMeta('contracts');
+    }
+
+    // ── Positions ────────────────────────────────────────────────
+    function fetchPositions() {
+        Terminal.fetchJSON('/api/positions').then(function(data) {
+            if (!data) return;
+            data.forEach(function(p) {
+                if (!p.current_price) {
+                    var match = cachedContracts.find(function(m) { return m.ticker === p.ticker; });
+                    if (match) p.current_price = match.market_price;
+                }
+            });
+            cachedPositions = data;
+            renderPositions();
+        });
+    }
+
+    function calcUnrealized(p) {
+        if (!p.fill_price || !p.current_price || p.status === 'closed') return null;
+        var shares = p.size_cents / (p.fill_price * 100);
+        var diff = (p.current_price - p.fill_price) * (p.direction === 'yes' ? 1 : -1);
+        return Math.round(diff * shares * 100);
+    }
+
+    function renderPositions() {
+        var el = document.getElementById('panel-positions');
+        if (!cachedPositions.length) {
+            el.innerHTML = '<div class="t-empty">no open positions</div>';
+            Terminal.touchMeta('positions');
+            return;
+        }
+
+        var cols = [
+            { label: 'Ticker',  fn: function(p) { return p.ticker; } },
+            { label: 'Dir',     fn: function(p) { return p.direction; } },
+            { label: 'Size',    fn: function(p) { return p.size_cents; } },
+            { label: 'Fill',    fn: function(p) { return p.fill_price || 0; } },
+            { label: 'Unreal.', fn: function(p) { var u = calcUnrealized(p); return u !== null ? u : -Infinity; } },
+            { label: 'Status',  fn: function(p) { return p.status; } },
+            { label: 'Lat',     fn: function(p) { return p.latency_ms || 0; } },
+        ];
+
+        var sorted = Terminal.applySort(cachedPositions, 'positions', cols);
+        var st = Terminal.sortState.positions;
+
+        var html = '<table class="t-table"><thead><tr>';
+        cols.forEach(function(c, i) {
+            var cls = i === st.col ? (st.dir === 1 ? 'sort-asc' : 'sort-desc') : '';
+            html += '<th class="' + cls + '" data-col="' + i + '">' + c.label + '</th>';
+        });
+        html += '</tr></thead><tbody>';
+
+        sorted.forEach(function(p, idx) {
+            var upnl = calcUnrealized(p);
+            var upnlStr = upnl === null ? '\u2013' : Terminal.formatPnl(upnl);
+            var upnlCls = upnl === null ? 't-pnl-zero' : Terminal.pnlClass(upnl);
+            var statusCls = p.status === 'filled' ? 't-positive' : p.status === 'pending' ? 't-warn' : 't-muted-txt';
+
+            html += '<tr class="t-row-new" style="animation-delay:' + (idx * 0.015) + 's">' +
+                '<td class="t-ticker">' + p.ticker + '</td>' +
+                '<td class="' + (p.direction === 'yes' ? 't-yes' : 't-no') + '">' + p.direction + '</td>' +
+                '<td>$' + (p.size_cents / 100).toFixed(2) + '</td>' +
+                '<td>' + (p.fill_price ? (p.fill_price * 100).toFixed(0) + 'c' : '\u2013') + '</td>' +
+                '<td class="' + upnlCls + '">' + upnlStr + '</td>' +
+                '<td class="' + statusCls + '">' + p.status + '</td>' +
+                '<td class="t-muted-txt">' + (p.latency_ms ? p.latency_ms + 'ms' : '\u2013') + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table>';
+
+        el.innerHTML = html;
+        Terminal.bindSort(el, 'positions', renderPositions);
+        Terminal.touchMeta('positions');
+    }
+
+    // ── Daily Summary ────────────────────────────────────────────
+    function fetchSummary() {
+        Terminal.fetchJSON('/api/daily-summary').then(function(data) {
+            if (!data) return;
+            cachedSummary = data;
+            renderSummary();
+        });
+    }
+
+    function renderSummary() {
+        var el = document.getElementById('panel-summary');
+        if (!cachedSummary.length) {
+            el.innerHTML = '<div class="t-empty">no trading data</div>';
+            return;
+        }
+
+        // Draw sparkline
+        var canvas = document.getElementById('pnl-sparkline');
+        if (canvas && cachedSummary.length > 1) {
+            var pnlData = cachedSummary.slice().reverse().map(function(d) {
+                return (d.net_pnl_cents || 0) / 100;
+            });
+            Terminal.sparkline(canvas, pnlData, { width: 120, height: 24 });
+        }
+
+        var cols = [
+            { label: 'Date',    fn: function(d) { return d.date; } },
+            { label: 'Signals', fn: function(d) { return d.total_signals || 0; } },
+            { label: 'Orders',  fn: function(d) { return d.total_orders || 0; } },
+            { label: 'W / L',   fn: function(d) { return (d.wins || 0) - (d.losses || 0); } },
+            { label: 'Net P&L', fn: function(d) { return d.net_pnl_cents || 0; } },
+        ];
+
+        var sorted = Terminal.applySort(cachedSummary, 'summary', cols);
+        var st = Terminal.sortState.summary;
+
+        var html = '<table class="t-table"><thead><tr>';
+        cols.forEach(function(c, i) {
+            var cls = i === st.col ? (st.dir === 1 ? 'sort-asc' : 'sort-desc') : '';
+            html += '<th class="' + cls + '" data-col="' + i + '">' + c.label + '</th>';
+        });
+        html += '</tr></thead><tbody>';
+
+        sorted.forEach(function(d, idx) {
+            var pnl = (d.net_pnl_cents || 0);
+            html += '<tr class="t-row-new" style="animation-delay:' + (idx * 0.015) + 's">' +
+                '<td class="t-bright">' + d.date + '</td>' +
+                '<td>' + (d.total_signals || 0) + '</td>' +
+                '<td>' + (d.total_orders || 0) + '</td>' +
+                '<td>' + (d.wins || 0) + '/' + (d.losses || 0) + '</td>' +
+                '<td class="' + Terminal.pnlClass(pnl) + '">' + Terminal.formatPnl(pnl) + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table>';
+
+        el.innerHTML = html;
+        Terminal.bindSort(el, 'summary', renderSummary);
+    }
+
+    // ── Signals ──────────────────────────────────────────────────
+    function fetchSignals() {
+        Terminal.fetchJSON('/api/signals?limit=30').then(function(data) {
+            if (!data) return;
+            cachedSignals = data;
+            renderSignals();
+        });
+    }
+
+    function buildHeatmap(signals) {
+        var all = signals.slice().reverse();
+        var fired = all.filter(function(s) { return s.acted_on; }).length;
+        var total = all.length;
+
+        var blocks = all.map(function(s) {
+            var cls, tip;
+            if (s.acted_on) {
+                cls = 't-hm-fired';
+                tip = 'FIRED | ' + s.ticker + ' ' + s.direction + ' | ' + (s.edge * 100).toFixed(1) + '%';
+            } else if ((s.rejection_reason || '').includes('edge')) {
+                cls = 't-hm-low-edge';
+                tip = 'LOW EDGE | ' + s.ticker + ' | ' + ((s.edge || 0) * 100).toFixed(1) + '%';
+            } else {
+                cls = 't-hm-rejected';
+                tip = 'REJECTED | ' + s.ticker + ' | ' + (s.rejection_reason || 'unknown');
+            }
+            return '<div class="t-hm ' + cls + '" title="' + tip + '"></div>';
+        }).join('');
+
+        return '<div class="t-heatmap-wrap">' +
+            '<div class="t-heatmap-label">' +
+                'Last ' + total + ' signals \u2003' +
+                '<span class="t-positive">' + fired + ' fired</span> \u2003' +
+                '<span class="t-muted-txt">' + (total - fired) + ' rejected</span>' +
+            '</div>' +
+            '<div class="t-heatmap-strip">' + blocks + '</div>' +
+        '</div>';
+    }
+
+    function renderSignals() {
+        var el = document.getElementById('panel-signals');
+        if (!cachedSignals.length) {
+            el.innerHTML = '<div class="t-empty">no signals yet</div>';
+            Terminal.touchMeta('signals');
+            return;
+        }
+
+        var cols = [
+            { label: 'Age',    fn: function(s) { return new Date(s.created_at).getTime(); } },
+            { label: 'Ticker', fn: function(s) { return s.ticker; } },
+            { label: 'Type',   fn: function(s) { return s.signal_type || ''; } },
+            { label: 'Dir',    fn: function(s) { return s.direction || ''; } },
+            { label: 'Edge',   fn: function(s) { return s.edge || 0; } },
+            { label: 'Kelly',  fn: function(s) { return s.kelly_fraction || 0; } },
+            { label: 'Status', fn: function(s) { return s.acted_on ? 1 : 0; } },
+        ];
+
+        var sorted = Terminal.applySort(cachedSignals, 'signals', cols);
+        var st = Terminal.sortState.signals;
+
+        var html = buildHeatmap(cachedSignals) +
+            '<table class="t-table"><thead><tr>';
+        cols.forEach(function(c, i) {
+            var cls = i === st.col ? (st.dir === 1 ? 'sort-asc' : 'sort-desc') : '';
+            html += '<th class="' + cls + '" data-col="' + i + '">' + c.label + '</th>';
+        });
+        html += '</tr></thead><tbody>';
+
+        sorted.forEach(function(s, idx) {
+            var ts = new Date(s.created_at).getTime();
+            var dir = s.acted_on
+                ? '<span class="' + (s.direction === 'yes' ? 't-yes' : 't-no') + '">' + s.direction + '</span>'
+                : '<span class="t-dim-txt">\u2013</span>';
+            var edge = s.edge ? Terminal.formatPct(s.edge) : '\u2013';
+            var kelly = s.kelly_fraction ? Terminal.formatPct(s.kelly_fraction) : '\u2013';
+            var status = s.acted_on
+                ? '<span class="t-fired">FIRED</span>'
+                : '<span class="t-rejected ' + Terminal.rejClass(s.rejection_reason) + '">' + (s.rejection_reason || 'rejected') + '</span>';
+            var typeCls = s.signal_type === 'crypto' ? 't-amber-txt' : 't-info';
+
+            html += '<tr class="t-row-new" style="animation-delay:' + (idx * 0.012) + 's">' +
+                '<td><span class="' + Terminal.ageClass(new Date(ts)) + '" data-ts="' + ts + '">' + Terminal.ageText(new Date(ts)) + '</span></td>' +
+                '<td class="t-ticker">' + s.ticker + '</td>' +
+                '<td class="' + typeCls + '">' + (s.signal_type || '\u2013') + '</td>' +
+                '<td>' + dir + '</td>' +
+                '<td>' + edge + '</td>' +
+                '<td>' + kelly + '</td>' +
+                '<td>' + status + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table>';
+
+        el.innerHTML = html;
+        Terminal.bindSort(el, 'signals', renderSignals);
+        Terminal.touchMeta('signals');
+    }
+
+    // ── SSE handlers ─────────────────────────────────────────────
+    Terminal.onSSE('model_state', function(data) {
+        cachedContracts = data;
+        renderContracts();
+    });
+
+    // ── Refresh ──────────────────────────────────────────────────
+    function fetchAll() {
+        fetchContracts();
+        fetchPositions();
+        fetchSignals();
+        fetchSummary();
+    }
+
+    Terminal.refreshPage = fetchAll;
+
+    // ── Init ─────────────────────────────────────────────────────
+    fetchAll();
+    setInterval(fetchContracts, 5000);
+    setInterval(fetchSignals, 5000);
+    setInterval(fetchPositions, 10000);
+    setInterval(fetchSummary, 30000);
+
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tradebot Terminal{% block title_suffix %}{% endblock %}</title>
+    <link rel="stylesheet" href="/static/terminal.css">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <div class="t-shell">
+
+        <!-- ── Top Bar ──────────────────────────────────────── -->
+        <div class="t-topbar">
+            <div class="t-topbar-left">
+                <span class="t-logo">TRADEBOT</span>
+                <div class="t-topbar-data">
+                    <div class="t-topbar-item">
+                        <span class="t-topbar-label">BTC</span>
+                        <span class="t-topbar-value" id="t-btc-price">—</span>
+                    </div>
+                    <div class="t-topbar-item">
+                        <span class="t-topbar-label">Feeds</span>
+                        <div class="t-feed-dots" id="t-feed-dots">
+                            <div class="t-feed-dot stale"></div>
+                            <div class="t-feed-dot stale"></div>
+                            <div class="t-feed-dot stale"></div>
+                            <div class="t-feed-dot stale"></div>
+                            <div class="t-feed-dot stale"></div>
+                        </div>
+                    </div>
+                    <div class="t-topbar-item">
+                        <span class="t-topbar-label">P&L</span>
+                        <span class="t-topbar-value t-pnl-zero" id="t-daily-pnl">—</span>
+                    </div>
+                </div>
+            </div>
+            <div class="t-topbar-right">
+                <span class="t-clock" id="t-clock">--:--:-- UTC</span>
+            </div>
+        </div>
+
+        <!-- ── Tab Bar ──────────────────────────────────────── -->
+        <div class="t-tabs">
+            <a href="/" class="t-tab{% if active_tab == 'main' %} active{% endif %}">
+                Main<span class="t-tab-key">1</span>
+            </a>
+            <a href="/signals" class="t-tab{% if active_tab == 'signals' %} active{% endif %}">
+                Sgnl<span class="t-tab-key">2</span>
+            </a>
+            <a href="/execution" class="t-tab{% if active_tab == 'execution' %} active{% endif %}">
+                Exec<span class="t-tab-key">3</span>
+            </a>
+            <a href="/analytics" class="t-tab{% if active_tab == 'analytics' %} active{% endif %}">
+                Anal<span class="t-tab-key">4</span>
+            </a>
+            <a href="/risk" class="t-tab{% if active_tab == 'risk' %} active{% endif %}">
+                Risk<span class="t-tab-key">5</span>
+            </a>
+            <a href="/weather" class="t-tab{% if active_tab == 'weather' %} active{% endif %}">
+                Weat<span class="t-tab-key">6</span>
+            </a>
+            <div class="t-tab-spacer"></div>
+        </div>
+
+        <!-- ── Content ──────────────────────────────────────── -->
+        <div class="t-content">
+            {% block content %}{% endblock %}
+        </div>
+
+        <!-- ── Status Bar ───────────────────────────────────── -->
+        <div class="t-statusbar">
+            <div class="t-status-item">
+                <span id="t-mode" class="t-mode-paper">PAPER</span>
+            </div>
+            <div class="t-status-item">
+                <span class="t-status-label">Pos</span>
+                <span class="t-status-value" id="t-positions-count">—</span>
+            </div>
+            <div class="t-status-item">
+                <span class="t-status-label">Signals</span>
+                <span class="t-status-value" id="t-signal-rate">—</span>
+            </div>
+            <div class="t-status-item">
+                <span class="t-status-label">Brier</span>
+                <span class="t-status-value" id="t-brier">—</span>
+            </div>
+            <div class="t-status-item">
+                <span class="t-status-label">Lat</span>
+                <span class="t-status-value" id="t-latency">—</span>
+            </div>
+            <div class="t-status-spacer"></div>
+            <div class="t-status-item">
+                <span class="t-status-version">v11.0</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/terminal.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

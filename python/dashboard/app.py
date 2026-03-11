@@ -1,6 +1,6 @@
-"""Terminal-style web dashboard for Tradebot.
+"""Bloomberg-style terminal dashboard for Tradebot.
 
-FastAPI + Jinja2 + htmx + SSE. Dark theme, monospace, information-dense.
+FastAPI + Jinja2 + SSE. 6-page tabbed terminal with persistent status bar.
 Reads model state from Redis, signal history from DB, live events from NATS.
 """
 
@@ -17,7 +17,7 @@ import redis.asyncio as aioredis
 import structlog
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
@@ -48,14 +48,51 @@ async def lifespan(app: FastAPI):
         await redis_client.close()
 
 
-app = FastAPI(title="Tradebot Dashboard", lifespan=lifespan)
+app = FastAPI(title="Tradebot Terminal", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="dashboard/static"), name="static")
 templates = Jinja2Templates(directory="dashboard/templates")
 
 
+# ── Page Routes ──────────────────────────────────────────────────────
+
+
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+async def page_main(request: Request):
+    return templates.TemplateResponse("main.html", {"request": request, "active_tab": "main"})
+
+
+@app.get("/signals", response_class=HTMLResponse)
+async def page_signals(request: Request):
+    return templates.TemplateResponse("signals.html", {"request": request, "active_tab": "signals"})
+
+
+@app.get("/execution", response_class=HTMLResponse)
+async def page_execution(request: Request):
+    return templates.TemplateResponse("execution.html", {"request": request, "active_tab": "execution"})
+
+
+@app.get("/analytics", response_class=HTMLResponse)
+async def page_analytics(request: Request):
+    return templates.TemplateResponse("analytics.html", {"request": request, "active_tab": "analytics"})
+
+
+@app.get("/risk", response_class=HTMLResponse)
+async def page_risk(request: Request):
+    return templates.TemplateResponse("risk.html", {"request": request, "active_tab": "risk"})
+
+
+@app.get("/weather", response_class=HTMLResponse)
+async def page_weather(request: Request):
+    return templates.TemplateResponse("weather.html", {"request": request, "active_tab": "weather"})
+
+
+# Legacy route redirect
+@app.get("/calibration")
+async def calibration_redirect():
+    return RedirectResponse(url="/analytics", status_code=301)
+
+
+# ── API Endpoints ────────────────────────────────────────────────────
 
 
 @app.get("/api/health")
@@ -177,11 +214,6 @@ async def strategy_performance(strategy: str | None = None, days: int = 30):
     return [dict(r) for r in rows]
 
 
-@app.get("/calibration", response_class=HTMLResponse)
-async def calibration_page(request: Request):
-    return templates.TemplateResponse("calibration.html", {"request": request})
-
-
 @app.get("/api/calibration/brier")
 async def calibration_brier(strategy: str | None = None, days: int = 30):
     """Brier score trend over time, per-strategy."""
@@ -237,8 +269,8 @@ async def performance_metrics(days: int = 30):
 
     # Compute cumulative P&L and drawdown
     results = []
-    cumulative = {"weather": 0, "crypto": 0}
-    peak = {"weather": 0, "crypto": 0}
+    cumulative: dict[str, int] = {"weather": 0, "crypto": 0}
+    peak: dict[str, int] = {"weather": 0, "crypto": 0}
     for r in rows:
         d = dict(r)
         strat = d["strategy"]
@@ -253,15 +285,111 @@ async def performance_metrics(days: int = 30):
     return results
 
 
+@app.get("/api/system-status")
+async def system_status():
+    """Aggregated status data for the terminal status bar and top bar.
+
+    Returns BTC price, feed health, daily P&L, position count, signal rate,
+    Brier score, average latency, and paper mode status.
+    """
+    result: dict = {
+        "btc_price": None,
+        "feeds": {},
+        "daily_pnl_cents": 0,
+        "positions_count": 0,
+        "signal_rate_1h": 0,
+        "brier_score": None,
+        "avg_latency_ms": None,
+        "paper_mode": True,
+    }
+
+    try:
+        # BTC price from Redis
+        if redis_client:
+            raw = await redis_client.get("crypto:coinbase")
+            if raw:
+                data = json.loads(raw)
+                result["btc_price"] = data.get("spot") or data.get("price")
+
+            # Feed health from Redis
+            feeds = ["coinbase", "binance_spot", "binance_futures", "deribit", "kalshi_ws"]
+            for feed in feeds:
+                raw = await redis_client.get(f"feed:status:{feed}")
+                if raw:
+                    fdata = json.loads(raw)
+                    result["feeds"][feed] = {
+                        "score": fdata.get("score", 0),
+                        "age_ms": fdata.get("age_ms", 0),
+                    }
+                else:
+                    result["feeds"][feed] = {"score": 0, "age_ms": 0}
+    except Exception:
+        logger.warning("system_status_redis_error")
+
+    try:
+        if pool:
+            async with pool.acquire() as conn:
+                # Daily P&L (sum of today's realized)
+                row = await conn.fetchrow("""
+                    SELECT COALESCE(SUM(realized_pnl_cents), 0) as pnl
+                    FROM strategy_performance
+                    WHERE date = CURRENT_DATE
+                """)
+                if row:
+                    result["daily_pnl_cents"] = row["pnl"]
+
+                # Open positions count
+                count = await conn.fetchval("""
+                    SELECT COUNT(*) FROM orders
+                    WHERE status IN ('filled', 'pending')
+                """)
+                result["positions_count"] = count or 0
+
+                # Signal rate (last hour)
+                sig_count = await conn.fetchval("""
+                    SELECT COUNT(*) FROM signals
+                    WHERE created_at >= NOW() - INTERVAL '1 hour'
+                """)
+                result["signal_rate_1h"] = sig_count or 0
+
+                # Latest Brier score
+                brier_row = await conn.fetchrow("""
+                    SELECT brier_score FROM strategy_performance
+                    WHERE brier_score IS NOT NULL
+                    ORDER BY date DESC
+                    LIMIT 1
+                """)
+                if brier_row and brier_row["brier_score"] is not None:
+                    result["brier_score"] = float(brier_row["brier_score"])
+
+                # Average latency (last hour)
+                lat_row = await conn.fetchrow("""
+                    SELECT AVG(latency_ms)::int as avg_lat FROM orders
+                    WHERE latency_ms IS NOT NULL
+                      AND created_at >= NOW() - INTERVAL '1 hour'
+                """)
+                if lat_row and lat_row["avg_lat"] is not None:
+                    result["avg_latency_ms"] = lat_row["avg_lat"]
+    except Exception:
+        logger.warning("system_status_db_error")
+
+    return result
+
+
+# ── SSE Event Stream ─────────────────────────────────────────────────
+
+
 @app.get("/api/events")
 async def event_stream(request: Request):
     """SSE endpoint for live updates via NATS subscription.
 
-    Streams both real-time signals from NATS and periodic model state
-    from Redis, so the dashboard gets push updates instead of polling.
+    Streams real-time signals from NATS, periodic model state from Redis,
+    and system status for the terminal status bar.
     """
+    cycle_count = 0
 
     async def generate():
+        nonlocal cycle_count
         sub = None
         try:
             if nats_client:
@@ -285,12 +413,25 @@ async def event_stream(request: Request):
                     except (asyncio.TimeoutError, nats.errors.TimeoutError):
                         pass
 
-                # Also send model state snapshot every cycle
+                # Model state snapshot every cycle (2s)
                 states = await model_state()
                 yield {
                     "event": "model_state",
                     "data": json.dumps(states),
                 }
+
+                # System status every 3rd cycle (~6s)
+                cycle_count += 1
+                if cycle_count % 3 == 0:
+                    try:
+                        status = await system_status()
+                        yield {
+                            "event": "system_status",
+                            "data": json.dumps(status),
+                        }
+                    except Exception:
+                        pass
+
                 await asyncio.sleep(2)
         finally:
             if sub:
