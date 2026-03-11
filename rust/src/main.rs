@@ -7,8 +7,10 @@ mod crypto_state;
 mod dashboard;
 mod dead_letter;
 mod decision_log;
+mod discord;
 mod execution;
 mod feed_health;
+mod health;
 #[cfg(test)]
 mod integration_tests;
 mod feeds;
@@ -16,6 +18,7 @@ mod kalshi;
 mod kill_switch;
 mod lock_ext;
 mod logging;
+mod metrics_registry;
 mod order_manager;
 mod orderbook_feed;
 mod supervisor;
@@ -47,6 +50,9 @@ async fn main() -> Result<()> {
 
     logging::init(&config.log_level, &config.log_format);
     config.log_startup();
+
+    // Phase 12.1: Initialize Prometheus metrics recorder
+    let prometheus_handle = metrics_registry::init();
 
     // Phase 5.5: Clock discipline — check system clock before startup
     match clock::enforce_clock_discipline(config.paper_mode).await {
@@ -144,7 +150,18 @@ async fn main() -> Result<()> {
     ));
 
     // Phase 12.0c: Task supervisor for critical/non-critical task management
-    let mut supervisor = supervisor::TaskSupervisor::new(cancel.clone(), Arc::clone(&kill_switch));
+    let discord_config = config.discord_webhook_url.clone().map(|url| {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("failed to build discord http client");
+        (client, url)
+    });
+    let mut supervisor = supervisor::TaskSupervisor::new(
+        cancel.clone(),
+        Arc::clone(&kill_switch),
+        discord_config,
+    );
 
     supervisor.spawn("kalshi_ws", TaskCriticality::Critical, async move {
         ws_feed.run(ws_tx).await;
@@ -281,8 +298,16 @@ async fn main() -> Result<()> {
         contract_discovery: Arc::clone(&contract_discovery),
         pool: pool.clone(),
     };
+    let health_state = health::HealthState {
+        pool: pool.clone(),
+        redis: redis.clone(),
+        nats: nats.clone(),
+        feed_health: Arc::clone(&feed_health),
+        prometheus_handle,
+    };
     let http_app = kill_switch::router(Arc::clone(&kill_switch))
-        .merge(dashboard::routes(dashboard_state));
+        .merge(dashboard::routes(dashboard_state))
+        .merge(health::routes(health_state));
     let http_port = config.http_port;
     supervisor.spawn("http_server", TaskCriticality::NonCritical, async move {
         let listener = match tokio::net::TcpListener::bind(("0.0.0.0", http_port)).await {

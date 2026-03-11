@@ -59,6 +59,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # TLS provider (required by rustls — used by sqlx, reqwest, tokio-tungstenite, fred)
 rustls = { version = "0.23", features = ["ring"] }
 
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
+
 # Error handling
 anyhow = "1"
 thiserror = "2"

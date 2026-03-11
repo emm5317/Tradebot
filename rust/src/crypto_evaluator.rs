@@ -271,6 +271,9 @@ pub async fn run(
                     );
                     last_summary = Instant::now();
 
+                    // Publish feed health as Prometheus gauges
+                    feed_health.publish_metrics();
+
                     // Write feed health snapshot to DB for Grafana
                     let details = feed_health.health_detail();
                     let pool_snap = pool.clone();
@@ -362,6 +365,10 @@ pub async fn run(
                 }
 
                 let elapsed = eval_start.elapsed();
+                metrics::histogram!(
+                    crate::metrics_registry::EVAL_DURATION,
+                    "signal_type" => "crypto"
+                ).record(elapsed.as_secs_f64());
                 if elapsed.as_millis() > 500 {
                     warn!(
                         elapsed_ms = %elapsed.as_millis(),
@@ -832,6 +839,17 @@ async fn evaluate_entry(
                 .await;
         });
     }
+
+    // Metrics: successful signal
+    metrics::counter!(
+        crate::metrics_registry::EVAL_TOTAL,
+        "signal_type" => "crypto",
+        "outcome" => "signal"
+    ).increment(1);
+    metrics::histogram!(
+        crate::metrics_registry::ORDER_LATENCY,
+        "signal_type" => "crypto"
+    ).record(eval_start.elapsed().as_secs_f64());
 
     // Decision log: successful signal
     decision_writer.send(DecisionEntry {

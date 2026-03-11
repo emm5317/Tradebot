@@ -59,7 +59,13 @@ impl DecisionLogWriter {
     /// Send an entry to be batched and flushed. Non-blocking; drops
     /// the entry if the channel is full (back-pressure safety).
     pub fn send(&self, entry: DecisionEntry) {
+        // Emit channel utilization gauge (0.0 = empty, 1.0 = full)
+        let remaining = self.tx.capacity();
+        metrics::gauge!(crate::metrics_registry::DECISION_LOG_CHANNEL_USAGE)
+            .set(1.0 - (remaining as f64 / 1024.0));
+
         if let Err(e) = self.tx.try_send(entry) {
+            metrics::counter!(crate::metrics_registry::DECISION_LOG_DROPPED).increment(1);
             warn!(error = %e, "decision_log channel full or closed, dropping entry");
         }
     }

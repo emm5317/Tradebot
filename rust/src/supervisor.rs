@@ -3,6 +3,9 @@
 //! Phase 12.0c: Wraps `tokio::task::JoinSet` to classify tasks as Critical
 //! or NonCritical. Critical task death activates the kill switch and initiates
 //! graceful shutdown. Non-critical task deaths are logged as warnings.
+//!
+//! Phase 12.1: Discord webhook alert on critical task death. Emits
+//! supervisor_tasks_active gauge via metrics crate.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -14,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::kill_switch::KillSwitchState;
+use crate::metrics_registry;
 
 /// How critical a task is to the trading system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,16 +41,22 @@ pub struct TaskSupervisor {
     id_to_name: HashMap<tokio::task::Id, &'static str>,
     cancel: CancellationToken,
     kill_switch: Arc<KillSwitchState>,
+    discord: Option<(reqwest::Client, String)>,
 }
 
 impl TaskSupervisor {
-    pub fn new(cancel: CancellationToken, kill_switch: Arc<KillSwitchState>) -> Self {
+    pub fn new(
+        cancel: CancellationToken,
+        kill_switch: Arc<KillSwitchState>,
+        discord: Option<(reqwest::Client, String)>,
+    ) -> Self {
         Self {
             join_set: JoinSet::new(),
             meta: HashMap::new(),
             id_to_name: HashMap::new(),
             cancel,
             kill_switch,
+            discord,
         }
     }
 
@@ -66,6 +76,8 @@ impl TaskSupervisor {
             name
         });
         self.id_to_name.insert(abort_handle.id(), name);
+        metrics::gauge!(metrics_registry::SUPERVISOR_TASKS_ACTIVE)
+            .set(self.join_set.len() as f64);
         info!(task = name, criticality = ?criticality, "task spawned under supervision");
     }
 
@@ -82,9 +94,12 @@ impl TaskSupervisor {
                                 error!("all supervised tasks exited unexpectedly");
                                 self.cancel.cancel();
                             }
+                            metrics::gauge!(metrics_registry::SUPERVISOR_TASKS_ACTIVE).set(0.0);
                             return;
                         }
                         Some(Ok(name)) => {
+                            metrics::gauge!(metrics_registry::SUPERVISOR_TASKS_ACTIVE)
+                                .set(self.join_set.len() as f64);
                             if self.cancel.is_cancelled() {
                                 info!(task = name, "task exited during shutdown");
                             } else {
@@ -92,6 +107,8 @@ impl TaskSupervisor {
                             }
                         }
                         Some(Err(join_err)) => {
+                            metrics::gauge!(metrics_registry::SUPERVISOR_TASKS_ACTIVE)
+                                .set(self.join_set.len() as f64);
                             if self.cancel.is_cancelled() {
                                 continue;
                             }
@@ -107,6 +124,7 @@ impl TaskSupervisor {
                     info!("supervisor: shutdown initiated, aborting remaining tasks");
                     self.join_set.abort_all();
                     while self.join_set.join_next().await.is_some() {}
+                    metrics::gauge!(metrics_registry::SUPERVISOR_TASKS_ACTIVE).set(0.0);
                     return;
                 }
             }
@@ -127,6 +145,19 @@ impl TaskSupervisor {
                 );
                 self.kill_switch.kill_all.store(true, Ordering::Relaxed);
                 self.cancel.cancel();
+
+                // Fire-and-forget Discord alert
+                if let Some((ref client, ref url)) = self.discord {
+                    let client = client.clone();
+                    let url = url.clone();
+                    let msg = format!(
+                        "🚨 **CRITICAL TASK DIED** — `{}` (panicked={}) — kill switch activated, shutting down",
+                        name, panicked
+                    );
+                    tokio::spawn(async move {
+                        crate::discord::send_alert(&client, &url, &msg).await;
+                    });
+                }
             }
             TaskCriticality::NonCritical => {
                 warn!(
@@ -152,7 +183,7 @@ mod tests {
     async fn test_critical_task_death_triggers_cancel() {
         let cancel = CancellationToken::new();
         let ks = Arc::new(KillSwitchState::new(false, false, false));
-        let mut sup = TaskSupervisor::new(cancel.clone(), Arc::clone(&ks));
+        let mut sup = TaskSupervisor::new(cancel.clone(), Arc::clone(&ks), None);
 
         sup.spawn("critical_task", TaskCriticality::Critical, async {
             // Exit immediately
@@ -173,14 +204,11 @@ mod tests {
     async fn test_non_critical_task_death_continues() {
         let cancel = CancellationToken::new();
         let ks = Arc::new(KillSwitchState::new(false, false, false));
-        let mut sup = TaskSupervisor::new(cancel.clone(), Arc::clone(&ks));
+        let mut sup = TaskSupervisor::new(cancel.clone(), Arc::clone(&ks), None);
 
         sup.spawn("optional_task", TaskCriticality::NonCritical, async {
             // Exit immediately
         });
-
-        // Spawn another non-critical that also exits, so supervisor sees empty JoinSet
-        // and returns. The key check: cancel should NOT be triggered before empty.
 
         // We need a task that stays alive briefly, then we cancel externally
         let cancel_c = cancel.clone();
@@ -198,7 +226,7 @@ mod tests {
     async fn test_external_cancel_drains_all() {
         let cancel = CancellationToken::new();
         let ks = Arc::new(KillSwitchState::new(false, false, false));
-        let mut sup = TaskSupervisor::new(cancel.clone(), Arc::clone(&ks));
+        let mut sup = TaskSupervisor::new(cancel.clone(), Arc::clone(&ks), None);
 
         sup.spawn("task_a", TaskCriticality::Critical, async {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -225,7 +253,7 @@ mod tests {
     async fn test_critical_panic_triggers_cancel() {
         let cancel = CancellationToken::new();
         let ks = Arc::new(KillSwitchState::new(false, false, false));
-        let mut sup = TaskSupervisor::new(cancel.clone(), Arc::clone(&ks));
+        let mut sup = TaskSupervisor::new(cancel.clone(), Arc::clone(&ks), None);
 
         sup.spawn("panicker", TaskCriticality::Critical, async {
             panic!("intentional test panic");

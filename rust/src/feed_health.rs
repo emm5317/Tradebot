@@ -160,6 +160,17 @@ impl FeedHealth {
         crypto.min(weather)
     }
 
+    /// Publish all feed health scores as Prometheus gauges.
+    pub fn publish_metrics(&self) {
+        for (name, _) in THRESHOLDS {
+            let score = self.health_score(name);
+            metrics::gauge!(
+                crate::metrics_registry::FEED_HEALTH_SCORE,
+                "feed" => *name
+            ).set(score);
+        }
+    }
+
     /// Check if required feeds for a signal type are healthy.
     /// Crypto: at least one spot venue must be healthy (OR-based).
     /// Weather: all required feeds must be healthy (AND-based).

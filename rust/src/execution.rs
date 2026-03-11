@@ -147,14 +147,33 @@ pub async fn run(
                 // Submit entry via order manager (Phase 2.1)
                 match mgr.submit_entry(config, &kalshi, &pool, &signal, None, &crypto_state).await {
                     Ok(()) => {
+                        let latency = start.elapsed();
+                        metrics::histogram!(
+                            crate::metrics_registry::ORDER_LATENCY,
+                            "signal_type" => "nats"
+                        ).record(latency.as_secs_f64());
+                        metrics::counter!(
+                            crate::metrics_registry::ORDERS_TOTAL,
+                            "signal_type" => "nats",
+                            "action" => "entry",
+                            "result" => "ok"
+                        ).increment(1);
                         info!(
                             ticker = %signal.ticker,
-                            latency_ms = %start.elapsed().as_millis(),
+                            latency_ms = %latency.as_millis(),
                             positions = mgr.position_count(),
                             "entry order processed"
                         );
                     }
-                    Err(e) => error!(ticker = %signal.ticker, error = %e, "entry order failed"),
+                    Err(e) => {
+                        metrics::counter!(
+                            crate::metrics_registry::ORDERS_TOTAL,
+                            "signal_type" => "nats",
+                            "action" => "entry",
+                            "result" => "error"
+                        ).increment(1);
+                        error!(ticker = %signal.ticker, error = %e, "entry order failed");
+                    }
                 }
             }
 
