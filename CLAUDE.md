@@ -86,12 +86,21 @@ just grafana-restart # Restart Grafana (picks up dashboard changes)
 | `rust/src/feed_health.rs` | Per-feed health scoring (0.0-1.0) |
 | `rust/src/decision_log.rs` | Decision audit + feed health DB writes |
 
+## Trading Mode
+
+- **ALWAYS use PAPER_MODE=true** — the bot must run in paper trading mode until explicitly approved for live trading
+- **ALWAYS use production API** (`api.elections.kalshi.com`) for real market data, websocket feeds, and accurate orderbook snapshots
+- Default in `config.py` is demo API (`demo-api.kalshi.co`) as a safe fallback; `.env` overrides to production
+- The `.env` file sets `KALSHI_BASE_URL=https://api.elections.kalshi.com`, `KALSHI_WS_URL=wss://api.elections.kalshi.com/trade-api/ws/v2`, and `PAPER_MODE=true`
+- Never change `PAPER_MODE` to `false` without explicit user authorization
+
 ## Common Pitfalls
 
 - **OpenSSL not needed**: Kalshi auth uses pure-Rust `rsa` crate, not system OpenSSL
 - **std::sync::RwLock across .await**: Extract data from lock guards before any `.await` (see TapeSnapshot pattern in `orderbook_feed.rs`)
 - **Binance endpoint**: Uses `binance.us` (not `.com`) for US compliance
 - **Weather model backward compat**: New params (station_cal, metar_temp_c, hrrr_forecast_temps_f) all default to None — existing callers work unchanged
+- **Kalshi REST API field names**: Use `yes_bid_dollars`/`yes_ask_dollars`/`no_bid_dollars`/`no_ask_dollars` (dollar strings), NOT legacy `yes_price`/`no_price` (integer cents, deprecated March 2026)
 - **Test count**: Some Python test files (test_kalshi_history, test_rules) need asyncpg and may show collection errors in local dev — ignore these
 
 ## Implementation Phases

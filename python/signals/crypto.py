@@ -73,9 +73,12 @@ class BlackoutWindow:
 class CryptoSignalEvaluator:
     """Evaluates crypto binary option contracts."""
 
-    def __init__(self, blackout_windows: list[BlackoutWindow] | None = None) -> None:
+    def __init__(
+        self, blackout_windows: list[BlackoutWindow] | None = None, backtest_mode: bool = False
+    ) -> None:
         self.blackout_windows = blackout_windows or []
         self._recent_signals: dict[str, datetime] = {}
+        self.backtest_mode = backtest_mode
 
     def set_blackout_windows(self, windows: list[BlackoutWindow]) -> None:
         """Update blackout windows (called after loading from DB)."""
@@ -89,13 +92,17 @@ class CryptoSignalEvaluator:
         btc_last_updated: datetime,
         orderbook: OrderbookState,
         strike: float | None = None,
+        as_of: datetime | None = None,
     ) -> tuple[SignalSchema | None, RejectedSignal | None, ModelState]:
         """Evaluate a crypto contract for entry signal.
+
+        Args:
+            as_of: Simulated wall clock for backtesting. Uses real time if None.
 
         Returns:
             Tuple of (signal_or_none, rejection_or_none, model_state).
         """
-        now = datetime.now(UTC)
+        now = as_of or datetime.now(UTC)
         minutes = (contract.settlement_time - now).total_seconds() / 60.0
 
         # Use contract threshold as strike, or explicit override
@@ -109,8 +116,10 @@ class CryptoSignalEvaluator:
             minutes_remaining=minutes,
         )
 
-        # 1. Check time window
-        if not (_MIN_MINUTES <= minutes <= _MAX_MINUTES):
+        # 1. Check time window (relaxed in backtest mode — snapshots may be near settlement)
+        min_min = 0.1 if self.backtest_mode else _MIN_MINUTES
+        max_min = 30.0 if self.backtest_mode else _MAX_MINUTES
+        if not (min_min <= minutes <= max_min):
             return None, None, model_state
 
         # 2. Check blackout windows
@@ -126,9 +135,10 @@ class CryptoSignalEvaluator:
             model_state.rejection_reason = f"blackout ({active_blackout.event})"
             return None, rejection, model_state
 
-        # 3. Check BTC feed freshness
+        # 3. Check BTC feed freshness (relaxed in backtest mode)
         btc_staleness = (now - btc_last_updated).total_seconds()
-        if btc_staleness > _MAX_BTC_STALENESS_SECONDS:
+        max_staleness = 300 if self.backtest_mode else _MAX_BTC_STALENESS_SECONDS
+        if btc_staleness > max_staleness:
             rejection = RejectedSignal(
                 ticker=contract.ticker,
                 signal_type="crypto",

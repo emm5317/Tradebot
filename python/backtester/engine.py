@@ -19,6 +19,7 @@ from backtester.costs import FeeModel
 from config import get_settings
 from data.mesonet import ASOSObservation
 from models.physics import build_climo_table, build_sigma_table
+from rules.ticker_parser import _extract_crypto_strike
 from signals.crypto import CryptoSignalEvaluator
 from signals.registry import EvaluatorRegistry
 from signals.types import Contract, OrderbookState
@@ -101,7 +102,21 @@ class Backtester:
 
         logger.info("backtest_start", contracts=len(contracts), start=str(start), end=str(end))
 
-        for contract in contracts:
+        _no_snap = 0
+        _no_btc = 0
+        _rejections: dict[str, int] = {}
+        for idx, contract in enumerate(contracts):
+            if (idx + 1) % 500 == 0 or idx == 0:
+                logger.info(
+                    "backtest_progress",
+                    contract=idx + 1,
+                    total=len(contracts),
+                    signals_so_far=result.total_signals,
+                    rejections_so_far=result.total_rejections,
+                    no_snapshots=_no_snap,
+                    no_btc=_no_btc,
+                )
+
             signal_type = self._infer_signal_type(contract)
             evaluator = self.registry.get(signal_type)
             if evaluator is None:
@@ -109,6 +124,9 @@ class Backtester:
 
             # Fetch time-aligned data for this contract
             snapshots = await self._fetch_snapshots(contract["ticker"], contract["settlement_time"])
+            if not snapshots:
+                _no_snap += 1
+                continue
 
             for snap in snapshots:
                 orderbook = OrderbookState(
@@ -116,12 +134,17 @@ class Backtester:
                     spread=float(snap["spread"] or 0.0),
                 )
 
+                # Parse strike from ticker if threshold not in DB
+                threshold = contract["threshold"]
+                if threshold is None and signal_type == "crypto":
+                    threshold = _extract_crypto_strike(contract["ticker"])
+
                 contract_obj = Contract(
                     ticker=contract["ticker"],
                     category=contract["category"] or "",
                     city=contract["city"],
                     station=contract["station"],
-                    threshold=contract["threshold"],
+                    threshold=threshold,
                     settlement_time=contract["settlement_time"],
                 )
 
@@ -137,16 +160,19 @@ class Backtester:
                             contract=contract_obj,
                             observation=obs,
                             orderbook=orderbook,
+                            as_of=snap["captured_at"],
                         )
                     elif signal_type == "crypto":
                         btc = await self._fetch_nearest_btc(snap["captured_at"])
                         if btc is None:
+                            _no_btc += 1
                             continue
                         sig, rej, state = evaluator.evaluate(
                             contract=contract_obj,
                             spot_price=float(btc["btc_spot"]),
                             realized_vol=float(btc["btc_vol_30m"]) if btc["btc_vol_30m"] else None,
                             btc_last_updated=btc["observed_at"],
+                            as_of=snap["captured_at"],
                             orderbook=orderbook,
                         )
                     else:
@@ -173,10 +199,20 @@ class Backtester:
                             break
                     elif rej is not None:
                         result.total_rejections += 1
+                        reason = rej.rejection_reason.split(" ")[0] if rej.rejection_reason else "unknown"
+                        _rejections[reason] = _rejections.get(reason, 0) + 1
 
                 except Exception:
                     logger.exception("backtest_eval_error", ticker=contract["ticker"])
 
+        logger.info(
+            "backtest_done",
+            signals=result.total_signals,
+            rejections=result.total_rejections,
+            no_snapshots=_no_snap,
+            no_btc=_no_btc,
+            rejection_reasons=_rejections,
+        )
         # Compute aggregate metrics
         self._compute_metrics(result)
         return result
@@ -359,7 +395,7 @@ async def main() -> None:
 
     registry = EvaluatorRegistry()
     registry.register("weather", WeatherSignalEvaluator(sigma_table=sigma_table, climo_table=climo_table))
-    registry.register("crypto", CryptoSignalEvaluator())
+    registry.register("crypto", CryptoSignalEvaluator(backtest_mode=True))
 
     backtester = Backtester(pool, registry)
     result = await backtester.run(start, end, signal_types)

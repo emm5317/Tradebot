@@ -83,7 +83,7 @@ class WeatherSignalEvaluator:
         # Running state per contract for lock detection
         self._weather_states: dict[str, WeatherState] = {}
 
-    def _get_weather_state(self, contract: Contract) -> WeatherState:
+    def _get_weather_state(self, contract: Contract, as_of: datetime | None = None) -> WeatherState:
         """Get or create running state for a contract."""
         key = contract.ticker
         if key not in self._weather_states:
@@ -94,9 +94,10 @@ class WeatherSignalEvaluator:
             else:
                 contract_type = "weather_max"
 
+            ref_time = as_of or datetime.now(UTC)
             self._weather_states[key] = WeatherState(
                 station=contract.station or "KORD",
-                obs_date=datetime.now(UTC).date().isoformat(),
+                obs_date=ref_time.date().isoformat(),
                 contract_type=contract_type,
                 strike_f=contract.threshold or 0.0,
             )
@@ -110,15 +111,19 @@ class WeatherSignalEvaluator:
         recent_temps: list[float] | None = None,
         hrrr_forecast_temps_f: list[float] | None = None,
         metar_temp_c: int | None = None,
+        as_of: datetime | None = None,
     ) -> tuple[SignalSchema | None, RejectedSignal | None, ModelState]:
         """Evaluate a weather contract for entry signal.
+
+        Args:
+            as_of: Simulated wall clock for backtesting. Uses real time if None.
 
         Returns:
             Tuple of (signal_or_none, rejection_or_none, model_state).
             Exactly one of signal/rejection will be non-None (or both None
             if outside time window).
         """
-        now = datetime.now(UTC)
+        now = as_of or datetime.now(UTC)
         minutes = (contract.settlement_time - now).total_seconds() / 60.0
 
         # Build model state (always returned for UI)
@@ -190,7 +195,7 @@ class WeatherSignalEvaluator:
         station_cal = self.station_calibration.get((station, month, hour))
 
         # Get running state for lock detection
-        weather_state = self._get_weather_state(contract)
+        weather_state = self._get_weather_state(contract, as_of=now)
 
         # Compute climo probability for the fair value engine
         p_climo = climatological_probability(

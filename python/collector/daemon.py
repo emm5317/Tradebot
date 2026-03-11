@@ -435,16 +435,29 @@ class CollectorDaemon:
                     settlement = settlement_times[ticker]
                     minutes_to_settlement = (settlement - now).total_seconds() / 60.0
 
-                    yes_price = float(market.get("yes_price", 0)) / 100.0
-                    no_price = float(market.get("no_price", 0)) / 100.0
+                    # New API: dollar-based fields (strings)
+                    yes_bid = float(market.get("yes_bid_dollars", 0))
+                    yes_ask = float(market.get("yes_ask_dollars", 0))
+                    no_bid = float(market.get("no_bid_dollars", 0))
+                    no_ask = float(market.get("no_ask_dollars", 0))
+                    # Fallback to legacy integer fields (cents)
+                    if yes_bid == 0 and yes_ask == 0:
+                        yes_bid = float(market.get("yes_price", 0)) / 100.0
+                        no_bid = float(market.get("no_price", 0)) / 100.0
+                        yes_ask = yes_bid
+                        no_ask = no_bid
+
+                    yes_price = (yes_bid + yes_ask) / 2.0 if (yes_bid + yes_ask) > 0 else 0.0
+                    no_price = (no_bid + no_ask) / 2.0 if (no_bid + no_ask) > 0 else 0.0
+                    spread = yes_ask - yes_bid if yes_ask >= yes_bid else 0.0
 
                     return (
                         ticker,
                         yes_price,
                         no_price,
-                        abs(yes_price - no_price),
-                        None,  # best_bid (from orderbook via Redis)
-                        None,  # best_ask
+                        spread,
+                        yes_bid,   # best_bid
+                        yes_ask,   # best_ask
                         None,  # bid_depth
                         None,  # ask_depth
                         minutes_to_settlement,
