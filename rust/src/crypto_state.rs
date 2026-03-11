@@ -12,6 +12,8 @@ use std::time::Instant;
 use tokio::sync::watch;
 use tracing::trace;
 
+use crate::lock_ext::RwLockExt;
+
 /// Thread-safe canonical crypto state, shared across all feeds and execution.
 pub struct CryptoState {
     inner: RwLock<CryptoStateInner>,
@@ -135,7 +137,7 @@ impl CryptoState {
 
     /// Update from Coinbase feed.
     pub fn update_coinbase(&self, spot: f64, bid: f64, ask: f64, trade_volume_5m: f64) {
-        let mut state = self.inner.write().unwrap();
+        let mut state = self.inner.write_or_recover();
         state.coinbase_spot = spot;
         state.coinbase_bid = bid;
         state.coinbase_ask = ask;
@@ -156,7 +158,7 @@ impl CryptoState {
         bars_count: usize,
         trade_volume_5m: f64,
     ) {
-        let mut state = self.inner.write().unwrap();
+        let mut state = self.inner.write_or_recover();
         state.binance_spot = spot;
         state.binance_spot_vol_realized = realized_vol;
         state.binance_spot_vol_ewma = ewma_vol;
@@ -177,7 +179,7 @@ impl CryptoState {
         funding_rate: f64,
         obi: f64,
     ) {
-        let mut state = self.inner.write().unwrap();
+        let mut state = self.inner.write_or_recover();
         state.perp_price = perp_price;
         state.mark_price = mark_price;
         state.funding_rate = funding_rate;
@@ -190,7 +192,7 @@ impl CryptoState {
 
     /// Update from Deribit DVOL feed.
     pub fn update_deribit(&self, dvol: f64) {
-        let mut state = self.inner.write().unwrap();
+        let mut state = self.inner.write_or_recover();
         state.dvol = dvol;
         state.dvol_updated = Some(Instant::now());
         recompute_derived(&mut state);
@@ -200,7 +202,7 @@ impl CryptoState {
 
     /// Read-lock snapshot of current state.
     pub fn snapshot(&self) -> CryptoStateInner {
-        self.inner.read().unwrap().clone()
+        self.inner.read_or_recover().clone()
     }
 }
 

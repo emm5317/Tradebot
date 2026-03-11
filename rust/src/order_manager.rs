@@ -858,6 +858,89 @@ impl OrderManager {
     }
 
     // -----------------------------------------------------------------------
+    // Graceful shutdown drain (Phase 12.0b)
+    // -----------------------------------------------------------------------
+
+    /// Cancel ALL in-flight orders during graceful shutdown.
+    ///
+    /// Unlike `cancel_in_flight`, this also transitions Pending/Submitting orders
+    /// directly to Cancelled (they never reached the exchange).
+    /// Returns (attempted, succeeded) counts.
+    pub async fn drain_all_orders(&mut self, kalshi: &KalshiClient) -> (usize, usize) {
+        let mut attempted = 0usize;
+        let mut succeeded = 0usize;
+
+        // Collect orders that need cancellation
+        let to_cancel: Vec<(String, OrderState)> = self
+            .orders
+            .iter()
+            .filter(|(_, o)| !o.state.is_terminal())
+            .map(|(id, o)| (id.clone(), o.state))
+            .collect();
+
+        for (client_order_id, state) in to_cancel {
+            attempted += 1;
+
+            match state {
+                // Never reached exchange — cancel locally
+                OrderState::Pending | OrderState::Submitting => {
+                    if let Some(order) = self.orders.get_mut(&client_order_id) {
+                        // Force transition: Pending/Submitting → Unknown → Cancelled
+                        // (direct Pending→Cancelled is invalid, go via Unknown)
+                        order.transition(OrderState::Unknown);
+                        order.transition(OrderState::Cancelled);
+                        self.positions.remove(&order.ticker);
+                        succeeded += 1;
+                        info!(
+                            client_order_id = %client_order_id,
+                            "shutdown drain: cancelled locally (never sent)"
+                        );
+                    }
+                }
+                // On exchange — cancel via API
+                OrderState::Acknowledged | OrderState::PartialFill => {
+                    match self.cancel_order(kalshi, &client_order_id).await {
+                        Ok(()) => {
+                            succeeded += 1;
+                            info!(
+                                client_order_id = %client_order_id,
+                                "shutdown drain: cancelled on exchange"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                client_order_id = %client_order_id,
+                                error = %e,
+                                "shutdown drain: cancel failed"
+                            );
+                        }
+                    }
+                }
+                // CancelPending, Replacing, Unknown — already in transition, leave alone
+                _ => {
+                    info!(
+                        client_order_id = %client_order_id,
+                        state = %state,
+                        "shutdown drain: skipping order in transitional state"
+                    );
+                }
+            }
+        }
+
+        (attempted, succeeded)
+    }
+
+    /// Check if any orders are still in non-terminal states.
+    pub fn has_in_flight_orders(&self) -> bool {
+        self.orders.values().any(|o| !o.state.is_terminal())
+    }
+
+    /// Count of orders in non-terminal states.
+    pub fn in_flight_count(&self) -> usize {
+        self.orders.values().filter(|o| !o.state.is_terminal()).count()
+    }
+
+    // -----------------------------------------------------------------------
     // Startup reconciliation (Phase 2.5)
     // -----------------------------------------------------------------------
 
@@ -1739,5 +1822,105 @@ mod tests {
         let fp = order.entry_price.unwrap();
         assert!((fp - 0.45).abs() < 1e-10, "NO fill_price should be ~0.45, got {}", fp);
         assert!(fp < 0.50, "NO fill_price should be < 0.50 for mid > 0.50");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 12.0b: Drain / in-flight tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_has_in_flight_orders_empty() {
+        let mgr = OrderManager::new();
+        assert!(!mgr.has_in_flight_orders());
+        assert_eq!(mgr.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn test_has_in_flight_orders_with_pending() {
+        let mut mgr = OrderManager::new();
+        let order = ManagedOrder::new(
+            "tb-test-001".to_string(),
+            "KXBTC-T95000".to_string(),
+            "crypto".to_string(),
+            "yes".to_string(),
+            10,
+            0.65,
+            0.55,
+            None,
+        );
+        mgr.orders.insert("tb-test-001".to_string(), order);
+        assert!(mgr.has_in_flight_orders());
+        assert_eq!(mgr.in_flight_count(), 1);
+    }
+
+    #[test]
+    fn test_has_in_flight_orders_all_terminal() {
+        let mut mgr = OrderManager::new();
+        let mut order = ManagedOrder::new(
+            "tb-test-001".to_string(),
+            "KXBTC-T95000".to_string(),
+            "crypto".to_string(),
+            "yes".to_string(),
+            10,
+            0.65,
+            0.55,
+            None,
+        );
+        order.transition(OrderState::Submitting);
+        order.transition(OrderState::Rejected);
+        mgr.orders.insert("tb-test-001".to_string(), order);
+
+        let mut order2 = ManagedOrder::new(
+            "tb-test-002".to_string(),
+            "KXBTC-T96000".to_string(),
+            "crypto".to_string(),
+            "yes".to_string(),
+            5,
+            0.70,
+            0.60,
+            None,
+        );
+        order2.transition(OrderState::Submitting);
+        order2.transition(OrderState::Filled);
+        mgr.orders.insert("tb-test-002".to_string(), order2);
+
+        assert!(!mgr.has_in_flight_orders());
+        assert_eq!(mgr.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn test_in_flight_count_mixed() {
+        let mut mgr = OrderManager::new();
+
+        // Pending (in-flight)
+        let o1 = ManagedOrder::new(
+            "tb-001".to_string(), "T1".to_string(),
+            "crypto".to_string(), "yes".to_string(),
+            10, 0.6, 0.5, None,
+        );
+        mgr.orders.insert("tb-001".to_string(), o1);
+
+        // Acknowledged (in-flight)
+        let mut o2 = ManagedOrder::new(
+            "tb-002".to_string(), "T2".to_string(),
+            "crypto".to_string(), "yes".to_string(),
+            10, 0.6, 0.5, None,
+        );
+        o2.transition(OrderState::Submitting);
+        o2.transition(OrderState::Acknowledged);
+        mgr.orders.insert("tb-002".to_string(), o2);
+
+        // Filled (terminal)
+        let mut o3 = ManagedOrder::new(
+            "tb-003".to_string(), "T3".to_string(),
+            "crypto".to_string(), "yes".to_string(),
+            10, 0.6, 0.5, None,
+        );
+        o3.transition(OrderState::Submitting);
+        o3.transition(OrderState::Filled);
+        mgr.orders.insert("tb-003".to_string(), o3);
+
+        assert_eq!(mgr.in_flight_count(), 2);
+        assert!(mgr.has_in_flight_orders());
     }
 }

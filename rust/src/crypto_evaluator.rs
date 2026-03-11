@@ -16,11 +16,13 @@ use rust_decimal::prelude::ToPrimitive;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
+use crate::lock_ext::RwLockExt;
+
 use crate::config::Config;
 use crate::contract_discovery::ContractDiscovery;
 use crate::crypto_fv;
 use crate::crypto_state::CryptoState;
-use crate::decision_log::{self, DecisionEntry};
+use crate::decision_log::{self, DecisionEntry, DecisionLogWriter};
 use crate::feed_health::FeedHealth;
 use crate::kalshi::client::KalshiClient;
 use crate::kalshi::orderbook::OrderbookManager;
@@ -237,6 +239,7 @@ pub async fn run(
     redis: fred::clients::Client,
     nats: async_nats::Client,
     cancel: CancellationToken,
+    decision_writer: DecisionLogWriter,
 ) {
     let mut rx = crypto_state.subscribe();
     let mut last_eval: HashMap<String, Instant> = HashMap::new();
@@ -335,6 +338,7 @@ pub async fn run(
                                 &nats,
                                 &crypto_state,
                                 &mut edge_tracker,
+                                &decision_writer,
                             )
                             .await;
                         }
@@ -393,6 +397,7 @@ async fn evaluate_entry(
     nats: &async_nats::Client,
     crypto_state: &CryptoState,
     edge_tracker: &mut EdgeTracker,
+    decision_writer: &DecisionLogWriter,
 ) {
     let eval_start = Instant::now();
 
@@ -409,21 +414,17 @@ async fn evaluate_entry(
                 has_tob = status.has_tob,
                 "crypto eval: no price data"
             );
-            let pool_c = pool.clone();
-            let ticker_c = contract.ticker.clone();
             let reason = format!(
                 "no_price_data(book={},bids={},asks={},tob={})",
                 status.has_entry, status.has_bids, status.has_asks, status.has_tob
             );
-            tokio::spawn(async move {
-                decision_log::write(&pool_c, DecisionEntry {
-                    ticker: ticker_c,
-                    signal_type: "crypto".into(),
-                    outcome: "skipped".into(),
-                    rejection_reason: Some(reason),
-                    minutes_remaining: Some(minutes_remaining),
-                    ..Default::default()
-                }).await;
+            decision_writer.send(DecisionEntry {
+                ticker: contract.ticker.clone(),
+                signal_type: "crypto".into(),
+                outcome: "skipped".into(),
+                rejection_reason: Some(reason),
+                minutes_remaining: Some(minutes_remaining),
+                ..Default::default()
             });
             return;
         }
@@ -471,7 +472,7 @@ async fn evaluate_entry(
     let fv = if contract.directional {
         // Directional "Will BTC go up?" — momentum/order-flow model
         let tape_data = {
-            let tape = trade_tape.read().unwrap();
+            let tape = trade_tape.read_or_recover();
             let aggr = tape.aggressiveness(Duration::from_secs(30));
             let vwap_dev = if spread > 0.0 {
                 tape.vwap(Duration::from_secs(60))
@@ -503,23 +504,17 @@ async fn evaluate_entry(
     // 3. Check confidence
     if fv.confidence < config.crypto_min_confidence {
         debug!(ticker = %contract.ticker, confidence = %format!("{:.2}", fv.confidence), "crypto eval: confidence below minimum");
-        let pool_c = pool.clone();
-        let ticker_c = contract.ticker.clone();
-        let conf = fv.confidence;
-        let prob = fv.probability;
-        tokio::spawn(async move {
-            decision_log::write(&pool_c, DecisionEntry {
-                ticker: ticker_c,
-                signal_type: "crypto".into(),
-                outcome: "rejected".into(),
-                rejection_reason: Some("confidence_below_minimum".into()),
-                model_prob: Some(prob),
-                market_price: Some(mid_price),
-                confidence: Some(conf),
-                minutes_remaining: Some(minutes_remaining),
-                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
-                ..Default::default()
-            }).await;
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("confidence_below_minimum".into()),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            confidence: Some(fv.confidence),
+            minutes_remaining: Some(minutes_remaining),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
         });
         return;
     }
@@ -534,23 +529,19 @@ async fn evaluate_entry(
             model_prob = %format!("{:.4}", fv.probability),
             "crypto eval: directional ATM flatness — no opinion"
         );
-        let pool_c = pool.clone();
-        let ticker_c = contract.ticker.clone();
-        tokio::spawn(async move {
-            decision_log::write(&pool_c, DecisionEntry {
-                ticker: ticker_c,
-                signal_type: "crypto".into(),
-                outcome: "rejected".into(),
-                rejection_reason: Some("directional_atm_no_opinion".into()),
-                model_prob: Some(fv.probability),
-                market_price: Some(mid_price),
-                edge: Some(raw_edge),
-                direction: Some(direction.to_string()),
-                minutes_remaining: Some(minutes_remaining),
-                confidence: Some(fv.confidence),
-                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
-                ..Default::default()
-            }).await;
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("directional_atm_no_opinion".into()),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            edge: Some(raw_edge),
+            direction: Some(direction.to_string()),
+            minutes_remaining: Some(minutes_remaining),
+            confidence: Some(fv.confidence),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
         });
         return;
     }
@@ -564,23 +555,19 @@ async fn evaluate_entry(
             market_price = %format!("{:.4}", mid_price),
             "crypto eval: market disagreement too large"
         );
-        let pool_c = pool.clone();
-        let ticker_c = contract.ticker.clone();
-        tokio::spawn(async move {
-            decision_log::write(&pool_c, DecisionEntry {
-                ticker: ticker_c,
-                signal_type: "crypto".into(),
-                outcome: "rejected".into(),
-                rejection_reason: Some("market_disagreement".into()),
-                model_prob: Some(fv.probability),
-                market_price: Some(mid_price),
-                edge: Some(raw_edge),
-                direction: Some(direction.to_string()),
-                minutes_remaining: Some(minutes_remaining),
-                confidence: Some(fv.confidence),
-                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
-                ..Default::default()
-            }).await;
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("market_disagreement".into()),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            edge: Some(raw_edge),
+            direction: Some(direction.to_string()),
+            minutes_remaining: Some(minutes_remaining),
+            confidence: Some(fv.confidence),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
         });
         return;
     }
@@ -609,7 +596,7 @@ async fn evaluate_entry(
             total: spread_regime,
         }
     } else {
-        let tape = trade_tape.read().unwrap();
+        let tape = trade_tape.read_or_recover();
         compute_microstructure_adj(
             &contract.ticker, direction, order_imbalance,
             mid_price, spread, &tape,
@@ -624,31 +611,27 @@ async fn evaluate_entry(
     // 6. Check minimum edge (using microstructure-adjusted edge)
     if adjusted_edge < config.crypto_min_edge {
         debug!(ticker = %contract.ticker, edge = %format!("{:.4}", adjusted_edge), "crypto eval: edge below minimum");
-        let pool_c = pool.clone();
-        let ticker_c = contract.ticker.clone();
-        tokio::spawn(async move {
-            decision_log::write(&pool_c, DecisionEntry {
-                ticker: ticker_c,
-                signal_type: "crypto".into(),
-                outcome: "rejected".into(),
-                rejection_reason: Some("edge_below_minimum".into()),
-                model_prob: Some(fv.probability),
-                market_price: Some(mid_price),
-                edge: Some(effective_edge),
-                adjusted_edge: Some(adjusted_edge),
-                direction: Some(direction.to_string()),
-                minutes_remaining: Some(minutes_remaining),
-                confidence: Some(fv.confidence),
-                micro_total: Some(micro.total),
-                micro_trade: Some(micro.trade_imbalance),
-                micro_spread: Some(micro.spread_regime),
-                micro_depth: Some(micro.depth_imbalance),
-                micro_vwap: Some(micro.vwap_signal),
-                micro_momentum: Some(micro.momentum_signal),
-                micro_vol_surge: Some(micro.volume_surge_signal),
-                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
-                ..Default::default()
-            }).await;
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("edge_below_minimum".into()),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            edge: Some(effective_edge),
+            adjusted_edge: Some(adjusted_edge),
+            direction: Some(direction.to_string()),
+            minutes_remaining: Some(minutes_remaining),
+            confidence: Some(fv.confidence),
+            micro_total: Some(micro.total),
+            micro_trade: Some(micro.trade_imbalance),
+            micro_spread: Some(micro.spread_regime),
+            micro_depth: Some(micro.depth_imbalance),
+            micro_vwap: Some(micro.vwap_signal),
+            micro_momentum: Some(micro.momentum_signal),
+            micro_vol_surge: Some(micro.volume_surge_signal),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
         });
         return;
     }
@@ -660,24 +643,20 @@ async fn evaluate_entry(
             edge = %format!("{:.4}", adjusted_edge),
             "crypto eval: edge growing, deferring entry"
         );
-        let pool_c = pool.clone();
-        let ticker_c = contract.ticker.clone();
-        tokio::spawn(async move {
-            decision_log::write(&pool_c, DecisionEntry {
-                ticker: ticker_c,
-                signal_type: "crypto".into(),
-                outcome: "rejected".into(),
-                rejection_reason: Some("edge_growing_defer".into()),
-                model_prob: Some(fv.probability),
-                market_price: Some(mid_price),
-                edge: Some(effective_edge),
-                adjusted_edge: Some(adjusted_edge),
-                direction: Some(direction.to_string()),
-                minutes_remaining: Some(minutes_remaining),
-                confidence: Some(fv.confidence),
-                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
-                ..Default::default()
-            }).await;
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("edge_growing_defer".into()),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            edge: Some(effective_edge),
+            adjusted_edge: Some(adjusted_edge),
+            direction: Some(direction.to_string()),
+            minutes_remaining: Some(minutes_remaining),
+            confidence: Some(fv.confidence),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
         });
         return;
     }
@@ -712,24 +691,20 @@ async fn evaluate_entry(
             lose_payout = %format!("{:.4}", lose_payout),
             "crypto eval: bad risk/reward ratio (>4:1)"
         );
-        let pool_c = pool.clone();
-        let ticker_c = contract.ticker.clone();
-        tokio::spawn(async move {
-            decision_log::write(&pool_c, DecisionEntry {
-                ticker: ticker_c,
-                signal_type: "crypto".into(),
-                outcome: "rejected".into(),
-                rejection_reason: Some("bad_risk_reward".into()),
-                model_prob: Some(fv.probability),
-                market_price: Some(mid_price),
-                edge: Some(effective_edge),
-                adjusted_edge: Some(adjusted_edge),
-                direction: Some(direction.to_string()),
-                minutes_remaining: Some(minutes_remaining),
-                confidence: Some(fv.confidence),
-                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
-                ..Default::default()
-            }).await;
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("bad_risk_reward".into()),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            edge: Some(effective_edge),
+            adjusted_edge: Some(adjusted_edge),
+            direction: Some(direction.to_string()),
+            minutes_remaining: Some(minutes_remaining),
+            confidence: Some(fv.confidence),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
         });
         return;
     }
@@ -737,31 +712,27 @@ async fn evaluate_entry(
     // 9. Check minimum Kelly
     if kelly < config.crypto_min_kelly {
         debug!(ticker = %contract.ticker, kelly = %format!("{:.4}", kelly), "crypto eval: kelly below minimum");
-        let pool_c = pool.clone();
-        let ticker_c = contract.ticker.clone();
-        tokio::spawn(async move {
-            decision_log::write(&pool_c, DecisionEntry {
-                ticker: ticker_c,
-                signal_type: "crypto".into(),
-                outcome: "rejected".into(),
-                rejection_reason: Some("kelly_below_minimum".into()),
-                model_prob: Some(fv.probability),
-                market_price: Some(mid_price),
-                edge: Some(effective_edge),
-                adjusted_edge: Some(adjusted_edge),
-                direction: Some(direction.to_string()),
-                minutes_remaining: Some(minutes_remaining),
-                confidence: Some(fv.confidence),
-                micro_total: Some(micro.total),
-                micro_trade: Some(micro.trade_imbalance),
-                micro_spread: Some(micro.spread_regime),
-                micro_depth: Some(micro.depth_imbalance),
-                micro_vwap: Some(micro.vwap_signal),
-                micro_momentum: Some(micro.momentum_signal),
-                micro_vol_surge: Some(micro.volume_surge_signal),
-                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
-                ..Default::default()
-            }).await;
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("kelly_below_minimum".into()),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            edge: Some(effective_edge),
+            adjusted_edge: Some(adjusted_edge),
+            direction: Some(direction.to_string()),
+            minutes_remaining: Some(minutes_remaining),
+            confidence: Some(fv.confidence),
+            micro_total: Some(micro.total),
+            micro_trade: Some(micro.trade_imbalance),
+            micro_spread: Some(micro.spread_regime),
+            micro_depth: Some(micro.depth_imbalance),
+            micro_vwap: Some(micro.vwap_signal),
+            micro_momentum: Some(micro.momentum_signal),
+            micro_vol_surge: Some(micro.volume_surge_signal),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
         });
         return;
     }
@@ -819,26 +790,21 @@ async fn evaluate_entry(
                 reason = %reason,
                 "crypto eval: signal rejected"
             );
-            let pool_c = pool.clone();
-            let ticker_c = signal.ticker.clone();
-            let reason_c = reason.clone();
-            tokio::spawn(async move {
-                decision_log::write(&pool_c, DecisionEntry {
-                    ticker: ticker_c,
-                    signal_type: "crypto".into(),
-                    outcome: "rejected".into(),
-                    rejection_reason: Some(reason_c),
-                    model_prob: Some(fv.probability),
-                    market_price: Some(mid_price),
-                    edge: Some(effective_edge),
-                    adjusted_edge: Some(adjusted_edge),
-                    direction: Some(direction.to_string()),
-                    minutes_remaining: Some(minutes_remaining),
-                    confidence: Some(fv.confidence),
-                    signal_id,
-                    eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
-                    ..Default::default()
-                }).await;
+            decision_writer.send(DecisionEntry {
+                ticker: signal.ticker.clone(),
+                signal_type: "crypto".into(),
+                outcome: "rejected".into(),
+                rejection_reason: Some(reason.clone()),
+                model_prob: Some(fv.probability),
+                market_price: Some(mid_price),
+                edge: Some(effective_edge),
+                adjusted_edge: Some(adjusted_edge),
+                direction: Some(direction.to_string()),
+                minutes_remaining: Some(minutes_remaining),
+                confidence: Some(fv.confidence),
+                signal_id,
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
             });
             return;
         }
@@ -868,34 +834,28 @@ async fn evaluate_entry(
     }
 
     // Decision log: successful signal
-    {
-        let pool_c = pool.clone();
-        let ticker_c = signal.ticker.clone();
-        tokio::spawn(async move {
-            decision_log::write(&pool_c, DecisionEntry {
-                ticker: ticker_c,
-                signal_type: "crypto".into(),
-                outcome: "signal".into(),
-                model_prob: Some(fv.probability),
-                market_price: Some(mid_price),
-                edge: Some(effective_edge),
-                adjusted_edge: Some(adjusted_edge),
-                direction: Some(direction.to_string()),
-                minutes_remaining: Some(minutes_remaining),
-                confidence: Some(fv.confidence),
-                micro_total: Some(micro.total),
-                micro_trade: Some(micro.trade_imbalance),
-                micro_spread: Some(micro.spread_regime),
-                micro_depth: Some(micro.depth_imbalance),
-                micro_vwap: Some(micro.vwap_signal),
-                micro_momentum: Some(micro.momentum_signal),
-                micro_vol_surge: Some(micro.volume_surge_signal),
-                signal_id,
-                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
-                ..Default::default()
-            }).await;
-        });
-    }
+    decision_writer.send(DecisionEntry {
+        ticker: signal.ticker.clone(),
+        signal_type: "crypto".into(),
+        outcome: "signal".into(),
+        model_prob: Some(fv.probability),
+        market_price: Some(mid_price),
+        edge: Some(effective_edge),
+        adjusted_edge: Some(adjusted_edge),
+        direction: Some(direction.to_string()),
+        minutes_remaining: Some(minutes_remaining),
+        confidence: Some(fv.confidence),
+        micro_total: Some(micro.total),
+        micro_trade: Some(micro.trade_imbalance),
+        micro_spread: Some(micro.spread_regime),
+        micro_depth: Some(micro.depth_imbalance),
+        micro_vwap: Some(micro.vwap_signal),
+        micro_momentum: Some(micro.momentum_signal),
+        micro_vol_surge: Some(micro.volume_surge_signal),
+        signal_id,
+        eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+        ..Default::default()
+    });
 
     // Publish advisory and model state (fire-and-forget)
     write_model_state(redis, &contract.ticker, &fv).await;
@@ -959,7 +919,7 @@ async fn evaluate_exit(
         let (price_momentum, volume_surge) = read_ticker_signals(redis, &contract.ticker).await;
         let order_imbalance = orderbooks.order_imbalance(&contract.ticker).unwrap_or(0.5);
         let tape_data = {
-            let tape = trade_tape.read().unwrap();
+            let tape = trade_tape.read_or_recover();
             let aggr = tape.aggressiveness(Duration::from_secs(30));
             let vwap_dev = if spread > 0.0 {
                 tape.vwap(Duration::from_secs(60))

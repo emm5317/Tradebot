@@ -35,15 +35,18 @@ impl KalshiClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             "KALSHI-ACCESS-KEY",
-            HeaderValue::from_str(&ah.api_key).unwrap(),
+            HeaderValue::from_str(&ah.api_key)
+                .map_err(|e| KalshiError::Other(format!("invalid api_key header: {e}")))?,
         );
         headers.insert(
             "KALSHI-ACCESS-SIGNATURE",
-            HeaderValue::from_str(&ah.signature).unwrap(),
+            HeaderValue::from_str(&ah.signature)
+                .map_err(|e| KalshiError::Other(format!("invalid signature header: {e}")))?,
         );
         headers.insert(
             "KALSHI-ACCESS-TIMESTAMP",
-            HeaderValue::from_str(&ah.timestamp).unwrap(),
+            HeaderValue::from_str(&ah.timestamp)
+                .map_err(|e| KalshiError::Other(format!("invalid timestamp header: {e}")))?,
         );
         Ok(headers)
     }
@@ -144,25 +147,53 @@ impl KalshiClient {
         Err(last_err.unwrap_or_else(|| KalshiError::Other("max retries exceeded".into())))
     }
 
-    /// Execute a DELETE request with auth.
+    /// Execute a DELETE request with auth, retry on 5xx up to 2 times.
+    ///
+    /// Fewer retries than GET/POST (2 vs 3) since DELETE is used during
+    /// shutdown where speed matters more than persistence.
     async fn delete<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, KalshiError> {
         let url = format!("{}{}", self.base_url, path);
-        let headers = self.auth_headers("DELETE", path)?;
-        let start = std::time::Instant::now();
+        let mut last_err = None;
 
-        let resp = self.http.delete(&url).headers(headers).send().await
-            .map_err(KalshiError::NetworkError)?;
+        for attempt in 0..2 {
+            let headers = self.auth_headers("DELETE", path)?;
+            let start = std::time::Instant::now();
 
-        let status = resp.status();
-        let latency = start.elapsed();
-        info!(path, status = status.as_u16(), latency_ms = %latency.as_millis(), "kalshi DELETE");
+            match self.http.delete(&url).headers(headers).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let latency = start.elapsed();
+                    info!(path, status = status.as_u16(), latency_ms = %latency.as_millis(), "kalshi DELETE");
 
-        if status.is_success() {
-            return resp.json::<T>().await.map_err(KalshiError::NetworkError);
+                    if status.is_success() {
+                        return resp.json::<T>().await.map_err(KalshiError::NetworkError);
+                    }
+
+                    let body = resp.text().await.unwrap_or_else(|e| format!("<read error: {e}>"));
+                    let err = parse_error_response(status.as_u16(), &body);
+                    if status.is_server_error() && attempt < 1 {
+                        let delay = Duration::from_secs(1);
+                        warn!(attempt, ?delay, "kalshi DELETE 5xx, retrying");
+                        tokio::time::sleep(delay).await;
+                        last_err = Some(err);
+                        continue;
+                    }
+                    return Err(err);
+                }
+                Err(e) => {
+                    if attempt < 1 {
+                        let delay = Duration::from_secs(1);
+                        warn!(attempt, ?delay, error = %e, "kalshi DELETE failed, retrying");
+                        tokio::time::sleep(delay).await;
+                        last_err = Some(KalshiError::NetworkError(e));
+                        continue;
+                    }
+                    return Err(KalshiError::NetworkError(e));
+                }
+            }
         }
 
-        let body = resp.text().await.unwrap_or_else(|e| format!("<read error: {e}>"));
-        Err(parse_error_response(status.as_u16(), &body))
+        Err(last_err.unwrap_or_else(|| KalshiError::Other("max retries exceeded".into())))
     }
 
     // --- Public API methods ---

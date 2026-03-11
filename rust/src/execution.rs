@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -34,6 +35,7 @@ pub async fn run(
     feed_health: Arc<FeedHealth>,
     crypto_state: Arc<CryptoState>,
     order_mgr: Arc<tokio::sync::Mutex<OrderManager>>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let mut subscriber = nats
         .subscribe("tradebot.signals")
@@ -86,6 +88,10 @@ pub async fn run(
 
     loop {
         tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("execution engine shutting down");
+                break;
+            }
             Some(msg) = subscriber.next() => {
                 let start = Instant::now();
 

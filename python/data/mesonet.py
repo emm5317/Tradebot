@@ -124,12 +124,15 @@ async def fetch_all_stations(
             )
             for station in stations
         }
+        gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
         results: dict[str, ASOSObservation] = {}
-        for station, coro in tasks.items():
-            try:
-                results[station] = await coro
-            except Exception:
-                logger.exception("mesonet_station_failed", station=station)
+        for station, result in zip(tasks.keys(), gathered):
+            if isinstance(result, Exception):
+                logger.exception(
+                    "mesonet_station_failed", station=station, error=str(result),
+                )
+            else:
+                results[station] = result
         return results
 
 

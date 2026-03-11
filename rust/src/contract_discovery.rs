@@ -10,6 +10,8 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::lock_ext::RwLockExt;
+
 use crate::kalshi::websocket::WsSubscriptionHandle;
 
 /// A crypto binary contract nearing settlement.
@@ -111,7 +113,7 @@ impl ContractDiscovery {
                     }
                 }
 
-                let mut cache = self.contracts.write().unwrap();
+                let mut cache = self.contracts.write_or_recover();
                 let prev_count = cache.len();
                 *cache = contracts;
 
@@ -131,7 +133,7 @@ impl ContractDiscovery {
 
     /// Get a snapshot of currently active contracts.
     pub fn active_contracts(&self) -> Vec<CryptoContract> {
-        self.contracts.read().unwrap().clone()
+        self.contracts.read_or_recover().clone()
     }
 
     /// Run the refresh loop every 60 seconds until cancelled.

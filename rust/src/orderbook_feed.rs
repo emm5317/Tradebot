@@ -14,6 +14,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::lock_ext::RwLockExt;
+
 use crate::feed_health::FeedHealth;
 use crate::kalshi::orderbook::{OrderbookManager, Side};
 use crate::kalshi::trade_tape::{TradeTape, TradeRecord};
@@ -81,7 +83,7 @@ pub async fn run(
                     }
                     WsFeedMessage::Trade { ticker, price_cents, count, taker_side } => {
                         {
-                            let mut tape = trade_tape.write().unwrap();
+                            let mut tape = trade_tape.write_or_recover();
                             tape.record(TradeRecord {
                                 ticker: ticker.clone(),
                                 price_cents,
@@ -149,7 +151,7 @@ pub async fn run(
                     continue;
                 }
                 let tape_metrics = {
-                    let tape = trade_tape.read().unwrap();
+                    let tape = trade_tape.read_or_recover();
                     TapeSnapshot {
                         aggr_30s: tape.aggressiveness(Duration::from_secs(30)),
                         volume_60s: tape.recent_volume(Duration::from_secs(60)) as f64,

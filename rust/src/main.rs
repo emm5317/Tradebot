@@ -14,9 +14,11 @@ mod integration_tests;
 mod feeds;
 mod kalshi;
 mod kill_switch;
+mod lock_ext;
 mod logging;
 mod order_manager;
 mod orderbook_feed;
+mod supervisor;
 mod types;
 
 use std::sync::Arc;
@@ -25,6 +27,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use fred::interfaces::ClientLike;
 use tokio_util::sync::CancellationToken;
+
+use supervisor::TaskCriticality;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -132,7 +136,17 @@ async fn main() -> Result<()> {
         cancel.clone(),
     );
 
-    let ws_handle = tokio::spawn(async move {
+    // Initialize kill switch state (moved up for supervisor)
+    let kill_switch = Arc::new(kill_switch::KillSwitchState::new(
+        config.kill_switch_all,
+        config.kill_switch_crypto,
+        config.kill_switch_weather,
+    ));
+
+    // Phase 12.0c: Task supervisor for critical/non-critical task management
+    let mut supervisor = supervisor::TaskSupervisor::new(cancel.clone(), Arc::clone(&kill_switch));
+
+    supervisor.spawn("kalshi_ws", TaskCriticality::Critical, async move {
         ws_feed.run(ws_tx).await;
     });
 
@@ -144,7 +158,7 @@ async fn main() -> Result<()> {
         kalshi::trade_tape::TradeTape::new(10_000),
     ));
 
-    let orderbook_handle = tokio::spawn({
+    supervisor.spawn("orderbook_feed", TaskCriticality::Critical, {
         let orderbooks = Arc::clone(&orderbooks);
         let trade_tape = Arc::clone(&trade_tape);
         let fh = Arc::clone(&feed_health);
@@ -212,16 +226,9 @@ async fn main() -> Result<()> {
         tracing::info!("deribit dvol feed enabled");
     }
 
-    // Initialize kill switch state
-    let kill_switch = Arc::new(kill_switch::KillSwitchState::new(
-        config.kill_switch_all,
-        config.kill_switch_crypto,
-        config.kill_switch_weather,
-    ));
-
     // Phase 3: Contract discovery for crypto evaluator (with WS subscription wiring)
     let contract_discovery = Arc::new(contract_discovery::ContractDiscovery::with_ws_handle(ws_sub_handle));
-    let discovery_handle = tokio::spawn({
+    supervisor.spawn("contract_discovery", TaskCriticality::Critical, {
         let cd = Arc::clone(&contract_discovery);
         let pool = pool.clone();
         let cancel = cancel.clone();
@@ -239,8 +246,11 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Phase 12.0d: Batched decision log writer (replaces per-eval tokio::spawn)
+    let decision_writer = decision_log::DecisionLogWriter::spawn(pool.clone(), cancel.clone());
+
     // Phase 3: Spawn event-driven crypto evaluator (with Phase 4.3 trade tape)
-    let crypto_eval_handle = tokio::spawn({
+    supervisor.spawn("crypto_evaluator", TaskCriticality::Critical, {
         let config = Arc::new(config.clone());
         let cs = Arc::clone(&crypto_state);
         let cd = Arc::clone(&contract_discovery);
@@ -254,8 +264,9 @@ async fn main() -> Result<()> {
         let redis = redis.clone();
         let nats = nats.clone();
         let cancel = cancel.clone();
+        let dw = decision_writer.clone();
         async move {
-            crypto_evaluator::run(config, cs, cd, ob, tt, om, k, ks, fh, pool, redis, nats, cancel)
+            crypto_evaluator::run(config, cs, cd, ob, tt, om, k, ks, fh, pool, redis, nats, cancel, dw)
                 .await;
         }
     });
@@ -273,7 +284,7 @@ async fn main() -> Result<()> {
     let http_app = kill_switch::router(Arc::clone(&kill_switch))
         .merge(dashboard::routes(dashboard_state));
     let http_port = config.http_port;
-    tokio::spawn(async move {
+    supervisor.spawn("http_server", TaskCriticality::NonCritical, async move {
         let listener = match tokio::net::TcpListener::bind(("0.0.0.0", http_port)).await {
             Ok(l) => l,
             Err(e) => {
@@ -295,7 +306,7 @@ async fn main() -> Result<()> {
     );
 
     // Run execution engine
-    let execution_handle = tokio::spawn({
+    supervisor.spawn("execution", TaskCriticality::Critical, {
         let config = config.clone();
         let pool = pool.clone();
         let ks = Arc::clone(&kill_switch);
@@ -304,36 +315,83 @@ async fn main() -> Result<()> {
         let kalshi = Arc::clone(&kalshi);
         let om = Arc::clone(&order_mgr);
         let nats = nats.clone();
+        let cancel = cancel.clone();
         async move {
-            if let Err(e) = execution::run(&config, nats, pool, kalshi, ks, fh, cs, om).await {
+            if let Err(e) = execution::run(&config, nats, pool, kalshi, ks, fh, cs, om, cancel).await {
                 tracing::error!(error = %e, "execution engine failed");
             }
         }
     });
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("shutting down");
+    // Wait for shutdown: either ctrl+c or supervisor detects critical task death
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("shutdown signal received — beginning graceful shutdown");
+        }
+        _ = supervisor.run() => {
+            tracing::warn!("supervisor triggered shutdown (critical task died)");
+        }
+    }
 
+    // ── Stage 1: Activate kill switch (prevents new orders) ──────────
+    kill_switch.kill_all.store(true, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!("kill switch activated — no new orders will be placed");
+
+    // ── Stage 2: Signal all loops to stop + drain supervised tasks ───
     cancel.cancel();
-    execution_handle.abort();
-    crypto_eval_handle.abort();
 
-    // Graceful shutdown with 10s timeout
-    let shutdown = async {
-        let _ = ws_handle.await;
-        let _ = orderbook_handle.await;
-        let _ = discovery_handle.await;
-        pool.close().await;
-        let _ = redis.quit().await;
-    };
-
-    if tokio::time::timeout(Duration::from_secs(10), shutdown)
+    // Give supervisor time to drain all remaining tasks
+    if tokio::time::timeout(Duration::from_secs(5), supervisor.run())
         .await
         .is_err()
     {
-        tracing::warn!("shutdown timed out after 10s, forcing exit");
+        tracing::warn!("supervised tasks did not exit within 5s");
     }
 
+    // ── Stage 3: Cancel all in-flight orders via Kalshi API ──────────
+    tracing::info!("draining in-flight orders...");
+    {
+        let mut mgr = order_mgr.lock().await;
+        let (attempted, succeeded) = mgr.drain_all_orders(&kalshi).await;
+        if attempted > 0 {
+            tracing::info!(attempted, succeeded, "order drain complete");
+        } else {
+            tracing::info!("no in-flight orders to drain");
+        }
+    }
+
+    // ── Stage 4: Wait for order confirmations ────────────────────────
+    let confirm_start = std::time::Instant::now();
+    let confirm_deadline = Duration::from_secs(5);
+    loop {
+        {
+            let mgr = order_mgr.lock().await;
+            if !mgr.has_in_flight_orders() {
+                tracing::info!("all orders confirmed terminal");
+                break;
+            }
+            let remaining = mgr.in_flight_count();
+            tracing::info!(remaining, "waiting for order confirmations...");
+        }
+        if confirm_start.elapsed() > confirm_deadline {
+            tracing::warn!("order confirmation timed out after 5s");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // ── Stage 5: Clean up infrastructure ─────────────────────────────
+    let cleanup = async {
+        pool.close().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), redis.quit()).await;
+    };
+    if tokio::time::timeout(Duration::from_secs(5), cleanup)
+        .await
+        .is_err()
+    {
+        tracing::warn!("infrastructure cleanup timed out after 5s");
+    }
+
+    tracing::info!("shutdown complete");
     Ok(())
 }

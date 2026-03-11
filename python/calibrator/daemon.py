@@ -57,14 +57,24 @@ class CalibrationDaemon:
 
         while not self._shutdown.is_set():
             try:
+                # Sequential phase: Jobs 1 → 2 → 3 (data dependencies)
                 await self.settle_order_outcomes()
                 await self.populate_calibration_table()
                 await self.compute_rolling_metrics()
-                await self.update_station_weights()
-                await self.recalculate_hrrr_skill()
-                await self.check_drift()
-                await self.maybe_run_source_attribution()
-                await self.maybe_run_daily_sweep()
+
+                # Parallel phase: Jobs 4, 5, 6 (all read from tables written above)
+                await asyncio.gather(
+                    self.update_station_weights(),
+                    self.recalculate_hrrr_skill(),
+                    self.check_drift(),
+                )
+
+                # Parallel phase: Jobs 7, 8 (independent long-running jobs)
+                await asyncio.gather(
+                    self.maybe_run_source_attribution(),
+                    self.maybe_run_daily_sweep(),
+                )
+
                 logger.info("calibration_cycle_complete")
             except Exception:
                 logger.exception("calibration_cycle_failed")

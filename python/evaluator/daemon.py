@@ -100,9 +100,13 @@ class EvaluationDaemon:
     async def _maybe_refresh_calibration(self) -> None:
         """Reload calibration tables if stale (every 15 minutes)."""
         if (time_mod.monotonic() - self._last_cal_refresh) > 900:
-            self._sigma_table = await build_sigma_table(self.pool)
-            self._climo_table = await build_climo_table(self.pool)
-            self._station_calibration = await build_station_calibration(self.pool)
+            self._sigma_table, self._climo_table, self._station_calibration = (
+                await asyncio.gather(
+                    build_sigma_table(self.pool),
+                    build_climo_table(self.pool),
+                    build_station_calibration(self.pool),
+                )
+            )
             # Update the weather evaluator with fresh tables
             self._weather_eval.sigma_table = self._sigma_table
             self._weather_eval.climo_table = self._climo_table
@@ -130,14 +134,10 @@ class EvaluationDaemon:
 
             await self._sleep_or_shutdown(interval)
 
-    async def _evaluate_all(self) -> None:
-        """Evaluate all active contracts nearing settlement."""
-        assert self.pool is not None
-        assert self.publisher is not None
-
-        # Fetch contracts settling within 30 minutes
+    async def _fetch_active_contracts(self):
+        """Fetch contracts settling within 30 minutes."""
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
+            return await conn.fetch(
                 """
                 SELECT ticker, category, city, station, threshold,
                        settlement_time, status
@@ -148,18 +148,10 @@ class EvaluationDaemon:
                 """
             )
 
-        if not rows:
-            return
-
-        # Fetch latest data sources
-        asos_obs = await fetch_all_stations(
-            self.settings.asos_stations,
-            mesonet_base_url=self.settings.mesonet_base_url,
-        )
-
-        # Fetch latest market snapshots for orderbook state
+    async def _fetch_market_snapshots(self):
+        """Fetch latest market snapshots for orderbook state."""
         async with self.pool.acquire() as conn:
-            snapshot_rows = await conn.fetch(
+            return await conn.fetch(
                 """
                 SELECT DISTINCT ON (ticker)
                     ticker, yes_price, no_price, spread,
@@ -170,12 +162,34 @@ class EvaluationDaemon:
                 """
             )
 
+    async def _evaluate_all(self) -> None:
+        """Evaluate all active contracts nearing settlement."""
+        assert self.pool is not None
+        assert self.publisher is not None
+
+        t0 = time_mod.monotonic()
+
+        # Steps 1, 2, 3 are independent — run in parallel
+        rows, asos_obs, snapshot_rows = await asyncio.gather(
+            self._fetch_active_contracts(),
+            fetch_all_stations(
+                self.settings.asos_stations,
+                mesonet_base_url=self.settings.mesonet_base_url,
+            ),
+            self._fetch_market_snapshots(),
+        )
+
+        if not rows:
+            return
+
         snapshots = {r["ticker"]: r for r in snapshot_rows}
 
-        # Try to get orderbook data from Redis (written by Rust)
+        # Step 4 depends on rows (needs ticker list)
         orderbook_overrides = await self._fetch_redis_orderbooks(
             [r["ticker"] for r in rows]
         )
+
+        t_io = time_mod.monotonic()
 
         for row in rows:
             ticker = row["ticker"]
@@ -288,6 +302,15 @@ class EvaluationDaemon:
                     "evaluate_contract_error", {"ticker": ticker}
                 )
 
+        t_eval = time_mod.monotonic()
+        logger.info(
+            "eval_cycle_complete",
+            contracts=len(rows),
+            io_ms=round((t_io - t0) * 1000, 1),
+            eval_ms=round((t_eval - t_io) * 1000, 1),
+            total_ms=round((t_eval - t0) * 1000, 1),
+        )
+
     async def _write_decision_log(
         self,
         ticker: str,
@@ -367,19 +390,24 @@ class EvaluationDaemon:
 
     async def _fetch_redis_orderbooks(self, tickers: list[str]) -> dict:
         """Fetch orderbook summaries from Redis (written by Rust WS feed)."""
-        if self.redis is None:
+        if self.redis is None or not tickers:
+            return {}
+
+        import json
+
+        keys = [f"orderbook:{t}" for t in tickers]
+        try:
+            values = await self.redis.mget(keys)
+        except Exception:
             return {}
 
         result = {}
-        for ticker in tickers:
-            try:
-                import json
-
-                raw = await self.redis.get(f"orderbook:{ticker}")
-                if raw:
+        for ticker, raw in zip(tickers, values):
+            if raw:
+                try:
                     result[ticker] = json.loads(raw)
-            except Exception:
-                pass
+                except Exception:
+                    pass
         return result
 
     async def _maybe_run_daily_aggregation(self) -> None:
