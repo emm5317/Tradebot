@@ -169,9 +169,93 @@ pub async fn run(
     }
 }
 
+/// Build an orderbook summary JSON for a single ticker.
+fn build_ticker_summary(
+    ticker: &str,
+    orderbooks: &OrderbookManager,
+    tape: &TapeSnapshot,
+    ticker_states: &HashMap<String, TickerState>,
+) -> String {
+    let mid = orderbooks
+        .mid_price(ticker)
+        .map(|d| d.to_string().parse::<f64>().unwrap_or(0.5));
+    let spread = orderbooks
+        .spread(ticker)
+        .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0));
+    let best_bid = orderbooks
+        .best_bid(ticker)
+        .map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
+    let best_ask = orderbooks
+        .best_ask(ticker)
+        .map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
+
+    let bid_depth: i64 = orderbooks.best_bid(ticker).map(|(_, s)| s).unwrap_or(0);
+    let ask_depth: i64 = orderbooks.best_ask(ticker).map(|(_, s)| s).unwrap_or(0);
+
+    let trade_aggr_30s = tape.aggr_30s;
+    let recent_volume_60s = tape.volume_60s;
+    let last_trade = tape.last_trades.get(ticker).cloned().flatten();
+
+    let ts = ticker_states.get(ticker);
+
+    let mut summary = serde_json::json!({
+        "mid_price": mid.unwrap_or(0.5),
+        "spread": spread.unwrap_or(0.0),
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "bid_depth": bid_depth,
+        "ask_depth": ask_depth,
+        "trade_aggr_30s": trade_aggr_30s,
+        "recent_volume_60s": recent_volume_60s,
+    });
+
+    // Volume surge detection (7.3c): 60s volume vs 5-min baseline
+    let volume_300s_avg = tape.volume_300s / 5.0;
+    let volume_60s_rate = tape.volume_60s;
+    let volume_surge = volume_300s_avg > 0.0 && volume_60s_rate > volume_300s_avg * 3.0;
+
+    if let Some(ts) = ts {
+        if let Some(s) = ts.yes_bid_size {
+            summary["best_bid_size"] = serde_json::json!(s);
+        }
+        if let Some(s) = ts.yes_ask_size {
+            summary["best_ask_size"] = serde_json::json!(s);
+        }
+        if let Some(ref status) = ts.market_status {
+            summary["market_status"] = serde_json::json!(status);
+        }
+        if let Some(v) = ts.volume {
+            summary["volume"] = serde_json::json!(v);
+        }
+        if let Some(oi) = ts.open_interest {
+            summary["open_interest"] = serde_json::json!(oi);
+        }
+
+        // 7.3a: Price momentum (linear slope over last 30s)
+        let momentum = compute_price_momentum(&ts.last_price_history);
+        summary["price_momentum"] = serde_json::json!(momentum);
+
+        // 7.3d: Open interest delta
+        if let (Some(curr), Some(prev)) = (ts.open_interest, ts.prev_open_interest) {
+            summary["oi_delta"] = serde_json::json!(curr - prev);
+        }
+    }
+
+    // 7.3c: Volume surge flag
+    summary["volume_surge"] = serde_json::json!(volume_surge);
+
+    if let Some(lt) = last_trade {
+        summary["last_trade_price"] = serde_json::json!(lt.price_cents as f64 / 100.0);
+        summary["last_trade_count"] = serde_json::json!(lt.count);
+    }
+
+    summary.to_string()
+}
+
 /// Write orderbook summaries to Redis for each dirty ticker.
 ///
-/// Enhanced to include trade tape metrics and ticker channel data.
+/// Uses pipelining to batch all SET commands into a single network round trip
+/// instead of issuing one round trip per ticker (~40x latency reduction).
 async fn flush_to_redis(
     orderbooks: &OrderbookManager,
     tape: &TapeSnapshot,
@@ -179,101 +263,32 @@ async fn flush_to_redis(
     redis: &RedisClient,
     tickers: &std::collections::HashSet<String>,
 ) {
-    for ticker in tickers {
-        let mid = orderbooks
-            .mid_price(ticker)
-            .map(|d| d.to_string().parse::<f64>().unwrap_or(0.5));
-        let spread = orderbooks
-            .spread(ticker)
-            .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0));
-        let best_bid = orderbooks
-            .best_bid(ticker)
-            .map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
-        let best_ask = orderbooks
-            .best_ask(ticker)
-            .map(|(p, _)| p.to_string().parse::<f64>().unwrap_or(0.0));
+    // Build all key-value pairs synchronously
+    let entries: Vec<(String, String)> = tickers
+        .iter()
+        .map(|ticker| {
+            let key = format!("orderbook:{ticker}");
+            let value = build_ticker_summary(ticker, orderbooks, tape, ticker_states);
+            (key, value)
+        })
+        .collect();
 
-        let bid_depth: i64 = orderbooks.best_bid(ticker).map(|(_, s)| s).unwrap_or(0);
-        let ask_depth: i64 = orderbooks.best_ask(ticker).map(|(_, s)| s).unwrap_or(0);
-
-        // Trade tape metrics (pre-extracted from tape snapshot)
-        let trade_aggr_30s = tape.aggr_30s;
-        let recent_volume_60s = tape.volume_60s;
-        let last_trade = tape.last_trades.get(ticker).cloned().flatten();
-
-        // Ticker channel state
-        let ts = ticker_states.get(ticker.as_str());
-
-        let mut summary = serde_json::json!({
-            "mid_price": mid.unwrap_or(0.5),
-            "spread": spread.unwrap_or(0.0),
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "bid_depth": bid_depth,
-            "ask_depth": ask_depth,
-            "trade_aggr_30s": trade_aggr_30s,
-            "recent_volume_60s": recent_volume_60s,
-        });
-
-        // Volume surge detection (7.3c): 60s volume vs 5-min baseline
-        let volume_300s_avg = tape.volume_300s / 5.0; // per-minute average
-        let volume_60s_rate = tape.volume_60s; // last minute
-        let volume_surge = volume_300s_avg > 0.0 && volume_60s_rate > volume_300s_avg * 3.0;
-
-        // Add ticker channel fields if available
-        if let Some(ts) = ts {
-            if let Some(s) = ts.yes_bid_size {
-                summary["best_bid_size"] = serde_json::json!(s);
-            }
-            if let Some(s) = ts.yes_ask_size {
-                summary["best_ask_size"] = serde_json::json!(s);
-            }
-            if let Some(ref status) = ts.market_status {
-                summary["market_status"] = serde_json::json!(status);
-            }
-            if let Some(v) = ts.volume {
-                summary["volume"] = serde_json::json!(v);
-            }
-            if let Some(oi) = ts.open_interest {
-                summary["open_interest"] = serde_json::json!(oi);
-            }
-
-            // 7.3a: Price momentum (linear slope over last 30s)
-            let momentum = compute_price_momentum(&ts.last_price_history);
-            summary["price_momentum"] = serde_json::json!(momentum);
-
-            // 7.3d: Open interest delta
-            if let (Some(curr), Some(prev)) = (ts.open_interest, ts.prev_open_interest) {
-                summary["oi_delta"] = serde_json::json!(curr - prev);
-            }
-        }
-
-        // 7.3c: Volume surge flag
-        summary["volume_surge"] = serde_json::json!(volume_surge);
-
-        // Add last trade info
-        if let Some(lt) = last_trade {
-            summary["last_trade_price"] = serde_json::json!(lt.price_cents as f64 / 100.0);
-            summary["last_trade_count"] = serde_json::json!(lt.count);
-        }
-
-        let key = format!("orderbook:{ticker}");
-        let value = summary.to_string();
-
-        // SET with 30s TTL — stale data auto-expires if WS disconnects
-        let result: Result<(), _> = redis
+    // Pipeline all SET commands — one network round trip
+    let pipeline = redis.pipeline();
+    for (key, value) in &entries {
+        let _: Result<(), _> = pipeline
             .set(
-                &key,
+                key.as_str(),
                 value.as_str(),
                 Some(fred::types::Expiration::EX(30)),
                 None,
                 false,
             )
             .await;
+    }
 
-        if let Err(e) = result {
-            warn!(ticker, error = %e, "failed to write orderbook to redis");
-        }
+    if let Err(e) = pipeline.all::<Vec<()>>().await {
+        warn!(count = entries.len(), error = %e, "failed to pipeline orderbook flush to redis");
     }
 }
 
@@ -308,6 +323,8 @@ fn compute_price_momentum(history: &VecDeque<(Instant, i64)>) -> f64 {
 }
 
 /// Periodically check for stale feeds and write health status to Redis.
+///
+/// Pipelines all stale-status SET commands into a single round trip.
 async fn check_stale_feeds(
     orderbooks: &OrderbookManager,
     redis: &RedisClient,
@@ -315,21 +332,36 @@ async fn check_stale_feeds(
 ) {
     let stale_threshold = Duration::from_secs(30);
 
-    for ticker in ticker_states.keys() {
-        let is_stale = orderbooks.is_stale(ticker, stale_threshold);
-        if is_stale {
-            warn!(ticker, "orderbook data is stale");
-            let key = format!("feed:status:{ticker}");
-            let _: Result<(), _> = redis
-                .set(
-                    &key,
-                    "stale",
-                    Some(fred::types::Expiration::EX(60)),
-                    None,
-                    false,
-                )
-                .await;
-        }
+    let stale_tickers: Vec<String> = ticker_states
+        .keys()
+        .filter(|ticker| orderbooks.is_stale(ticker, stale_threshold))
+        .cloned()
+        .collect();
+
+    if stale_tickers.is_empty() {
+        return;
+    }
+
+    for ticker in &stale_tickers {
+        warn!(ticker = ticker.as_str(), "orderbook data is stale");
+    }
+
+    let pipeline = redis.pipeline();
+    for ticker in &stale_tickers {
+        let key = format!("feed:status:{ticker}");
+        let _: Result<(), _> = pipeline
+            .set(
+                &key,
+                "stale",
+                Some(fred::types::Expiration::EX(60)),
+                None,
+                false,
+            )
+            .await;
+    }
+
+    if let Err(e) = pipeline.all::<Vec<()>>().await {
+        warn!(error = %e, "failed to pipeline stale feed status to redis");
     }
 }
 
