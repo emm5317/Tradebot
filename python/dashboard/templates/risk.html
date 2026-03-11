@@ -1,14 +1,365 @@
 {% extends "base.html" %}
 {% block title_suffix %} — Risk{% endblock %}
+
 {% block content %}
-<div class="t-grid" style="grid-template-columns:1fr;">
+<div class="t-grid t-grid-2x2">
+
+    <!-- ── Exposure (top-left) ──────────────────────────── -->
     <div class="t-panel">
         <div class="t-panel-header">
-            <div class="t-panel-title">Risk Dashboard</div>
+            <div class="t-panel-title">Exposure</div>
+            <div class="t-panel-meta" id="meta-exposure"></div>
         </div>
-        <div class="t-panel-body">
-            <div class="t-empty">Phase 11.3 — Exposure, position limits, kill switches, feed health matrix</div>
+        <div class="t-panel-body" id="panel-exposure"></div>
+    </div>
+
+    <!-- ── Kill Switches (top-right) ────────────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Kill Switches</div>
         </div>
+        <div class="t-panel-body" id="panel-kills"></div>
+    </div>
+
+    <!-- ── Feed Health Matrix (bottom-left) ──────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Feed Health Matrix <span class="t-live"></span></div>
+            <div class="t-panel-meta" id="meta-feeds"></div>
+        </div>
+        <div class="t-panel-body" id="panel-feeds"></div>
+    </div>
+
+    <!-- ── Position Detail (bottom-right) ────────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Position Detail</div>
+            <div class="t-panel-meta" id="meta-pos-detail"></div>
+        </div>
+        <div class="t-panel-body" id="panel-pos-detail"></div>
     </div>
 </div>
+
+<style>
+.t-exposure-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--t-sp-lg);
+}
+.t-exp-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: var(--t-fs-md);
+}
+.t-exp-label {
+    color: var(--t-muted);
+    font-size: var(--t-fs-sm);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.t-exp-value {
+    font-weight: 700;
+    font-size: var(--t-fs-lg);
+}
+.t-exp-bar {
+    width: 100%;
+    height: 8px;
+    background: var(--t-border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 4px;
+}
+.t-exp-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.4s ease;
+}
+
+.t-kill-row {
+    display: flex;
+    align-items: center;
+    gap: var(--t-sp-lg);
+    padding: var(--t-sp-md) 0;
+    border-bottom: 1px solid #1a1a1a;
+    font-size: var(--t-fs-md);
+}
+.t-kill-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.t-kill-dot.active {
+    background: var(--t-green);
+    box-shadow: 0 0 6px var(--t-green);
+}
+.t-kill-dot.killed {
+    background: var(--t-red);
+    box-shadow: 0 0 6px var(--t-red);
+}
+.t-kill-label {
+    flex: 1;
+    color: var(--t-text);
+}
+.t-kill-status {
+    font-size: var(--t-fs-sm);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.t-feed-row {
+    display: flex;
+    align-items: center;
+    gap: var(--t-sp-md);
+    padding: 4px 0;
+    border-bottom: 1px solid #1a1a1a;
+    font-size: var(--t-fs-base);
+}
+.t-feed-name {
+    width: 120px;
+    color: var(--t-text);
+}
+.t-feed-score-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+@keyframes t-pulse-green {
+    0%, 100% { box-shadow: 0 0 4px var(--t-green); }
+    50% { box-shadow: 0 0 8px var(--t-green); }
+}
+.t-feed-score-dot.score-1   { background: var(--t-green); animation: t-pulse-green 2s infinite; }
+.t-feed-score-dot.score-075 { background: var(--t-yellow); }
+.t-feed-score-dot.score-025 { background: var(--t-red); }
+.t-feed-score-dot.score-0   { background: var(--t-dim); }
+
+.t-feed-score {
+    width: 35px;
+    text-align: right;
+    font-weight: 600;
+}
+.t-feed-age {
+    width: 50px;
+    text-align: right;
+    color: var(--t-muted);
+    font-size: var(--t-fs-sm);
+}
+.t-feed-status {
+    width: 20px;
+    text-align: center;
+    font-size: var(--t-fs-sm);
+}
+
+.t-pos-card {
+    background: var(--t-bg-panel);
+    border: 1px solid var(--t-border);
+    border-left: 3px solid var(--t-border);
+    padding: var(--t-sp-md) var(--t-sp-lg);
+    margin-bottom: var(--t-sp-md);
+}
+.t-pos-card.yes { border-left-color: var(--t-green); }
+.t-pos-card.no  { border-left-color: var(--t-red); }
+.t-pos-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: var(--t-sp-sm);
+}
+.t-pos-details {
+    display: flex;
+    gap: var(--t-sp-xl);
+    font-size: var(--t-fs-sm);
+    color: var(--t-muted);
+}
+.t-pos-detail-val { color: var(--t-text-bright); }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var cachedRisk = null;
+
+    function fetchRisk() {
+        Terminal.fetchJSON('/api/risk-summary').then(function(data) {
+            if (!data) return;
+            cachedRisk = data;
+            renderExposure();
+            renderKills();
+            renderFeeds();
+            renderPositions();
+        });
+    }
+
+    // ── Exposure ─────────────────────────────────────────────────
+    function renderExposure() {
+        var el = document.getElementById('panel-exposure');
+        var d = cachedRisk;
+        if (!d) { el.innerHTML = '<div class="t-empty">loading...</div>'; return; }
+
+        var posRatio = d.position_count / d.max_positions;
+        var expRatio = d.exposure_cents / d.max_exposure_cents;
+        var lossRatio = Math.abs(d.daily_loss_cents) / Math.abs(d.max_daily_loss_cents);
+
+        function barColor(ratio) {
+            if (ratio >= 0.9) return 'var(--t-red)';
+            if (ratio >= 0.7) return 'var(--t-yellow)';
+            return 'var(--t-green)';
+        }
+
+        el.innerHTML = '<div class="t-exposure-grid">' +
+            '<div>' +
+                '<div class="t-exp-row">' +
+                    '<span class="t-exp-label">Positions</span>' +
+                    '<span class="t-exp-value">' + d.position_count + ' <span class="t-muted-txt" style="font-weight:400;font-size:var(--t-fs-sm);">/ ' + d.max_positions + '</span></span>' +
+                '</div>' +
+                '<div class="t-exp-bar"><div class="t-exp-bar-fill" style="width:' + (posRatio * 100).toFixed(0) + '%; background:' + barColor(posRatio) + ';"></div></div>' +
+            '</div>' +
+            '<div>' +
+                '<div class="t-exp-row">' +
+                    '<span class="t-exp-label">Daily P&L</span>' +
+                    '<span class="t-exp-value ' + Terminal.pnlClass(d.daily_pnl_cents) + '">' + Terminal.formatPnl(d.daily_pnl_cents) + '</span>' +
+                '</div>' +
+            '</div>' +
+            '<div>' +
+                '<div class="t-exp-row">' +
+                    '<span class="t-exp-label">Daily Loss</span>' +
+                    '<span class="t-exp-value t-negative">' + Terminal.formatPnl(d.daily_loss_cents) + ' <span class="t-muted-txt" style="font-weight:400;font-size:var(--t-fs-sm);">/ ' + Terminal.formatPnl(d.max_daily_loss_cents) + '</span></span>' +
+                '</div>' +
+                '<div class="t-exp-bar"><div class="t-exp-bar-fill" style="width:' + (lossRatio * 100).toFixed(0) + '%; background:' + barColor(lossRatio) + ';"></div></div>' +
+            '</div>' +
+            '<div>' +
+                '<div class="t-exp-row">' +
+                    '<span class="t-exp-label">Exposure</span>' +
+                    '<span class="t-exp-value">$' + (d.exposure_cents / 100).toFixed(2) + ' <span class="t-muted-txt" style="font-weight:400;font-size:var(--t-fs-sm);">/ $' + (d.max_exposure_cents / 100).toFixed(2) + '</span></span>' +
+                '</div>' +
+                '<div class="t-exp-bar"><div class="t-exp-bar-fill" style="width:' + (expRatio * 100).toFixed(0) + '%; background:' + barColor(expRatio) + ';"></div></div>' +
+            '</div>' +
+        '</div>';
+        Terminal.touchMeta('exposure');
+    }
+
+    // ── Kill Switches ────────────────────────────────────────────
+    function renderKills() {
+        var el = document.getElementById('panel-kills');
+        var ks = cachedRisk.kill_switches;
+
+        var items = [
+            { label: 'All Trading', key: 'all' },
+            { label: 'Crypto', key: 'crypto' },
+            { label: 'Weather', key: 'weather' },
+        ];
+
+        el.innerHTML = items.map(function(item) {
+            var killed = ks[item.key];
+            return '<div class="t-kill-row">' +
+                '<div class="t-kill-dot ' + (killed ? 'killed' : 'active') + '"></div>' +
+                '<span class="t-kill-label">' + item.label + '</span>' +
+                '<span class="t-kill-status ' + (killed ? 't-negative' : 't-positive') + '">' +
+                    (killed ? 'KILLED' : 'ACTIVE') +
+                '</span>' +
+            '</div>';
+        }).join('') +
+        '<div style="margin-top:var(--t-sp-xl); padding-top:var(--t-sp-lg); border-top:1px solid var(--t-border);">' +
+            '<div style="font-size:var(--t-fs-xs); color:var(--t-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:var(--t-sp-md); font-weight:600;">Strategy Health</div>' +
+            '<div class="t-exp-row">' +
+                '<span class="t-exp-label">Crypto</span>' +
+                '<span class="t-exp-value" style="font-size:var(--t-fs-md); color:' + scoreColor(cachedRisk.crypto_health) + ';">' + cachedRisk.crypto_health.toFixed(2) + '</span>' +
+            '</div>' +
+            '<div class="t-exp-row" style="margin-top:var(--t-sp-sm);">' +
+                '<span class="t-exp-label">Weather</span>' +
+                '<span class="t-exp-value" style="font-size:var(--t-fs-md); color:' + scoreColor(cachedRisk.weather_health) + ';">' + cachedRisk.weather_health.toFixed(2) + '</span>' +
+            '</div>' +
+        '</div>';
+    }
+
+    function scoreColor(score) {
+        if (score >= 0.9) return 'var(--t-green)';
+        if (score >= 0.5) return 'var(--t-yellow)';
+        if (score > 0) return 'var(--t-red)';
+        return 'var(--t-dim)';
+    }
+
+    function scoreDotClass(score) {
+        if (score >= 0.9) return 'score-1';
+        if (score >= 0.5) return 'score-075';
+        if (score > 0) return 'score-025';
+        return 'score-0';
+    }
+
+    // ── Feed Health ──────────────────────────────────────────────
+    function renderFeeds() {
+        var el = document.getElementById('panel-feeds');
+        var feeds = cachedRisk.feeds;
+        if (!feeds.length) {
+            el.innerHTML = '<div class="t-empty">no feed data</div>';
+            Terminal.touchMeta('feeds');
+            return;
+        }
+
+        // Header
+        var html = '<div class="t-feed-row" style="border-bottom:1px solid var(--t-border);">' +
+            '<span class="t-feed-name" style="color:var(--t-muted); font-size:var(--t-fs-xs); text-transform:uppercase; letter-spacing:1px;">Feed</span>' +
+            '<div class="t-feed-score-dot" style="visibility:hidden;"></div>' +
+            '<span class="t-feed-score" style="color:var(--t-muted); font-size:var(--t-fs-xs); text-transform:uppercase;">Score</span>' +
+            '<span class="t-feed-age" style="text-transform:uppercase; letter-spacing:1px;">Age</span>' +
+            '<span class="t-feed-status"></span>' +
+        '</div>';
+
+        html += feeds.map(function(f) {
+            var ageStr = f.age_ms < 1000 ? (f.age_ms / 1000).toFixed(1) + 's' :
+                        f.age_ms < 60000 ? (f.age_ms / 1000).toFixed(0) + 's' :
+                        (f.age_ms / 60000).toFixed(0) + 'm';
+            var statusIcon = f.healthy ? '<span class="t-positive">\u2713</span>' : '<span class="t-negative">!</span>';
+
+            return '<div class="t-feed-row">' +
+                '<span class="t-feed-name">' + f.name + '</span>' +
+                '<div class="t-feed-score-dot ' + scoreDotClass(f.score) + '"></div>' +
+                '<span class="t-feed-score" style="color:' + scoreColor(f.score) + ';">' + f.score.toFixed(2) + '</span>' +
+                '<span class="t-feed-age">' + ageStr + '</span>' +
+                '<span class="t-feed-status">' + statusIcon + '</span>' +
+            '</div>';
+        }).join('');
+
+        el.innerHTML = html;
+        Terminal.touchMeta('feeds');
+    }
+
+    // ── Position Detail ──────────────────────────────────────────
+    function renderPositions() {
+        var el = document.getElementById('panel-pos-detail');
+        var positions = cachedRisk.positions;
+        if (!positions.length) {
+            el.innerHTML = '<div class="t-empty">no open positions</div>';
+            Terminal.touchMeta('pos-detail');
+            return;
+        }
+
+        el.innerHTML = positions.map(function(p) {
+            return '<div class="t-pos-card ' + p.direction + '">' +
+                '<div class="t-pos-top">' +
+                    '<span class="t-ticker" style="font-weight:700;">' + p.ticker + '</span>' +
+                    '<span class="' + (p.direction === 'yes' ? 't-yes' : 't-no') + '">' + p.direction.toUpperCase() + '</span>' +
+                '</div>' +
+                '<div class="t-pos-details">' +
+                    '<span>size: <span class="t-pos-detail-val">$' + (p.size_cents / 100).toFixed(2) + '</span></span>' +
+                    '<span>fill: <span class="t-pos-detail-val">' + (p.fill_price ? (p.fill_price * 100).toFixed(0) + 'c' : '\u2013') + '</span></span>' +
+                    '<span>prob: <span class="t-pos-detail-val">' + (p.model_prob ? (p.model_prob * 100).toFixed(1) + '%' : '\u2013') + '</span></span>' +
+                    '<span>mkt: <span class="t-pos-detail-val">' + (p.market_price ? (p.market_price * 100).toFixed(1) + '%' : '\u2013') + '</span></span>' +
+                '</div>' +
+            '</div>';
+        }).join('');
+        Terminal.touchMeta('pos-detail');
+    }
+
+    // ── Init ─────────────────────────────────────────────────────
+    Terminal.refreshPage = fetchRisk;
+
+    fetchRisk();
+    setInterval(fetchRisk, 10000);
+})();
+</script>
 {% endblock %}

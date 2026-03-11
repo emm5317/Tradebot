@@ -384,6 +384,153 @@ async def system_status():
     return result
 
 
+@app.get("/api/edge-decay")
+async def edge_decay(days: int = 30, signal_type: str | None = None):
+    """Edge vs minutes_remaining scatter data for analytics page."""
+    assert pool is not None
+
+    query = """
+        SELECT s.edge, s.minutes_remaining, s.signal_type,
+               COALESCE(o.outcome, 'no_order') as outcome
+        FROM signals s
+        LEFT JOIN orders o ON o.signal_id = s.id
+        WHERE s.acted_on = true
+          AND s.created_at >= NOW() - make_interval(days => $1)
+          AND ($2::text IS NULL OR s.signal_type = $2)
+        ORDER BY s.created_at DESC
+        LIMIT 500
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, days, signal_type)
+
+    return [
+        {
+            "edge": float(r["edge"]),
+            "minutes_remaining": float(r["minutes_remaining"]),
+            "outcome": r["outcome"],
+            "signal_type": r["signal_type"],
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/calibration-curve")
+async def calibration_curve(signal_type: str | None = None):
+    """Predicted vs actual probability by bucket for calibration chart."""
+    assert pool is not None
+
+    query = """
+        SELECT prob_bucket,
+               AVG(model_prob) as predicted_avg,
+               AVG(CASE WHEN actual_outcome THEN 1.0 ELSE 0.0 END) as actual_avg,
+               COUNT(*) as count
+        FROM calibration
+        WHERE ($1::text IS NULL OR signal_type = $1)
+        GROUP BY prob_bucket
+        ORDER BY prob_bucket
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, signal_type)
+
+    return [
+        {
+            "bucket": r["prob_bucket"],
+            "predicted_avg": float(r["predicted_avg"]),
+            "actual_avg": float(r["actual_avg"]),
+            "count": r["count"],
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/risk-summary")
+async def risk_summary():
+    """Risk dashboard data: exposure, positions, feeds, kill switches."""
+    assert pool is not None
+
+    result: dict = {
+        "positions": [],
+        "position_count": 0,
+        "max_positions": 10,
+        "daily_pnl_cents": 0,
+        "daily_loss_cents": 0,
+        "max_daily_loss_cents": -5000,
+        "exposure_cents": 0,
+        "max_exposure_cents": 20000,
+        "kill_switches": {"all": False, "crypto": False, "weather": False},
+        "feeds": [],
+        "crypto_health": 0.0,
+        "weather_health": 0.0,
+    }
+
+    try:
+        if pool:
+            async with pool.acquire() as conn:
+                # Positions with model context
+                pos_rows = await conn.fetch("""
+                    SELECT o.ticker, o.direction, o.size_cents, o.fill_price,
+                           o.status, s.model_prob, s.market_price
+                    FROM orders o
+                    LEFT JOIN signals s ON o.signal_id = s.id
+                    WHERE o.status IN ('filled', 'pending')
+                    ORDER BY o.created_at DESC
+                    LIMIT 20
+                """)
+                result["positions"] = [dict(r) for r in pos_rows]
+                result["position_count"] = len(pos_rows)
+                result["exposure_cents"] = sum(r["size_cents"] for r in pos_rows)
+
+                # Daily P&L
+                pnl_row = await conn.fetchrow("""
+                    SELECT
+                        COALESCE(SUM(realized_pnl_cents), 0) as pnl,
+                        COALESCE(SUM(CASE WHEN realized_pnl_cents < 0
+                                     THEN realized_pnl_cents ELSE 0 END), 0) as loss
+                    FROM strategy_performance
+                    WHERE date = CURRENT_DATE
+                """)
+                if pnl_row:
+                    result["daily_pnl_cents"] = pnl_row["pnl"]
+                    result["daily_loss_cents"] = pnl_row["loss"]
+    except Exception:
+        logger.warning("risk_summary_db_error")
+
+    try:
+        if redis_client:
+            # Feed health
+            feeds = ["coinbase", "binance_spot", "binance_futures", "deribit", "kalshi_ws"]
+            for feed in feeds:
+                raw = await redis_client.get(f"feed:status:{feed}")
+                if raw:
+                    fdata = json.loads(raw)
+                    score = fdata.get("score", 0)
+                    result["feeds"].append({
+                        "name": feed,
+                        "score": score,
+                        "age_ms": fdata.get("age_ms", 0),
+                        "healthy": score >= 0.5,
+                    })
+                else:
+                    result["feeds"].append({
+                        "name": feed, "score": 0, "age_ms": 0, "healthy": False,
+                    })
+
+            # Strategy health: best crypto feed, kalshi for weather
+            crypto_scores = [
+                f["score"] for f in result["feeds"]
+                if f["name"] in ("coinbase", "binance_spot")
+            ]
+            result["crypto_health"] = max(crypto_scores) if crypto_scores else 0
+            kalshi_feeds = [
+                f["score"] for f in result["feeds"] if f["name"] == "kalshi_ws"
+            ]
+            result["weather_health"] = min(kalshi_feeds) if kalshi_feeds else 0
+    except Exception:
+        logger.warning("risk_summary_redis_error")
+
+    return result
+
+
 @app.get("/api/decision-breakdown")
 async def decision_breakdown(hours: int = 24):
     """Rejection reason breakdown from decision_log."""

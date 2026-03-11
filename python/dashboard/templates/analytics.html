@@ -1,14 +1,382 @@
 {% extends "base.html" %}
 {% block title_suffix %} — Analytics{% endblock %}
+
 {% block content %}
-<div class="t-grid" style="grid-template-columns:1fr;">
+<div class="t-grid" style="grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr auto;">
+
+    <!-- ── Brier Score Trend (top-left) ─────────────────── -->
     <div class="t-panel">
         <div class="t-panel-header">
-            <div class="t-panel-title">Analytics &amp; Calibration</div>
+            <div class="t-panel-title">Brier Score Trend</div>
+            <div class="t-panel-meta" id="meta-brier"></div>
         </div>
         <div class="t-panel-body">
-            <div class="t-empty">Phase 11.3 — Brier trends, calibration curves, drawdown charts, edge decay</div>
+            <canvas id="chart-brier"></canvas>
         </div>
     </div>
+
+    <!-- ── Calibration Curve (top-right) ────────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Calibration Curve</div>
+            <div class="t-panel-meta" id="meta-cal"></div>
+        </div>
+        <div class="t-panel-body">
+            <canvas id="chart-cal"></canvas>
+        </div>
+    </div>
+
+    <!-- ── Drawdown Chart (mid-left) ────────────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">P&L &amp; Drawdown</div>
+            <div class="t-panel-meta" id="meta-pnl"></div>
+        </div>
+        <div class="t-panel-body">
+            <canvas id="chart-pnl"></canvas>
+        </div>
+    </div>
+
+    <!-- ── Edge Decay Scatter (mid-right) ───────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Edge vs Time to Settlement</div>
+            <div class="t-panel-meta" id="meta-edge"></div>
+        </div>
+        <div class="t-panel-body">
+            <canvas id="chart-edge"></canvas>
+        </div>
+    </div>
+
+    <!-- ── Strategy Performance Table (bottom full-width) ── -->
+    <div class="t-panel" style="grid-column:1/-1;">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Strategy Performance</div>
+            <div class="t-panel-meta" id="meta-strat"></div>
+        </div>
+        <div class="t-panel-body" id="panel-strategy"></div>
+    </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    // ── Chart.js dark theme defaults ─────────────────────────────
+    Chart.defaults.color = '#606060';
+    Chart.defaults.borderColor = '#2a2a2a';
+    Chart.defaults.font.family = "'IBM Plex Mono', monospace";
+    Chart.defaults.font.size = 10;
+    Chart.defaults.plugins.legend.labels.boxWidth = 10;
+    Chart.defaults.plugins.legend.labels.padding = 8;
+
+    var charts = {};
+
+    // ── Brier Score Trend ────────────────────────────────────────
+    function fetchBrier() {
+        Terminal.fetchJSON('/api/calibration/brier?days=30').then(function(data) {
+            if (!data || !data.length) return;
+
+            var weather = data.filter(function(d) { return d.strategy === 'weather'; });
+            var crypto = data.filter(function(d) { return d.strategy === 'crypto'; });
+
+            var ctx = document.getElementById('chart-brier');
+            if (charts.brier) charts.brier.destroy();
+
+            charts.brier = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
+                            label: 'Weather',
+                            data: weather.map(function(d) { return { x: d.date, y: d.brier_score }; }),
+                            borderColor: '#448aff',
+                            backgroundColor: '#448aff20',
+                            tension: 0.3,
+                            pointRadius: 2,
+                        },
+                        {
+                            label: 'Crypto',
+                            data: crypto.map(function(d) { return { x: d.date, y: d.brier_score }; }),
+                            borderColor: '#ff8c00',
+                            backgroundColor: '#ff8c0020',
+                            tension: 0.3,
+                            pointRadius: 2,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { type: 'category' },
+                        y: {
+                            min: 0, max: 0.5,
+                            title: { display: true, text: 'Brier Score' },
+                        },
+                    },
+                    plugins: {
+                        annotation: false,
+                    },
+                },
+            });
+            Terminal.touchMeta('brier');
+        });
+    }
+
+    // ── Calibration Curve ────────────────────────────────────────
+    function fetchCalCurve() {
+        Terminal.fetchJSON('/api/calibration-curve').then(function(data) {
+            if (!data || !data.length) return;
+
+            var ctx = document.getElementById('chart-cal');
+            if (charts.cal) charts.cal.destroy();
+
+            // Perfect calibration line
+            var perfect = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+
+            charts.cal = new Chart(ctx, {
+                type: 'scatter',
+                data: {
+                    datasets: [
+                        {
+                            label: 'Perfect',
+                            data: perfect,
+                            borderColor: '#2a2a2a',
+                            borderDash: [4, 4],
+                            showLine: true,
+                            pointRadius: 0,
+                        },
+                        {
+                            label: 'Model',
+                            data: data.map(function(d) {
+                                return { x: d.predicted_avg, y: d.actual_avg };
+                            }),
+                            borderColor: '#ff8c00',
+                            backgroundColor: '#ff8c0080',
+                            pointRadius: function(ctx) {
+                                var idx = ctx.dataIndex;
+                                return Math.max(3, Math.min(10, Math.sqrt(data[idx].count)));
+                            },
+                            showLine: true,
+                            tension: 0.2,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            min: 0, max: 1,
+                            title: { display: true, text: 'Predicted' },
+                        },
+                        y: {
+                            min: 0, max: 1,
+                            title: { display: true, text: 'Actual' },
+                        },
+                    },
+                },
+            });
+            Terminal.touchMeta('cal');
+        });
+    }
+
+    // ── P&L + Drawdown ───────────────────────────────────────────
+    function fetchPnl() {
+        Terminal.fetchJSON('/api/performance?days=30').then(function(data) {
+            if (!data || !data.length) return;
+
+            // Aggregate both strategies per day
+            var byDate = {};
+            data.forEach(function(d) {
+                if (!byDate[d.date]) byDate[d.date] = { cum: 0, dd: 0 };
+                byDate[d.date].cum += d.cumulative_pnl_cents;
+                byDate[d.date].dd = Math.max(byDate[d.date].dd, d.drawdown_cents);
+            });
+
+            var dates = Object.keys(byDate).sort();
+            var cumData = dates.map(function(d) { return byDate[d].cum / 100; });
+            var ddData = dates.map(function(d) { return -byDate[d].dd / 100; });
+
+            var ctx = document.getElementById('chart-pnl');
+            if (charts.pnl) charts.pnl.destroy();
+
+            charts.pnl = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: dates,
+                    datasets: [
+                        {
+                            label: 'Cumulative P&L ($)',
+                            data: cumData,
+                            borderColor: '#00c853',
+                            backgroundColor: '#00c85320',
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: 2,
+                        },
+                        {
+                            label: 'Drawdown ($)',
+                            data: ddData,
+                            borderColor: '#ff1744',
+                            backgroundColor: '#ff174420',
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: 2,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { type: 'category' },
+                        y: { title: { display: true, text: 'USD' } },
+                    },
+                },
+            });
+            Terminal.touchMeta('pnl');
+        });
+    }
+
+    // ── Edge Decay Scatter ───────────────────────────────────────
+    function fetchEdgeDecay() {
+        Terminal.fetchJSON('/api/edge-decay?days=30').then(function(data) {
+            if (!data || !data.length) return;
+
+            var wins = data.filter(function(d) { return d.outcome === 'win'; });
+            var losses = data.filter(function(d) { return d.outcome === 'loss'; });
+            var other = data.filter(function(d) { return d.outcome !== 'win' && d.outcome !== 'loss'; });
+
+            var ctx = document.getElementById('chart-edge');
+            if (charts.edge) charts.edge.destroy();
+
+            charts.edge = new Chart(ctx, {
+                type: 'scatter',
+                data: {
+                    datasets: [
+                        {
+                            label: 'Win',
+                            data: wins.map(function(d) { return { x: d.minutes_remaining, y: d.edge * 100 }; }),
+                            backgroundColor: '#00c85380',
+                            pointRadius: 3,
+                        },
+                        {
+                            label: 'Loss',
+                            data: losses.map(function(d) { return { x: d.minutes_remaining, y: d.edge * 100 }; }),
+                            backgroundColor: '#ff174480',
+                            pointRadius: 3,
+                        },
+                        {
+                            label: 'Pending',
+                            data: other.map(function(d) { return { x: d.minutes_remaining, y: d.edge * 100 }; }),
+                            backgroundColor: '#60606060',
+                            pointRadius: 2,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: { display: true, text: 'Minutes to Settlement' },
+                            min: 0,
+                        },
+                        y: {
+                            title: { display: true, text: 'Edge (%)' },
+                            min: 0,
+                        },
+                    },
+                },
+            });
+            Terminal.touchMeta('edge');
+        });
+    }
+
+    // ── Strategy Performance Table ───────────────────────────────
+    Terminal.sortState.strat_perf = { col: 0, dir: -1 };
+    var cachedPerf = [];
+
+    function fetchPerf() {
+        Terminal.fetchJSON('/api/strategy-performance?days=30').then(function(data) {
+            if (!data) return;
+            cachedPerf = data;
+            renderPerf();
+        });
+    }
+
+    function renderPerf() {
+        var el = document.getElementById('panel-strategy');
+        if (!cachedPerf.length) {
+            el.innerHTML = '<div class="t-empty">no strategy data</div>';
+            Terminal.touchMeta('strat');
+            return;
+        }
+
+        var cols = [
+            { label: 'Date',    fn: function(d) { return d.date; } },
+            { label: 'Strategy',fn: function(d) { return d.strategy; } },
+            { label: 'Signals', fn: function(d) { return d.signals_generated || 0; } },
+            { label: 'Exec',    fn: function(d) { return d.signals_executed || 0; } },
+            { label: 'W/L',     fn: function(d) { return (d.win_count || 0) - (d.loss_count || 0); } },
+            { label: 'Edge',    fn: function(d) { return d.avg_edge || 0; } },
+            { label: 'Kelly',   fn: function(d) { return d.avg_kelly || 0; } },
+            { label: 'Brier',   fn: function(d) { return d.brier_score || 999; } },
+            { label: 'P&L',     fn: function(d) { return d.realized_pnl_cents || 0; } },
+        ];
+
+        var sorted = Terminal.applySort(cachedPerf, 'strat_perf', cols);
+        var st = Terminal.sortState.strat_perf;
+
+        var html = '<table class="t-table"><thead><tr>';
+        cols.forEach(function(c, i) {
+            var cls = i === st.col ? (st.dir === 1 ? 'sort-asc' : 'sort-desc') : '';
+            html += '<th class="' + cls + '" data-col="' + i + '">' + c.label + '</th>';
+        });
+        html += '</tr></thead><tbody>';
+
+        sorted.forEach(function(d, idx) {
+            var pnl = d.realized_pnl_cents || 0;
+            var brierCls = !d.brier_score ? '' :
+                d.brier_score < 0.2 ? 't-positive' :
+                d.brier_score < 0.3 ? 't-warn' : 't-negative';
+            var typeCls = d.strategy === 'crypto' ? 't-amber-txt' : 't-info';
+
+            html += '<tr class="t-row-new" style="animation-delay:' + (idx * 0.008) + 's">' +
+                '<td class="t-bright">' + d.date + '</td>' +
+                '<td class="' + typeCls + '">' + d.strategy + '</td>' +
+                '<td>' + (d.signals_generated || 0) + '</td>' +
+                '<td>' + (d.signals_executed || 0) + '</td>' +
+                '<td>' + (d.win_count || 0) + '/' + (d.loss_count || 0) + '</td>' +
+                '<td>' + (d.avg_edge ? (d.avg_edge * 100).toFixed(1) + '%' : '\u2013') + '</td>' +
+                '<td>' + (d.avg_kelly ? (d.avg_kelly * 100).toFixed(1) + '%' : '\u2013') + '</td>' +
+                '<td class="' + brierCls + '">' + (d.brier_score ? d.brier_score.toFixed(3) : '\u2013') + '</td>' +
+                '<td class="' + Terminal.pnlClass(pnl) + '">' + Terminal.formatPnl(pnl) + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table>';
+
+        el.innerHTML = html;
+        Terminal.bindSort(el, 'strat_perf', renderPerf);
+        Terminal.touchMeta('strat');
+    }
+
+    // ── Init ─────────────────────────────────────────────────────
+    function fetchAll() {
+        fetchBrier();
+        fetchCalCurve();
+        fetchPnl();
+        fetchEdgeDecay();
+        fetchPerf();
+    }
+
+    Terminal.refreshPage = fetchAll;
+
+    fetchAll();
+    setInterval(fetchPerf, 60000);
+    setInterval(fetchBrier, 120000);
+})();
+</script>
 {% endblock %}
