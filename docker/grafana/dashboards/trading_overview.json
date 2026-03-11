@@ -4,7 +4,7 @@
   "tags": ["tradebot"],
   "timezone": "utc",
   "refresh": "30s",
-  "time": { "from": "now-6h", "to": "now" },
+  "time": { "from": "now-24h", "to": "now" },
   "panels": [
     {
       "id": 1,
@@ -54,7 +54,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "datasource": { "uid": "tradebot_pg", "type": "postgres" },
       "targets": [{
-        "rawSql": "SELECT filled_at AS time, SUM(pnl_cents) OVER (ORDER BY filled_at) / 100.0 AS cumulative_pnl FROM orders WHERE $__timeFilter(filled_at) AND status = 'filled' AND pnl_cents IS NOT NULL ORDER BY 1",
+        "rawSql": "SELECT COALESCE(filled_at, settled_at, created_at) AS time, SUM(pnl_cents) OVER (ORDER BY COALESCE(filled_at, settled_at, created_at)) / 100.0 AS cumulative_pnl FROM orders WHERE $__timeFilter(COALESCE(filled_at, settled_at, created_at)) AND status = 'filled' AND pnl_cents IS NOT NULL ORDER BY 1",
         "format": "time_series",
         "refId": "A"
       }],

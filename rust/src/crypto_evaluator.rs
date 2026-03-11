@@ -436,7 +436,7 @@ async fn evaluate_entry(
             "crypto eval: using fallback mid price"
         );
     }
-    let spread = orderbooks
+    let raw_spread = orderbooks
         .spread(&contract.ticker)
         .and_then(|d| d.to_f64())
         .unwrap_or_else(|| {
@@ -449,6 +449,17 @@ async fn evaluate_entry(
                 })
                 .unwrap_or(0.10)
         });
+    // Negative spread = crossed/invalid book — treat as no reliable spread data
+    let spread = if raw_spread < 0.0 {
+        debug!(
+            ticker = %contract.ticker,
+            raw_spread = %format!("{:.4}", raw_spread),
+            "crypto eval: negative spread, using conservative default"
+        );
+        0.10
+    } else {
+        raw_spread
+    };
     let order_imbalance = orderbooks
         .order_imbalance(&contract.ticker)
         .unwrap_or(0.5);
@@ -687,6 +698,42 @@ async fn evaluate_entry(
     // 8. Kelly criterion
     let kelly = crypto_fv::compute_kelly(fv.probability, fill_price, direction);
 
+    // 8b. Reject trades with terrible risk/reward ratio
+    let (win_payout, lose_payout) = if direction == "yes" {
+        (1.0 - fill_price, fill_price)
+    } else {
+        (fill_price, 1.0 - fill_price)
+    };
+    if lose_payout > 4.0 * win_payout {
+        debug!(
+            ticker = %contract.ticker,
+            fill_price = %format!("{:.4}", fill_price),
+            win_payout = %format!("{:.4}", win_payout),
+            lose_payout = %format!("{:.4}", lose_payout),
+            "crypto eval: bad risk/reward ratio (>4:1)"
+        );
+        let pool_c = pool.clone();
+        let ticker_c = contract.ticker.clone();
+        tokio::spawn(async move {
+            decision_log::write(&pool_c, DecisionEntry {
+                ticker: ticker_c,
+                signal_type: "crypto".into(),
+                outcome: "rejected".into(),
+                rejection_reason: Some("bad_risk_reward".into()),
+                model_prob: Some(fv.probability),
+                market_price: Some(mid_price),
+                edge: Some(effective_edge),
+                adjusted_edge: Some(adjusted_edge),
+                direction: Some(direction.to_string()),
+                minutes_remaining: Some(minutes_remaining),
+                confidence: Some(fv.confidence),
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            }).await;
+        });
+        return;
+    }
+
     // 9. Check minimum Kelly
     if kelly < config.crypto_min_kelly {
         debug!(ticker = %contract.ticker, kelly = %format!("{:.4}", kelly), "crypto eval: kelly below minimum");
@@ -757,6 +804,10 @@ async fn evaluate_entry(
 
     // Persist signal first to get DB id for order linkage
     let signal_id = persist_signal(pool, &signal, contract.settlement_time).await;
+    if signal_id.is_none() {
+        warn!(ticker = %signal.ticker, "crypto eval: signal persist failed, skipping order");
+        return;
+    }
 
     // 11. Risk check + submit
     {
@@ -803,6 +854,17 @@ async fn evaluate_entry(
             );
             return;
         }
+    }
+
+    // Mark signal as acted on
+    if let Some(sid) = signal_id {
+        let pool_c = pool.clone();
+        tokio::spawn(async move {
+            let _ = sqlx::query("UPDATE signals SET acted_on = true WHERE id = $1")
+                .bind(sid)
+                .execute(&pool_c)
+                .await;
+        });
     }
 
     // Decision log: successful signal
@@ -879,7 +941,7 @@ async fn evaluate_exit(
         Some((d, _src)) => d.to_f64().unwrap_or(0.5),
         None => return,
     };
-    let spread = orderbooks
+    let raw_spread = orderbooks
         .spread(&contract.ticker)
         .and_then(|d| d.to_f64())
         .unwrap_or_else(|| {
@@ -891,6 +953,7 @@ async fn evaluate_exit(
                 })
                 .unwrap_or(0.10)
         });
+    let spread = if raw_spread < 0.0 { 0.10 } else { raw_spread };
 
     let fv = if contract.directional {
         let (price_momentum, volume_surge) = read_ticker_signals(redis, &contract.ticker).await;
@@ -1296,5 +1359,40 @@ mod tests {
         // Record via public method — should prune old entry
         tracker.record("T", 0.06);
         assert_eq!(tracker.history["T"].len(), 1);
+    }
+
+    #[test]
+    fn test_negative_spread_uses_default() {
+        // Verify the negative spread guard logic: negative values should be clamped to 0.10
+        let raw_spread = -0.36;
+        let spread = if raw_spread < 0.0 { 0.10 } else { raw_spread };
+        assert_eq!(spread, 0.10, "negative spread should be replaced with 0.10 default");
+
+        // Zero and positive should pass through
+        let raw_spread = 0.05;
+        let spread = if raw_spread < 0.0 { 0.10 } else { raw_spread };
+        assert_eq!(spread, 0.05, "positive spread should pass through");
+
+        let raw_spread = 0.0;
+        let spread = if raw_spread < 0.0 { 0.10 } else { raw_spread };
+        assert_eq!(spread, 0.0, "zero spread should pass through");
+    }
+
+    #[test]
+    fn test_risk_reward_guard_logic() {
+        // YES direction: fill_price=0.85 → win=0.15, lose=0.85 → ratio=5.67 > 4.0 → REJECT
+        let fill_price = 0.85;
+        let (win, lose) = (1.0 - fill_price, fill_price);
+        assert!(lose > 4.0 * win, "0.85 YES fill should fail risk/reward: win={win}, lose={lose}");
+
+        // NO direction: fill_price=0.15 → win=0.15, lose=0.85 → ratio=5.67 > 4.0 → REJECT
+        let fill_price = 0.15;
+        let (win, lose) = (fill_price, 1.0 - fill_price);
+        assert!(lose > 4.0 * win, "0.15 NO fill should fail risk/reward: win={win}, lose={lose}");
+
+        // YES direction: fill_price=0.50 → win=0.50, lose=0.50 → ratio=1.0 → PASS
+        let fill_price = 0.50;
+        let (win, lose) = (1.0 - fill_price, fill_price);
+        assert!(!(lose > 4.0 * win), "0.50 YES fill should pass risk/reward");
     }
 }

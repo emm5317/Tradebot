@@ -503,8 +503,13 @@ impl OrderManager {
         order.transition(OrderState::Submitting);
 
         if config.paper_mode {
-            // Paper mode: instant fill
-            order.record_fill(size_cents, Some(signal.market_price));
+            // Paper mode: instant fill — use NO price for NO direction
+            let paper_fill = if signal.direction == "no" {
+                1.0 - signal.market_price
+            } else {
+                signal.market_price
+            };
+            order.record_fill(size_cents, Some(paper_fill));
             self.positions
                 .insert(signal.ticker.clone(), client_order_id.clone());
             self.record_signal_cooldown(&signal.ticker);
@@ -665,12 +670,18 @@ impl OrderManager {
         order.transition(OrderState::Submitting);
 
         if config.paper_mode {
-            order.record_fill(size, Some(signal.market_price));
+            // Paper mode: instant fill — use NO price for NO direction
+            let paper_fill = if signal.direction == "no" {
+                1.0 - signal.market_price
+            } else {
+                signal.market_price
+            };
+            order.record_fill(size, Some(paper_fill));
 
-            // Estimate PnL
+            // Estimate PnL (both entry and exit fill prices are in same price-space)
             if let Some(entry) = self.orders.get(&entry_order_id) {
                 if let Some(entry_price) = entry.entry_price {
-                    let pnl = ((signal.market_price - entry_price) * size as f64) as i64;
+                    let pnl = ((paper_fill - entry_price) * size as f64) as i64;
                     self.daily_pnl.record_pnl(pnl);
                 }
             }
@@ -930,9 +941,30 @@ impl OrderManager {
             }
         }
 
+        // 5. Rehydrate daily PnL from settled orders today
+        let today_pnl: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT COALESCE(SUM(pnl_cents), 0)
+            FROM orders
+            WHERE pnl_cents IS NOT NULL
+              AND settled_at::date = CURRENT_DATE
+            "#,
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        if let Some((pnl,)) = today_pnl {
+            if pnl != 0 {
+                self.daily_pnl.net_pnl_cents = pnl;
+                info!(daily_pnl_cents = pnl, "reconciliation: rehydrated daily PnL from DB");
+            }
+        }
+
         info!(
             positions = self.positions.len(),
             orders = self.orders.len(),
+            daily_pnl_cents = self.daily_pnl.net_pnl_cents,
             "reconciliation complete"
         );
 
@@ -1136,6 +1168,13 @@ async fn persist_order(
             .to_string()
         });
 
+    // Set filled_at when order has a fill
+    let filled_at: Option<chrono::DateTime<Utc>> = if order.state.has_fill() {
+        Some(Utc::now())
+    } else {
+        None
+    };
+
     sqlx::query(
         r#"
         INSERT INTO orders (
@@ -1144,17 +1183,18 @@ async fn persist_order(
             size_cents, requested_qty, filled_qty,
             fill_price, status, order_state, latency_ms,
             signal_type, model_prob, market_price_at_order,
-            transitions, crypto_snapshot, signal_id
+            transitions, crypto_snapshot, signal_id, filled_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
             $10, $11, $12, $13, $14, $15, $16,
-            $17::jsonb, $18::jsonb, $19
+            $17::jsonb, $18::jsonb, $19, $20
         )
         ON CONFLICT (idempotency_key) DO UPDATE SET
             order_state = EXCLUDED.order_state,
             filled_qty = EXCLUDED.filled_qty,
             fill_price = EXCLUDED.fill_price,
-            transitions = EXCLUDED.transitions
+            transitions = EXCLUDED.transitions,
+            filled_at = COALESCE(orders.filled_at, EXCLUDED.filled_at)
         "#,
     )
     .bind(&order.client_order_id) // idempotency_key
@@ -1176,6 +1216,7 @@ async fn persist_order(
     .bind(&transitions_json)
     .bind(&crypto_snapshot_json)
     .bind(order.signal_id) // signal_id
+    .bind(filled_at) // filled_at
     .execute(pool)
     .await
     .context("Failed to persist order")?;
@@ -1653,5 +1694,50 @@ mod tests {
         order.latency_ms = Some(15);
         assert_eq!(order.signal_id, Some(42));
         assert_eq!(order.latency_ms, Some(15));
+    }
+
+    #[test]
+    fn test_paper_fill_price_yes_direction() {
+        // YES direction: fill_price should equal market_price
+        let mut order = ManagedOrder::new(
+            "tb-yes-1".to_string(),
+            "TICKER".to_string(),
+            "crypto".to_string(),
+            "yes".to_string(),
+            10,
+            0.60,
+            0.45,
+            None,
+        );
+        order.transition(OrderState::Submitting);
+        let market_price = 0.45;
+        let direction = "yes";
+        let paper_fill = if direction == "no" { 1.0 - market_price } else { market_price };
+        order.record_fill(10, Some(paper_fill));
+        assert_eq!(order.entry_price, Some(0.45));
+    }
+
+    #[test]
+    fn test_paper_fill_price_no_direction() {
+        // NO direction: fill_price should be 1 - market_price
+        let mut order = ManagedOrder::new(
+            "tb-no-1".to_string(),
+            "TICKER".to_string(),
+            "crypto".to_string(),
+            "no".to_string(),
+            10,
+            0.40,
+            0.55,
+            None,
+        );
+        order.transition(OrderState::Submitting);
+        let market_price = 0.55;
+        let direction = "no";
+        let paper_fill = if direction == "no" { 1.0 - market_price } else { market_price };
+        order.record_fill(10, Some(paper_fill));
+        // For NO: 1.0 - 0.55 = 0.45 (cost of NO contract)
+        let fp = order.entry_price.unwrap();
+        assert!((fp - 0.45).abs() < 1e-10, "NO fill_price should be ~0.45, got {}", fp);
+        assert!(fp < 0.50, "NO fill_price should be < 0.50 for mid > 0.50");
     }
 }

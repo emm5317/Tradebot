@@ -53,6 +53,9 @@ just evaluator      # Start Python weather evaluator
 just collector      # Start data collection
 just dashboard      # Start dashboard on :8050
 just grafana        # Start Grafana on :3033
+just test           # Run Rust tests (116)
+just test-python    # Run Python tests (322)
+just test-all       # Run both (438 total)
 ```
 
 ## Important Files

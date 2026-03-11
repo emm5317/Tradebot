@@ -14,7 +14,7 @@ Thanks for your interest in contributing! This guide covers the basics for getti
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/your-org/tradebot.git
+git clone https://github.com/anomalyco/tradebot.git
 cd tradebot
 
 # 2. Start infrastructure
@@ -24,7 +24,7 @@ just db-up                     # PostgreSQL, Redis, NATS
 cp config/.env.example .env    # Fill in credentials
 
 # 4. Verify everything works
-just test-all                  # 354 tests (112 Rust + 242 Python)
+just test-all                  # 438 tests (116 Rust + 322 Python)
 ```
 
 ## Code Style

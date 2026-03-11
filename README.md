@@ -10,7 +10,7 @@ Algorithmic trading system for [Kalshi](https://kalshi.com) prediction markets. 
 
 Built with **Rust** (low-latency execution, exchange feeds) and **Python** (signal generation, fair-value models), connected via NATS messaging and Redis state cache.
 
-> **354 tests** (112 Rust + 242 Python) | Paper trading mode for safe development
+> **438 tests** (116 Rust + 322 Python) | Paper trading mode for safe development
 
 ---
 
@@ -146,6 +146,7 @@ just evaluator                 # Weather evaluation loop (10s cycle)
 
 # 6. Start Rust execution engine
 just dev                       # Kalshi WS + crypto feeds + order execution
+just grafana                   # Grafana dashboards on :3033
 
 # 7. Dashboard
 just dashboard                 # Live UI on :8050
@@ -292,21 +293,33 @@ Tradebot/
 | 5.7 | Integration tests (8 scenarios) | Complete |
 | 5.8 | Per-feed health scoring (granular 0.0-1.0) | Complete |
 | 6.1 | Parameter sweep framework, settlement summary, collector enhancements | Complete |
+| 7 | Calibration agent & prediction feedback loop | Complete |
+| 7.3a | Price momentum signal | Complete |
+| 7.3c | Volume surge detection | Complete |
+| 7.3d | OI delta tracking | Complete |
+| 7.5 | Edge trajectory tracking | Complete |
+| 8 | Advanced backtesting & adaptive calibration | Complete |
+| 8.1 | Crypto threshold sweep | Complete |
+| 8.2 | Transaction costs | Complete |
+| 8.3 | Advanced backtest metrics | Complete |
+| 8.4 | Multi-signal evaluation | Complete |
+| 8.5 | Parallel parameter sweep | Complete |
+| 8.6 | Replay engine with source ablation | Complete |
+| 8.7 | Comprehensive backtester tests | Complete |
+| 9.0 | Grafana observability (dashboards, alerts, decision logging) | Complete |
 
 ### What's Next
 
-- **Phase 6.2** — Live paper trading validation with real Kalshi demo environment
-- **Phase 7** — Multi-station weather portfolio (concurrent contracts across stations)
-- **Phase 8** — Production deployment with monitoring and alerting
-- **Backtester improvements** — Longer walk-forward windows, cross-asset correlation
+- Feature development based on operational learnings
+- Performance optimization and latency reduction
 
 ## Development Commands
 
 ```bash
 # Testing
-just test              # Rust tests (112 tests)
-just test-python       # Python tests (242 tests)
-just test-all          # Both (354 tests)
+just test              # Rust tests (116 tests)
+just test-python       # Python tests (322 tests)
+just test-all          # Both (438 tests)
 
 # Code quality
 just fmt               # Format Rust code

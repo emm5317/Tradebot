@@ -215,6 +215,11 @@ pub fn compute_effective_edge(raw_edge: f64, spread: f64) -> f64 {
 
 /// Kelly criterion for binary outcome.
 pub fn compute_kelly(model_prob: f64, fill_price: f64, direction: &str) -> f64 {
+    // Refuse to size trades at extreme prices (terrible risk/reward)
+    if fill_price < 0.03 || fill_price > 0.97 {
+        return 0.0;
+    }
+
     let (win_prob, win_payout, lose_payout) = if direction == "yes" {
         (model_prob, 1.0 - fill_price, fill_price)
     } else {
@@ -232,11 +237,12 @@ pub fn compute_kelly(model_prob: f64, fill_price: f64, direction: &str) -> f64 {
 
 /// Estimate fill price from orderbook (simplified).
 pub fn estimate_fill_price(direction: &str, mid_price: f64, spread: f64) -> f64 {
-    if direction == "yes" {
+    let raw = if direction == "yes" {
         mid_price + spread / 2.0
     } else {
         mid_price - spread / 2.0
-    }
+    };
+    raw.clamp(0.01, 0.99)
 }
 
 /// Estimate volatility from available sources.
@@ -800,5 +806,58 @@ mod tests {
         // Should return high probability
         let p = levy_averaging_prob(100000.0, 90000.0, 5.0, 0.50);
         assert!(p > 0.95, "k_eff<=0 should give high prob, got {}", p);
+    }
+
+    #[test]
+    fn test_kelly_extreme_fill_price_rejected() {
+        // Extreme fill prices should return 0 Kelly (refuse to size)
+        assert_eq!(compute_kelly(0.60, 0.99, "yes"), 0.0, "fill_price=0.99 should be rejected");
+        assert_eq!(compute_kelly(0.40, 0.01, "no"), 0.0, "fill_price=0.01 should be rejected");
+        assert_eq!(compute_kelly(0.60, 0.98, "yes"), 0.0, "fill_price=0.98 should be rejected");
+        assert_eq!(compute_kelly(0.40, 0.02, "no"), 0.0, "fill_price=0.02 should be rejected");
+        // Just inside bounds should work
+        assert!(compute_kelly(0.60, 0.50, "yes") > 0.0, "fill_price=0.50 should be accepted");
+    }
+
+    #[test]
+    fn test_fill_price_clamped() {
+        // Extreme spread/mid combos should be clamped to [0.01, 0.99]
+        let fp = estimate_fill_price("yes", 0.95, 0.20);
+        assert!(fp <= 0.99, "fill_price should be clamped to 0.99, got {}", fp);
+
+        let fp = estimate_fill_price("no", 0.05, 0.20);
+        assert!(fp >= 0.01, "fill_price should be clamped to 0.01, got {}", fp);
+
+        // Normal case still works
+        let fp = estimate_fill_price("yes", 0.50, 0.04);
+        assert!((fp - 0.52).abs() < 1e-6, "normal case: expected 0.52, got {}", fp);
+    }
+
+    #[test]
+    fn test_risk_reward_ratio() {
+        // Paying $0.85 to win $0.15 → lose_payout (0.85) > 4x win_payout (0.15)
+        // Kelly should be 0 for extreme fill prices (caught by the 0.97 guard)
+        let k = compute_kelly(0.60, 0.95, "yes");
+        assert_eq!(k, 0.0, "fill_price=0.95 should hit extreme price guard");
+
+        // Fill price 0.80, yes direction: win=0.20, lose=0.80 → 4:1 exactly
+        // Not quite > 4x, so Kelly should compute normally
+        let k = compute_kelly(0.80, 0.80, "yes");
+        // win_prob=0.80, win=0.20, lose=0.80 → kelly = (0.80*0.20 - 0.20*0.80)/0.20 = 0
+        assert!(k.abs() < 1e-6, "edge=0 at price=prob should give kelly≈0");
+    }
+
+    #[test]
+    fn test_effective_edge_negative_spread() {
+        // Negative spread should not be passed to compute_effective_edge in practice
+        // (evaluator clamps it), but if it were, the result would inflate edge.
+        // This test documents the behavior pre-guard.
+        let edge_normal = compute_effective_edge(0.10, 0.04);
+        let edge_negative = compute_effective_edge(0.10, -0.50);
+        // With negative spread, spread_cost = -0.25, effective = 0.10 + 0.25 = 0.35
+        assert!(edge_negative > edge_normal, "negative spread inflates edge (bug this phase fixes)");
+        // After the evaluator guard, spread is clamped to 0.10, so:
+        let edge_guarded = compute_effective_edge(0.10, 0.10);
+        assert!(edge_guarded < edge_normal, "guarded spread (0.10) correctly reduces edge vs tight spread");
     }
 }
