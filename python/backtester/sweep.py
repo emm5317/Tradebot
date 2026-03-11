@@ -816,6 +816,7 @@ class ParameterSweep:
             wind_speed_kts=float(row["wind_speed_kts"]) if row["wind_speed_kts"] else None,
             wind_gust_kts=float(row["wind_gust_kts"]) if row["wind_gust_kts"] else None,
             precip_inch=float(row["precip_inch"]) if row["precip_inch"] else None,
+            raw=dict(row),
             staleness_seconds=staleness,
             is_stale=staleness > 300,
         )

@@ -9,22 +9,24 @@ Thanks for your interest in contributing! This guide covers the basics for getti
 - **Docker** and Docker Compose
 - **just** task runner (`cargo install just`)
 - **sqlx-cli** for migrations (`cargo install sqlx-cli`)
+- **Grafana** (optional, for observability dashboards)
 
 ## Setup
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/anomalyco/tradebot.git
+git clone https://github.com/emm5317/Tradebot.git
 cd tradebot
 
 # 2. Start infrastructure
 just db-up                     # PostgreSQL, Redis, NATS
+just grafana                   # Grafana dashboards on :3033 (optional)
 
 # 3. Configure environment
 cp config/.env.example .env    # Fill in credentials
 
 # 4. Verify everything works
-just test-all                  # 438 tests (116 Rust + 322 Python)
+just test-all                  # 568 tests (165 Rust + 403 Python)
 ```
 
 ## Code Style

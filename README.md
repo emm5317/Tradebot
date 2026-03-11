@@ -1,6 +1,6 @@
 # Tradebot — Algorithmic Trading Bot for Kalshi Prediction Markets
 
-![Tests](https://img.shields.io/badge/tests-354-brightgreen)
+![Tests](https://img.shields.io/badge/tests-568-brightgreen)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
@@ -10,7 +10,7 @@ Algorithmic trading system for [Kalshi](https://kalshi.com) prediction markets. 
 
 Built with **Rust** (low-latency execution, exchange feeds) and **Python** (signal generation, fair-value models), connected via NATS messaging and Redis state cache.
 
-> **438 tests** (116 Rust + 322 Python) | Paper trading mode for safe development
+> **568 tests** (165 Rust + 403 Python) | Paper trading mode for safe development
 
 ---
 
@@ -22,7 +22,7 @@ Most trading bots follow price action. Tradebot takes a fundamentally different 
 - **Two asset classes** — Weather temperature contracts and Bitcoin binary options, each with specialized fair-value engines
 - **Rust + Python split architecture** — Rust for sub-millisecond feed processing and order execution; Python for weather signal generation, backtesting, and analytics
 - **Paper trading first** — Kalshi demo environment support, parameter sweep framework, walk-forward optimization, and Brier score validation before risking capital
-- **Full observability** — Live htmx dashboard, P&L attribution with model component tracking, per-strategy Brier scoring, and settlement summary analytics
+- **Full observability** — Live htmx dashboard, Grafana dashboards, P&L attribution with model component tracking, per-strategy Brier scoring, and settlement summary analytics
 
 *Keywords: prediction markets, event contracts, fair value, Kelly criterion, low-latency WebSocket, algorithmic trading, binary options*
 
@@ -41,7 +41,9 @@ Most trading bots follow price action. Tradebot takes a fundamentally different 
 - **Per-strategy analytics** — Brier scoring, P&L attribution with model component tracking, calibration dashboard
 - **Parameter sweep framework** — Grid search over model hyperparameters with walk-forward optimization
 - **Dynamic WS subscription** — Contract discovery drives automatic orderbook feed subscriptions
-- **Live dashboard** — FastAPI + htmx terminal-style UI with SSE for real-time model state, signals, and P&L
+- **Bloomberg terminal dashboard** — 6-page FastAPI + htmx terminal UI (MAIN, SGNL, EXEC, ANAL, RISK, WEAT) with Chart.js charts, SSE updates, and IBM Plex Mono amber-on-black theme
+- **Grafana observability** — 4 auto-provisioned dashboards, 5 alert rules (Discord), decision audit logging, feed health tracking
+- **Calibration agent** — Automated hourly feedback loop with 8 jobs: Brier scoring, slippage tracking, HRRR skill scores, parameter optimization
 
 ## Architecture
 
@@ -103,6 +105,9 @@ Most trading bots follow price action. Tradebot takes a fundamentally different 
                           │  └─ Brier score ablation testing               │
                           │                                                 │
                           │  Dashboard (FastAPI + htmx + SSE)              │
+                          │                                                 │
+                          │  CalibrationAgent (hourly feedback loop)        │
+                          │  └─ 8 jobs: Brier, slippage, HRRR, sweep      │
                           └─────────────────────────────────────────────────┘
 ```
 
@@ -136,7 +141,7 @@ just db-up                     # PostgreSQL, Redis, NATS via Docker Compose
 cp config/.env.example .env    # Fill in Kalshi API key + credentials
 
 # 3. Run migrations
-just migrate                   # SQL migrations (000-018)
+just migrate                   # SQL migrations (000-022)
 
 # 4. Start data collection
 just collector                 # ASOS, METAR, HRRR, market snapshots
@@ -147,6 +152,7 @@ just evaluator                 # Weather evaluation loop (10s cycle)
 # 6. Start Rust execution engine
 just dev                       # Kalshi WS + crypto feeds + order execution
 just grafana                   # Grafana dashboards on :3033
+just sync-loop              # Contract sync every 5 minutes
 
 # 7. Dashboard
 just dashboard                 # Live UI on :8050
@@ -160,16 +166,17 @@ Tradebot/
 │   ├── .env.example              # Template with all env vars
 │   └── kalshi_dev.pem            # RSA private key (gitignored in prod)
 ├── docker/                       # Docker Compose (Postgres, Redis, NATS)
-│   └── docker-compose.yml
+│   ├── docker-compose.yml
+│   └── grafana/                # Grafana provisioning (dashboards, alerts, datasource)
 ├── docs/                         # Architecture & reference docs
-│   ├── build-plans/              # Phase 0-6 implementation plans
+│   ├── build-plans/              # Phase 0-11 implementation plans
 │   ├── trading-models.md         # Full model documentation
 │   ├── configuration.md          # Environment variable reference
 │   ├── redis-keys.md             # Redis key structure
 │   ├── sql-reference.md          # SQL query reference
 │   ├── data_pipeline_upgrade.md  # Settlement-focused architecture
 │   └── improvements.md           # Original improvement roadmap
-├── migrations/                   # SQL migrations (000-018)
+├── migrations/                   # SQL migrations (000-022)
 │   ├── 009_contract_rules.sql    # Contract settlement rules
 │   ├── 010_weather_sources.sql   # METAR observations, HRRR forecasts
 │   ├── 011_crypto_sources.sql    # Multi-exchange crypto ticks
@@ -208,6 +215,7 @@ Tradebot/
 │   ├── analytics/                # Performance analytics
 │   │   ├── aggregator.py         # Per-strategy analytics & Brier scoring
 │   │   └── settlement_summary.py # Daily settlement summary aggregation
+│   ├── calibrator/daemon.py      # Calibration agent (8 hourly jobs)
 │   ├── collector/daemon.py       # Data collection (ASOS, METAR, HRRR, Kalshi)
 │   ├── evaluator/daemon.py       # Weather signal evaluation loop (10s cycle)
 │   ├── sync_contracts.py         # Kalshi contract sync (active + settled)
@@ -215,11 +223,11 @@ Tradebot/
 │   │   ├── engine.py             # Backtesting engine
 │   │   ├── sweep.py              # Parameter sweep + walk-forward optimization
 │   │   └── replay.py             # Brier score ablation replay
-│   ├── dashboard/                # FastAPI + htmx live UI
-│   │   ├── app.py                # SSE server (port 8050)
-│   │   ├── templates/            # htmx templates (index, calibration)
-│   │   └── static/style.css      # Terminal-style CSS
-│   └── tests/                    # 242 Python tests
+│   ├── dashboard/                # Bloomberg terminal dashboard
+│   │   ├── app.py                # FastAPI + SSE server (port 8050)
+│   │   ├── templates/            # 6 pages: main, signals, execution, analytics, risk, weather
+│   │   └── static/               # terminal.css, terminal.js, IBM Plex Mono
+│   └── tests/                    # 403 Python tests
 ├── rust/
 │   └── src/
 │       ├── main.rs               # Entry point, feed orchestration
@@ -307,19 +315,26 @@ Tradebot/
 | 8.6 | Replay engine with source ablation | Complete |
 | 8.7 | Comprehensive backtester tests | Complete |
 | 9.0 | Grafana observability (dashboards, alerts, decision logging) | Complete |
+| 10.1 | Crypto model profitability fixes (fill price, spread, risk guards) | Complete |
+| 11.0 | Bloomberg terminal dashboard framework + MAIN page | Complete |
+| 11.1 | MAIN page (contracts, positions, signal heatmap) | Complete |
+| 11.2 | SGNL + EXEC pages (signal log, execution metrics, latency histogram) | Complete |
+| 11.3 | ANAL + RISK pages (Brier trend, calibration curve, P&L charts, feed matrix) | Complete |
+| 11.4 | WEAT page (station cards, HRRR skill heatmap, settlement outcomes) | Complete |
 
 ### What's Next
 
-- Feature development based on operational learnings
+- Phase 12: Live trading transition (production credentials, real order execution)
 - Performance optimization and latency reduction
+- Additional asset classes and market types
 
 ## Development Commands
 
 ```bash
 # Testing
-just test              # Rust tests (116 tests)
-just test-python       # Python tests (322 tests)
-just test-all          # Both (438 tests)
+just test              # Rust tests (165 tests)
+just test-python       # Python tests (403 tests)
+just test-all          # Both (568 tests)
 
 # Code quality
 just fmt               # Format Rust code
@@ -333,6 +348,7 @@ just sync-loop         # Continuous sync every 5 minutes
 
 # Backtesting & optimization
 just sweep 2024-01-01 2024-06-30           # Parameter grid search
+just sweep-crypto 2024-01-01 2024-06-30    # Crypto threshold sweep
 just walk-forward 2024-01-01 2024-12-31    # Walk-forward optimization
 just leaderboard                            # Best backtest runs
 just settlement-summary                     # Aggregate settlement data
@@ -350,8 +366,8 @@ just ps                # Docker container status
 ## Tech Stack
 
 - **Rust**: tokio, tokio-tungstenite, fred (Redis), async-nats, sqlx, rsa (pure-Rust signing), dashmap, axum, tracing
-- **Python**: asyncio, asyncpg, httpx, pydantic, FastAPI, structlog, pytest
-- **Infrastructure**: PostgreSQL 17/TimescaleDB, Redis 7, NATS 2 (JetStream), Docker Compose, just
+- **Python**: asyncio, asyncpg, httpx, pydantic, FastAPI, structlog, pytest, Chart.js
+- **Infrastructure**: PostgreSQL 17/TimescaleDB, Redis 7, NATS 2 (JetStream), Grafana, Docker Compose, just
 
 ## Contributing
 

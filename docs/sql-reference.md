@@ -452,6 +452,52 @@ LIMIT 20;
 
 ---
 
+## 10. Decision Log & Feed Health
+
+### Recent decision outcomes
+
+```sql
+SELECT ticker, signal_type, outcome, rejection_reason,
+       model_prob, market_price, edge, created_at
+FROM decision_log
+ORDER BY created_at DESC
+LIMIT 30;
+```
+
+### Rejection rate by reason (last 24h)
+
+```sql
+SELECT rejection_reason, COUNT(*) AS cnt,
+       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct
+FROM decision_log
+WHERE outcome = 'rejected'
+  AND created_at > now() - interval '24 hours'
+GROUP BY rejection_reason
+ORDER BY cnt DESC;
+```
+
+### Feed health snapshot
+
+```sql
+SELECT feed_name, score, last_update, staleness_secs
+FROM feed_health_log
+WHERE logged_at = (SELECT MAX(logged_at) FROM feed_health_log)
+ORDER BY feed_name;
+```
+
+### Calibration metrics (rolling)
+
+```sql
+SELECT strategy, period_start, period_end,
+       brier_score, avg_edge, avg_slippage_cents,
+       signals_count, win_rate
+FROM calibration_metrics
+ORDER BY period_end DESC
+LIMIT 20;
+```
+
+---
+
 ## Quick Reference — justfile commands
 
 | Command | Purpose |
@@ -466,3 +512,5 @@ LIMIT 20;
 | `just settlement-summary` | Aggregate yesterday's settlements |
 | `just settlement-backfill 30` | Backfill last 30 days |
 | `just health` | Dashboard health check |
+| `just grafana` | Start Grafana on :3033 |
+| `just sync-loop` | Contract sync every 5 min |

@@ -1,3 +1,5 @@
+> **Status: COMPLETE** — All 5 phases of this pipeline upgrade have been implemented. Contract rules, Kalshi market state, weather FV, crypto FV, and historical replay are all operational. Test counts have grown beyond those listed here — see README.md for current totals.
+
 # Data Pipeline Upgrade: Settlement-Focused Fair-Value Architecture
 
 ## Summary

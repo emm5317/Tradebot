@@ -1,3 +1,5 @@
+> **Status: COMPLETE** — All 10 improvements in this plan have been implemented across Phases 0-5. This document is preserved as historical reference. See `docs/build-plans/` for phase-by-phase implementation details.
+
 # Codebase Improvements Plan
 
 10 improvements across functionality, speed, and UX. Ordered by implementation dependency.
