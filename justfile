@@ -140,8 +140,8 @@ sync-loop:
 
 # ── Backtesting ─────────────────────────────────────────────
 
-backtest start end:
-    cd python; python -m backtester.engine --start {{start}} --end {{end}}
+backtest start end type="":
+    cd python; python -m backtester.engine --start {{start}} --end {{end}} {{ if type != "" { "--type " + type } else { "" } }}
 
 # Parameter sweep (grid search over model hyperparameters)
 sweep start end:
