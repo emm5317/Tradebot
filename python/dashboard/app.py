@@ -715,6 +715,114 @@ async def microstructure(hours: int = 1):
     return result
 
 
+@app.get("/api/station-summary")
+async def station_summary():
+    """Station overview: latest temp, active contract count, avg HRRR skill."""
+    assert pool is not None
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            WITH latest_obs AS (
+                SELECT DISTINCT ON (station)
+                    station, temperature_f, observed_at
+                FROM observations
+                WHERE source = 'asos' AND temperature_f IS NOT NULL
+                ORDER BY station, observed_at DESC
+            ),
+            active_contracts AS (
+                SELECT station, COUNT(*) as cnt
+                FROM contracts
+                WHERE status = 'active'
+                  AND settlement_time > NOW()
+                GROUP BY station
+            ),
+            skill AS (
+                SELECT station, AVG(hrrr_skill) as avg_skill
+                FROM station_calibration
+                WHERE hrrr_skill IS NOT NULL
+                GROUP BY station
+            )
+            SELECT
+                COALESCE(o.station, c.station, s.station) as station,
+                o.temperature_f as latest_temp_f,
+                COALESCE(c.cnt, 0) as active_contracts,
+                s.avg_skill
+            FROM latest_obs o
+            FULL OUTER JOIN active_contracts c ON o.station = c.station
+            FULL OUTER JOIN skill s ON COALESCE(o.station, c.station) = s.station
+            WHERE COALESCE(o.station, c.station, s.station) IS NOT NULL
+            ORDER BY COALESCE(c.cnt, 0) DESC, station
+        """)
+
+    return [
+        {
+            "station": r["station"],
+            "latest_temp_f": float(r["latest_temp_f"]) if r["latest_temp_f"] else None,
+            "active_contracts": r["active_contracts"],
+            "avg_skill": float(r["avg_skill"]) if r["avg_skill"] else None,
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/settlement-outcomes")
+async def settlement_outcomes(days: int = 7):
+    """Recent settlement outcomes from daily_settlement_summary."""
+    assert pool is not None
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT station, obs_date, final_max_f, final_min_f,
+                   contracts_settled
+            FROM daily_settlement_summary
+            WHERE obs_date >= CURRENT_DATE - $1::int
+            ORDER BY obs_date DESC, station
+        """, days)
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/hrrr-skill-matrix")
+async def hrrr_skill_matrix():
+    """HRRR skill scores by station and hour for heatmap display."""
+    assert pool is not None
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT station, hour, hrrr_skill, sigma_10min, hrrr_bias_f,
+                   sample_size
+            FROM station_calibration
+            WHERE hrrr_skill IS NOT NULL
+            ORDER BY station, hour
+        """)
+
+    return [
+        {
+            "station": r["station"],
+            "hour": r["hour"],
+            "skill": float(r["hrrr_skill"]),
+            "sigma": float(r["sigma_10min"]) if r["sigma_10min"] else None,
+            "bias": float(r["hrrr_bias_f"]) if r["hrrr_bias_f"] else None,
+            "samples": r["sample_size"],
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/calibration/stations")
+async def calibration_stations():
+    """List all stations with calibration data."""
+    assert pool is not None
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT DISTINCT station FROM station_calibration
+            ORDER BY station
+        """)
+
+    return [r["station"] for r in rows]
+
+
 # ── SSE Event Stream ─────────────────────────────────────────────────
 
 

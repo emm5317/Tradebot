@@ -1,14 +1,415 @@
 {% extends "base.html" %}
 {% block title_suffix %} — Weather{% endblock %}
+
 {% block content %}
-<div class="t-grid" style="grid-template-columns:1fr;">
+<div class="t-grid t-grid-2x2">
+
+    <!-- ── Station Overview (top-left) ──────────────────── -->
     <div class="t-panel">
         <div class="t-panel-header">
-            <div class="t-panel-title">Weather Stations</div>
+            <div class="t-panel-title">Station Overview</div>
+            <div class="t-panel-meta" id="meta-stations"></div>
         </div>
-        <div class="t-panel-body">
-            <div class="t-empty">Phase 11.4 — Station overview, HRRR skill matrix, settlement outcomes, calibration browser</div>
+        <div class="t-panel-body" id="panel-stations"></div>
+    </div>
+
+    <!-- ── HRRR Skill Matrix (top-right) ────────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">HRRR Skill Matrix</div>
+            <div class="t-panel-meta" id="meta-skill"></div>
         </div>
+        <div class="t-panel-body" id="panel-skill"></div>
+    </div>
+
+    <!-- ── Settlement Outcomes (bottom-left) ─────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Settlement Outcomes</div>
+            <div class="t-panel-meta" id="meta-settle"></div>
+        </div>
+        <div class="t-panel-body" id="panel-settle"></div>
+    </div>
+
+    <!-- ── Calibration Browser (bottom-right) ────────────── -->
+    <div class="t-panel">
+        <div class="t-panel-header">
+            <div class="t-panel-title">Calibration Browser</div>
+            <div class="t-panel-meta" id="meta-cal-browser"></div>
+        </div>
+        <div class="t-panel-body" id="panel-cal-browser"></div>
     </div>
 </div>
+
+<style>
+.t-station-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: var(--t-sp-md);
+}
+.t-station-card {
+    background: var(--t-bg-panel);
+    border: 1px solid var(--t-border);
+    border-top: 3px solid var(--t-border);
+    padding: var(--t-sp-md);
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+.t-station-card:hover { border-color: var(--t-border-lit); }
+.t-station-card.selected { border-color: var(--t-amber); border-top-color: var(--t-amber); }
+.t-station-card.skill-high { border-top-color: var(--t-green); }
+.t-station-card.skill-mid  { border-top-color: var(--t-yellow); }
+.t-station-card.skill-low  { border-top-color: var(--t-red); }
+
+.t-station-code {
+    font-weight: 700;
+    font-size: var(--t-fs-md);
+    color: var(--t-cyan);
+    letter-spacing: 1px;
+}
+.t-station-temp {
+    font-size: var(--t-fs-lg);
+    color: var(--t-amber);
+    font-weight: 700;
+    margin: 2px 0;
+}
+.t-station-contracts {
+    font-size: var(--t-fs-xs);
+    color: var(--t-muted);
+}
+
+/* Skill heatmap */
+.t-skill-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--t-fs-xs);
+}
+.t-skill-table th {
+    font-size: 8px;
+    padding: 2px 3px;
+    font-weight: 500;
+    text-align: center;
+    background: var(--t-bg);
+    position: sticky;
+    top: 0;
+    z-index: 2;
+}
+.t-skill-table td {
+    padding: 2px 3px;
+    text-align: center;
+    border: 1px solid #1a1a1a;
+    cursor: help;
+    font-size: 9px;
+    font-weight: 500;
+}
+.t-skill-table td.station-col {
+    text-align: left;
+    color: var(--t-cyan);
+    font-weight: 700;
+    border: none;
+    padding-left: var(--t-sp-sm);
+    position: sticky;
+    left: 0;
+    background: var(--t-bg);
+}
+
+.t-select-row {
+    display: flex;
+    gap: var(--t-sp-xl);
+    align-items: center;
+    margin-bottom: var(--t-sp-lg);
+}
+.t-select {
+    background: var(--t-bg-panel);
+    color: var(--t-text);
+    border: 1px solid var(--t-border);
+    padding: 2px 6px;
+    font-family: var(--t-font);
+    font-size: var(--t-fs-sm);
+    cursor: pointer;
+}
+.t-select:hover { border-color: var(--t-border-lit); }
+.t-select:focus { outline: 1px solid var(--t-amber); border-color: var(--t-amber); }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var selectedStation = null;
+    var cachedStations = [];
+    var cachedSkill = [];
+    var cachedSettle = [];
+    var allStations = [];
+
+    Terminal.sortState.settle = { col: 0, dir: -1 };
+
+    // ── Station Overview ─────────────────────────────────────────
+    function fetchStations() {
+        Terminal.fetchJSON('/api/station-summary').then(function(data) {
+            if (!data) return;
+            cachedStations = data;
+            renderStations();
+        });
+    }
+
+    function renderStations() {
+        var el = document.getElementById('panel-stations');
+        if (!cachedStations.length) {
+            el.innerHTML = '<div class="t-empty">no station data</div>';
+            Terminal.touchMeta('stations');
+            return;
+        }
+
+        el.innerHTML = '<div class="t-station-grid">' + cachedStations.map(function(s) {
+            var skillCls = !s.avg_skill ? '' :
+                s.avg_skill >= 0.85 ? 'skill-high' :
+                s.avg_skill >= 0.7 ? 'skill-mid' : 'skill-low';
+            var selCls = selectedStation === s.station ? ' selected' : '';
+
+            return '<div class="t-station-card ' + skillCls + selCls + '" onclick="selectStation(\'' + s.station + '\')">' +
+                '<div class="t-station-code">' + s.station + '</div>' +
+                '<div class="t-station-temp">' + (s.latest_temp_f !== null ? s.latest_temp_f.toFixed(0) + '\u00B0F' : '\u2013') + '</div>' +
+                '<div class="t-station-contracts">' + s.active_contracts + ' contract' + (s.active_contracts !== 1 ? 's' : '') + '</div>' +
+            '</div>';
+        }).join('') + '</div>';
+        Terminal.touchMeta('stations');
+    }
+
+    window.selectStation = function(station) {
+        selectedStation = station;
+        renderStations();
+        loadCalibration(station);
+    };
+
+    // ── HRRR Skill Matrix ────────────────────────────────────────
+    function fetchSkill() {
+        Terminal.fetchJSON('/api/hrrr-skill-matrix').then(function(data) {
+            if (!data) return;
+            cachedSkill = data;
+            renderSkill();
+        });
+    }
+
+    function skillColor(val) {
+        if (val >= 0.85) return '#00c853';
+        if (val >= 0.7) return '#ffd600';
+        if (val >= 0.5) return '#ff8c00';
+        return '#ff1744';
+    }
+
+    function skillBg(val) {
+        if (val >= 0.85) return '#00c85325';
+        if (val >= 0.7) return '#ffd60025';
+        if (val >= 0.5) return '#ff8c0025';
+        return '#ff174425';
+    }
+
+    function renderSkill() {
+        var el = document.getElementById('panel-skill');
+        if (!cachedSkill.length) {
+            el.innerHTML = '<div class="t-empty">no HRRR skill data</div>';
+            Terminal.touchMeta('skill');
+            return;
+        }
+
+        // Build station → hour → data map
+        var stations = [];
+        var stationSet = {};
+        var matrix = {};
+        cachedSkill.forEach(function(d) {
+            if (!stationSet[d.station]) {
+                stationSet[d.station] = true;
+                stations.push(d.station);
+            }
+            if (!matrix[d.station]) matrix[d.station] = {};
+            matrix[d.station][d.hour] = d;
+        });
+
+        // Display selected hours (0, 3, 6, 9, 12, 15, 18, 21) for compactness
+        var hours = [0, 3, 6, 9, 12, 15, 18, 21];
+
+        var html = '<div style="overflow-x:auto;"><table class="t-skill-table"><thead><tr><th></th>';
+        hours.forEach(function(h) {
+            html += '<th>' + String(h).padStart(2, '0') + '</th>';
+        });
+        html += '</tr></thead><tbody>';
+
+        stations.forEach(function(station) {
+            html += '<tr><td class="station-col">' + station + '</td>';
+            hours.forEach(function(h) {
+                var d = matrix[station] && matrix[station][h];
+                if (d) {
+                    var tip = station + ' H' + h +
+                        ' | skill:' + d.skill.toFixed(2) +
+                        (d.sigma ? ' sigma:' + d.sigma.toFixed(3) : '') +
+                        (d.bias !== null ? ' bias:' + d.bias.toFixed(1) + 'F' : '') +
+                        (d.samples ? ' n:' + d.samples : '');
+                    html += '<td style="color:' + skillColor(d.skill) + '; background:' + skillBg(d.skill) + ';" title="' + tip + '">' +
+                        d.skill.toFixed(2) + '</td>';
+                } else {
+                    html += '<td class="t-dim-txt">\u2013</td>';
+                }
+            });
+            html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+
+        el.innerHTML = html;
+        Terminal.touchMeta('skill');
+    }
+
+    // ── Settlement Outcomes ──────────────────────────────────────
+    function fetchSettle() {
+        Terminal.fetchJSON('/api/settlement-outcomes?days=7').then(function(data) {
+            if (!data) return;
+            cachedSettle = data;
+            renderSettle();
+        });
+    }
+
+    function renderSettle() {
+        var el = document.getElementById('panel-settle');
+        if (!cachedSettle.length) {
+            el.innerHTML = '<div class="t-empty">no settlement data</div>';
+            Terminal.touchMeta('settle');
+            return;
+        }
+
+        var cols = [
+            { label: 'Date',    fn: function(d) { return d.obs_date; } },
+            { label: 'Station', fn: function(d) { return d.station; } },
+            { label: 'Max\u00B0F', fn: function(d) { return d.final_max_f || 0; } },
+            { label: 'Min\u00B0F', fn: function(d) { return d.final_min_f || 0; } },
+            { label: 'Settled',  fn: function(d) { return d.contracts_settled || 0; } },
+        ];
+
+        var sorted = Terminal.applySort(cachedSettle, 'settle', cols);
+        var st = Terminal.sortState.settle;
+
+        var html = '<table class="t-table"><thead><tr>';
+        cols.forEach(function(c, i) {
+            var cls = i === st.col ? (st.dir === 1 ? 'sort-asc' : 'sort-desc') : '';
+            html += '<th class="' + cls + '" data-col="' + i + '">' + c.label + '</th>';
+        });
+        html += '</tr></thead><tbody>';
+
+        sorted.forEach(function(d, idx) {
+            html += '<tr class="t-row-new" style="animation-delay:' + (idx * 0.008) + 's">' +
+                '<td class="t-bright">' + d.obs_date + '</td>' +
+                '<td class="t-ticker">' + d.station + '</td>' +
+                '<td class="t-amber-txt">' + (d.final_max_f !== null ? d.final_max_f.toFixed(0) + '\u00B0' : '\u2013') + '</td>' +
+                '<td class="t-info">' + (d.final_min_f !== null ? d.final_min_f.toFixed(0) + '\u00B0' : '\u2013') + '</td>' +
+                '<td>' + (d.contracts_settled || 0) + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table>';
+
+        el.innerHTML = html;
+        Terminal.bindSort(el, 'settle', renderSettle);
+        Terminal.touchMeta('settle');
+    }
+
+    // ── Calibration Browser ──────────────────────────────────────
+    function initCalBrowser() {
+        Terminal.fetchJSON('/api/calibration/stations').then(function(stations) {
+            if (!stations) stations = [];
+            allStations = stations;
+            renderCalBrowser();
+        });
+    }
+
+    function renderCalBrowser() {
+        var el = document.getElementById('panel-cal-browser');
+        var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+        var stationOpts = allStations.map(function(s) {
+            return '<option value="' + s + '"' + (s === selectedStation ? ' selected' : '') + '>' + s + '</option>';
+        }).join('');
+
+        var monthOpts = months.map(function(m, i) {
+            return '<option value="' + (i + 1) + '">' + m + '</option>';
+        }).join('');
+
+        el.innerHTML = '<div class="t-select-row">' +
+            '<div style="display:flex; align-items:center; gap:var(--t-sp-sm);">' +
+                '<span class="t-muted-txt" style="font-size:var(--t-fs-xs); text-transform:uppercase; letter-spacing:1px;">Station</span>' +
+                '<select id="cal-station" class="t-select" onchange="loadCalFromSelect()">' +
+                    '<option value="">Select...</option>' + stationOpts +
+                '</select>' +
+            '</div>' +
+        '</div>' +
+        '<div id="cal-data"><span class="t-dim-txt" style="font-style:italic;">select a station</span></div>';
+    }
+
+    window.loadCalFromSelect = function() {
+        var station = document.getElementById('cal-station').value;
+        if (station) {
+            selectedStation = station;
+            renderStations();
+            loadCalibration(station);
+        }
+    };
+
+    function loadCalibration(station) {
+        // Also update the dropdown if it exists
+        var dropdown = document.getElementById('cal-station');
+        if (dropdown) dropdown.value = station;
+
+        Terminal.fetchJSON('/api/calibration/station/' + station).then(function(data) {
+            var el = document.getElementById('cal-data');
+            if (!el) return;
+            if (!data || !data.length) {
+                el.innerHTML = '<span class="t-dim-txt" style="font-style:italic;">no calibration data for ' + station + '</span>';
+                Terminal.touchMeta('cal-browser');
+                return;
+            }
+
+            var html = '<table class="t-table"><thead><tr>' +
+                '<th>Hour</th><th>Sigma</th><th>HRRR Bias</th><th>HRRR Skill</th>' +
+                '<th>W:Phys</th><th>W:HRRR</th><th>W:Trend</th><th>W:Climo</th><th>N</th>' +
+            '</tr></thead><tbody>';
+
+            data.forEach(function(d) {
+                var skillCls = !d.hrrr_skill ? '' :
+                    d.hrrr_skill >= 0.85 ? 't-positive' :
+                    d.hrrr_skill >= 0.7 ? 't-warn' : 't-negative';
+
+                html += '<tr>' +
+                    '<td class="t-bright">' + String(d.hour).padStart(2, '0') + ':00</td>' +
+                    '<td>' + (d.sigma_10min ? d.sigma_10min.toFixed(3) : '\u2013') + '</td>' +
+                    '<td>' + (d.hrrr_bias_f ? d.hrrr_bias_f.toFixed(2) + '\u00B0F' : '\u2013') + '</td>' +
+                    '<td class="' + skillCls + '">' + (d.hrrr_skill ? d.hrrr_skill.toFixed(3) : '\u2013') + '</td>' +
+                    '<td class="t-muted-txt">' + (d.weight_physics ? d.weight_physics.toFixed(2) : '\u2013') + '</td>' +
+                    '<td class="t-muted-txt">' + (d.weight_hrrr ? d.weight_hrrr.toFixed(2) : '\u2013') + '</td>' +
+                    '<td class="t-muted-txt">' + (d.weight_trend ? d.weight_trend.toFixed(2) : '\u2013') + '</td>' +
+                    '<td class="t-muted-txt">' + (d.weight_climo ? d.weight_climo.toFixed(2) : '\u2013') + '</td>' +
+                    '<td>' + (d.sample_size || 0) + '</td>' +
+                '</tr>';
+            });
+            html += '</tbody></table>';
+            el.innerHTML = html;
+            Terminal.touchMeta('cal-browser');
+        });
+    }
+
+    // ── Init ─────────────────────────────────────────────────────
+    function fetchAll() {
+        fetchStations();
+        fetchSkill();
+        fetchSettle();
+    }
+
+    Terminal.refreshPage = function() {
+        fetchAll();
+        if (selectedStation) loadCalibration(selectedStation);
+    };
+
+    fetchAll();
+    initCalBrowser();
+    setInterval(fetchStations, 60000);
+    setInterval(fetchSettle, 120000);
+})();
+</script>
 {% endblock %}
