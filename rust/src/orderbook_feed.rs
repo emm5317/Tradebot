@@ -76,8 +76,12 @@ pub async fn run(
                         feed_health.record_update("kalshi_ws");
                     }
                     WsFeedMessage::OrderbookDelta { ticker, side, price_cents, delta } => {
-                        let side = if side == "yes" { Side::Bid } else { Side::Ask };
-                        orderbooks.apply_delta(&ticker, side, price_cents, delta);
+                        let (side_enum, adj_price) = if side == "yes" {
+                            (Side::Bid, price_cents)
+                        } else {
+                            (Side::Ask, 100 - price_cents)
+                        };
+                        orderbooks.apply_delta(&ticker, side_enum, adj_price, delta);
                         dirty_tickers.insert(ticker);
                         feed_health.record_update("kalshi_ws");
                     }
@@ -442,6 +446,31 @@ mod tests {
             state.open_interest.unwrap() - state.prev_open_interest.unwrap(),
             20
         );
+    }
+
+    #[test]
+    fn test_no_side_delta_complements_price() {
+        // A "no" delta at 92 cents should be applied to the ask book at 100-92=8 cents
+        // OrderbookManager stores prices as dollars (cents/100), so 8 cents = 0.08
+        let om = OrderbookManager::new();
+        om.apply_delta("TEST", Side::Ask, 100 - 92, 50); // simulating the complement
+        let ask = om.best_ask("TEST");
+        assert!(ask.is_some(), "ask book should have an entry");
+        let (price, size) = ask.unwrap();
+        assert_eq!(price.to_string(), "0.08", "no-side delta at 92 should map to ask at 8 cents ($0.08)");
+        assert_eq!(size, 50);
+    }
+
+    #[test]
+    fn test_yes_side_delta_preserves_price() {
+        // A "yes" delta at 45 cents should be applied to the bid book at 45 cents
+        let om = OrderbookManager::new();
+        om.apply_delta("TEST", Side::Bid, 45, 30);
+        let bid = om.best_bid("TEST");
+        assert!(bid.is_some(), "bid book should have an entry");
+        let (price, size) = bid.unwrap();
+        assert_eq!(price.to_string(), "0.45", "yes-side delta at 45 should stay at 45 cents ($0.45)");
+        assert_eq!(size, 30);
     }
 
     #[test]

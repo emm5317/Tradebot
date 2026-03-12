@@ -38,9 +38,9 @@ Algorithmic trading bot for Kalshi prediction markets. Trades weather temperatur
 - Key tables: `contracts`, `signals`, `orders`, `observations`, `market_snapshots`, `station_calibration`, `decision_log`, `feed_health_log`, `calibration_metrics`
 
 ### Testing
-- `just test` — 165 Rust tests
+- `just test` — 187 Rust tests
 - `just test-python` — 403 Python tests
-- `just test-all` — both (568 total)
+- `just test-all` — both (590 total)
 - Python tests that need DB (asyncpg) will show collection errors locally — this is expected
 
 ## Build & Run
@@ -54,9 +54,9 @@ just collector      # Start data collection
 just dashboard      # Start dashboard on :8050
 just grafana        # Start Grafana on :3033
 just sync-loop      # Contract sync every 5 minutes
-just test           # Run Rust tests (165)
+just test           # Run Rust tests (187)
 just test-python    # Run Python tests (403)
-just test-all       # Run both (568 total)
+just test-all       # Run both (590 total)
 just grafana-restart # Restart Grafana (picks up dashboard changes)
 ```
 
@@ -105,4 +105,4 @@ just grafana-restart # Restart Grafana (picks up dashboard changes)
 
 ## Implementation Phases
 
-Phases 0-9.0 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). Phase 6.1: parameter sweep framework, daily settlement summary, collector enhancements (crypto_ticks, settlement aggregation). Phase 7: calibration agent & prediction feedback loop — fixes signal_id/outcome/latency_ms data plumbing, adds calibration daemon with 6 hourly jobs, confidence-scaled order sizing, book-walking fill estimation, VWAP microstructure signal, evaluator hot-reload, price momentum (7.3a), volume surge detection (7.3c), OI delta tracking (7.3d), edge trajectory tracking (7.5). Phase 8: advanced backtesting & adaptive calibration — foundation fixes (8.0a-e), transaction costs (8.2), advanced metrics (8.3), crypto threshold sweep (8.1), multi-signal eval (8.4), parallel sweep (8.5), replay engine with source ablation (8.6), comprehensive tests (8.7). Phase 9.0: Grafana observability — decision_log + feed_health_log tables, 4 auto-provisioned dashboards, 5 alert rules (Discord), Rust + Python decision trace instrumentation. Phase 10.1: Crypto model profitability fixes (fill price, negative spread, risk/reward guard). Phase 11.0-11.4: Bloomberg terminal dashboard — 6-page terminal UI (MAIN, SGNL, EXEC, ANAL, RISK, WEAT) with Chart.js, SSE, IBM Plex Mono amber theme. See `docs/build-plans/phase-8-backtesting.md`.
+Phases 0-9.0 are complete. Phase 5 added: per-strategy analytics & Brier scoring (5.1), calibration dashboard (5.2), P&L attribution with model_components JSONB (5.3), reconciliation loop (5.4), clock discipline (5.5), dead-letter handling (5.6), integration tests (5.7), per-feed health scoring (5.8). Phase 6.1: parameter sweep framework, daily settlement summary, collector enhancements (crypto_ticks, settlement aggregation). Phase 7: calibration agent & prediction feedback loop — fixes signal_id/outcome/latency_ms data plumbing, adds calibration daemon with 6 hourly jobs, confidence-scaled order sizing, book-walking fill estimation, VWAP microstructure signal, evaluator hot-reload, price momentum (7.3a), volume surge detection (7.3c), OI delta tracking (7.3d), edge trajectory tracking (7.5). Phase 8: advanced backtesting & adaptive calibration — foundation fixes (8.0a-e), transaction costs (8.2), advanced metrics (8.3), crypto threshold sweep (8.1), multi-signal eval (8.4), parallel sweep (8.5), replay engine with source ablation (8.6), comprehensive tests (8.7). Phase 9.0: Grafana observability — decision_log + feed_health_log tables, 4 auto-provisioned dashboards, 5 alert rules (Discord), Rust + Python decision trace instrumentation. Phase 10.1: Crypto model profitability fixes (fill price, negative spread, risk/reward guard). Phase 11.0-11.4: Bloomberg terminal dashboard — 6-page terminal UI (MAIN, SGNL, EXEC, ANAL, RISK, WEAT) with Chart.js, SSE, IBM Plex Mono amber theme. Phase 12.2: Crypto model accuracy fixes — orderbook delta price complement bug, N(d2) tail risk floor/ceiling (PROB_FLOOR=0.02/PROB_CEILING=0.98 + kurtosis correction), max edge filter (0.25 default), lowered thresholds (min_edge=0.03, min_kelly=0.02, min_confidence=0.40), expanded sweep grid with max_edge dimension. See `docs/build-plans/phase-8-backtesting.md`.

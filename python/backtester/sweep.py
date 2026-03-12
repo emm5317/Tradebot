@@ -45,9 +45,10 @@ WEATHER_PARAM_GRID: dict[str, list[Any]] = {
 }
 
 CRYPTO_THRESHOLD_GRID: dict[str, list[Any]] = {
-    "min_edge": [0.02, 0.03, 0.05, 0.07, 0.10],
-    "min_confidence": [0.3, 0.4, 0.5, 0.6],
-    "min_kelly": [0.01, 0.02, 0.03, 0.05],
+    "min_edge": [0.01, 0.02, 0.03, 0.05, 0.07],
+    "max_edge": [0.15, 0.20, 0.25, 0.30],
+    "min_confidence": [0.3, 0.4, 0.5],
+    "min_kelly": [0.01, 0.02, 0.03],
     "kelly_multiplier": [0.25, 0.50, 0.75, 1.0],
 }
 
@@ -362,7 +363,10 @@ class ParameterSweep:
             kelly = float(sig["kelly_fraction"])
             confidence = float(sig.get("confidence") or 0.5)
 
+            max_edge = params.get("max_edge", 0.30)
             if abs(edge) < min_edge:
+                continue
+            if abs(edge) > max_edge:
                 continue
             if confidence < min_confidence:
                 continue
@@ -468,8 +472,8 @@ class ParameterSweep:
                 JOIN contracts c ON s.ticker = c.ticker
                 LEFT JOIN model_evaluations me
                     ON me.ticker = s.ticker
-                    AND me.created_at BETWEEN s.created_at - interval '1 minute'
-                                         AND s.created_at + interval '1 minute'
+                    AND me.evaluated_at BETWEEN s.created_at - interval '1 minute'
+                                            AND s.created_at + interval '1 minute'
                 WHERE s.signal_type = 'crypto'
                   AND c.settled_yes IS NOT NULL
                   AND s.created_at >= $1

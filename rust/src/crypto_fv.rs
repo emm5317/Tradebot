@@ -17,6 +17,13 @@ const RISK_FREE_RATE: f64 = 0.05;
 /// Default BTC annualized vol when no data available.
 const DEFAULT_VOL: f64 = 0.50;
 
+/// Probability floor — irreducible jump/tail risk.
+const PROB_FLOOR: f64 = 0.02;
+/// Probability ceiling — symmetric.
+const PROB_CEILING: f64 = 0.98;
+/// BTC excess kurtosis over normal (empirically 7-12).
+const EXCESS_KURTOSIS: f64 = 7.0;
+
 /// CFB RTI averaging window duration in seconds.
 const RTI_WINDOW_SECS: f64 = 60.0;
 
@@ -85,7 +92,7 @@ pub fn compute_crypto_fair_value(
 
     // Combine
     let p_adjusted = p_core + basis_signal + funding_signal;
-    let p_final = p_adjusted.clamp(0.01, 0.99);
+    let p_final = p_adjusted.clamp(PROB_FLOOR, PROB_CEILING);
 
     // Confidence — base 0.40, with additive bonuses per feed.
     // Single healthy spot venue is sufficient to trade (0.40 + 0.15 = 0.55 > MIN_CONFIDENCE).
@@ -298,7 +305,16 @@ fn standard_binary_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64
     }
 
     let d2 = ((spot / strike).ln() + (RISK_FREE_RATE - 0.5 * vol * vol) * t) / (vol * t.sqrt());
-    norm_cdf(d2)
+    let p = norm_cdf(d2);
+    // Far-OTM kurtosis correction: GBM underestimates tail probability
+    let z_score = (spot / strike).ln().abs() / vol_period;
+    let p = if z_score > 2.0 {
+        let tail_adj = (EXCESS_KURTOSIS / z_score.powi(4)) * 0.01;
+        p.max(tail_adj).min(1.0 - tail_adj)
+    } else {
+        p
+    };
+    p.clamp(PROB_FLOOR, PROB_CEILING)
 }
 
 /// Levy approximation for binary option on arithmetic average (TWAP).
@@ -349,7 +365,7 @@ fn levy_averaging_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64)
     // d2 with Levy-adjusted volatility
     // Drift adjustment: (r - σ²/6) instead of (r - σ²/2) for the average
     let d2 = ((spot / k_eff).ln() + (RISK_FREE_RATE - vol * vol / 6.0) * tau) / (vol_avg);
-    norm_cdf(d2)
+    norm_cdf(d2).clamp(PROB_FLOOR, PROB_CEILING)
 }
 
 /// Standard normal CDF using erfc (matches Python's math.erfc implementation).
@@ -896,6 +912,42 @@ mod tests {
         let k = compute_kelly(0.80, 0.80, "yes");
         // win_prob=0.80, win=0.20, lose=0.80 → kelly = (0.80*0.20 - 0.20*0.80)/0.20 = 0
         assert!(k.abs() < 1e-6, "edge=0 at price=prob should give kelly≈0");
+    }
+
+    #[test]
+    fn test_deep_itm_bracket_capped() {
+        // BTC $100K, strike $59K, 60 min — should be capped at PROB_CEILING
+        let cs = CryptoState::new();
+        cs.update_coinbase(100000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(100000.0, None, Some(0.50), 30, 10.0);
+
+        let snap = cs.snapshot();
+        let fv = compute_crypto_fair_value(&snap, 59000.0, 60.0);
+
+        assert!(
+            fv.probability <= PROB_CEILING,
+            "Deep ITM bracket should be capped at {}, got {}",
+            PROB_CEILING,
+            fv.probability
+        );
+    }
+
+    #[test]
+    fn test_deep_otm_bracket_floored() {
+        // BTC $59K, strike $100K, 60 min — should be floored at PROB_FLOOR
+        let cs = CryptoState::new();
+        cs.update_coinbase(59000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(59000.0, None, Some(0.50), 30, 10.0);
+
+        let snap = cs.snapshot();
+        let fv = compute_crypto_fair_value(&snap, 100000.0, 60.0);
+
+        assert!(
+            fv.probability >= PROB_FLOOR,
+            "Deep OTM bracket should be floored at {}, got {}",
+            PROB_FLOOR,
+            fv.probability
+        );
     }
 
     #[test]

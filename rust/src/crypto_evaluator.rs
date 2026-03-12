@@ -626,7 +626,35 @@ async fn evaluate_entry(
     // 7.5: Track edge trajectory
     edge_tracker.record(&contract.ticker, adjusted_edge);
 
-    // 6. Check minimum edge (using microstructure-adjusted edge)
+    // 6a. Check maximum edge (model miscalibration filter)
+    if adjusted_edge > config.crypto_max_edge {
+        debug!(ticker = %contract.ticker, edge = %format!("{:.4}", adjusted_edge), "crypto eval: edge too large (likely miscalibration)");
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("edge_too_large".into()),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            edge: Some(effective_edge),
+            adjusted_edge: Some(adjusted_edge),
+            direction: Some(direction.to_string()),
+            minutes_remaining: Some(minutes_remaining),
+            confidence: Some(fv.confidence),
+            micro_total: Some(micro.total),
+            micro_trade: Some(micro.trade_imbalance),
+            micro_spread: Some(micro.spread_regime),
+            micro_depth: Some(micro.depth_imbalance),
+            micro_vwap: Some(micro.vwap_signal),
+            micro_momentum: Some(micro.momentum_signal),
+            micro_vol_surge: Some(micro.volume_surge_signal),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
+        });
+        return;
+    }
+
+    // 6b. Check minimum edge (using microstructure-adjusted edge)
     if adjusted_edge < config.crypto_min_edge {
         debug!(ticker = %contract.ticker, edge = %format!("{:.4}", adjusted_edge), "crypto eval: edge below minimum");
         decision_writer.send(DecisionEntry {

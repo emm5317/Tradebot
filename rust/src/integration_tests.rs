@@ -228,6 +228,7 @@ mod tests {
             crypto_min_confidence: 0.50,
             crypto_cooldown_secs: 30,
             weather_cooldown_secs: 120,
+            crypto_max_edge: 0.25,
             crypto_max_market_disagreement: 0.25,
             crypto_directional_min_conviction: 0.05,
         }

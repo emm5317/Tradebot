@@ -74,6 +74,8 @@ pub struct Config {
     pub crypto_min_kelly: f64,
     #[serde(default = "default_crypto_min_confidence")]
     pub crypto_min_confidence: f64,
+    #[serde(default = "default_crypto_max_edge")]
+    pub crypto_max_edge: f64,
     #[serde(default = "default_crypto_cooldown_secs")]
     pub crypto_cooldown_secs: u64,
     #[serde(default = "default_weather_cooldown_secs")]
@@ -115,15 +117,19 @@ fn default_crypto_entry_max_minutes() -> f64 {
 }
 
 fn default_crypto_min_edge() -> f64 {
-    0.06
+    0.03
 }
 
 fn default_crypto_min_kelly() -> f64 {
-    0.04
+    0.02
 }
 
 fn default_crypto_min_confidence() -> f64 {
-    0.50
+    0.40
+}
+
+fn default_crypto_max_edge() -> f64 {
+    0.25
 }
 
 fn default_crypto_cooldown_secs() -> u64 {
