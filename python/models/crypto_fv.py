@@ -186,7 +186,7 @@ _RISK_FREE_RATE = 0.05
 # Volatility multiplier for binary option pricing — accounts for BTC jump risk/fat tails.
 _BINARY_VOL_MULTIPLIER = 2.5
 # Probability floor/ceiling — irreducible jump/tail risk for BTC.
-_PROB_FLOOR = 0.10
+_PROB_FLOOR = 0.03
 _PROB_CEILING = 0.90
 
 

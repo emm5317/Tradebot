@@ -18,8 +18,9 @@ const RISK_FREE_RATE: f64 = 0.05;
 const DEFAULT_VOL: f64 = 0.50;
 
 /// Probability floor — irreducible jump/tail risk.
-/// BTC can flash-crash or spike; even deep OTM/ITM has meaningful uncertainty.
-const PROB_FLOOR: f64 = 0.10;
+/// Low enough to avoid creating phantom edge on deep OTM contracts
+/// that markets correctly price at 3-5 cents.
+const PROB_FLOOR: f64 = 0.03;
 /// Probability ceiling — symmetric.
 const PROB_CEILING: f64 = 0.90;
 /// BTC excess kurtosis over normal (empirically 7-12).

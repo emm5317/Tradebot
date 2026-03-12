@@ -19,7 +19,7 @@ _MINUTES_PER_YEAR = 525_600.0
 BINARY_VOL_MULTIPLIER = 2.5
 
 # Probability floor/ceiling — irreducible jump/tail risk for BTC.
-PROB_FLOOR = 0.10
+PROB_FLOOR = 0.03
 PROB_CEILING = 0.90
 
 

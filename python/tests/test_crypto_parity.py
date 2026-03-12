@@ -196,7 +196,7 @@ class TestComputeCryptoFairValue:
         fv = compute_crypto_fair_value(inputs)
 
         # Verify probability is valid (within [PROB_FLOOR, PROB_CEILING])
-        assert 0.10 <= fv.probability <= 0.90, f"{desc}: prob={fv.probability}"
+        assert 0.03 <= fv.probability <= 0.90, f"{desc}: prob={fv.probability}"
 
         # Verify confidence is valid
         assert 0.0 <= fv.confidence <= 1.0, f"{desc}: confidence={fv.confidence}"
