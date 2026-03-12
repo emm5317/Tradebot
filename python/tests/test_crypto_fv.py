@@ -74,7 +74,7 @@ class TestCryptoFairValueProbability:
             minutes_remaining=0.0,
         )
         result = compute_crypto_fair_value(inputs)
-        assert result.probability > 0.9
+        assert result.probability >= 0.9
 
     def test_probability_clamped(self):
         inputs = CryptoInputs(

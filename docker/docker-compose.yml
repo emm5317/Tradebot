@@ -120,6 +120,13 @@ services:
       CRYPTO_COOLDOWN_SECS: 30
       WEATHER_COOLDOWN_SECS: 120
 
+      # Phase 13: Multi-asset crypto support
+      ENABLE_CRYPTO_BTC: "true"
+      ENABLE_CRYPTO_ETH: "true"
+      ENABLE_CRYPTO_SOL: "false"
+      ENABLE_CRYPTO_XRP: "false"
+      ENABLE_CRYPTO_DOGE: "false"
+
       HTTP_PORT: 3030
     restart: unless-stopped
 

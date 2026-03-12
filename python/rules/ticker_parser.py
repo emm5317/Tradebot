@@ -56,6 +56,30 @@ SERIES_CONFIG: dict[str, dict[str, Any]] = {
         "underlying": "BTCUSD",
         "constituent_exchanges": CFB_RTI_EXCHANGES,
     },
+    # Crypto ETH binary
+    r"^KXETH": {
+        "contract_type": "crypto_binary",
+        "settlement_source": "cfb_erti",
+        "underlying": "ETHUSD",
+    },
+    # Crypto SOL binary
+    r"^KXSOL": {
+        "contract_type": "crypto_binary",
+        "settlement_source": "cfb_rti",
+        "underlying": "SOLUSD",
+    },
+    # Crypto XRP binary
+    r"^KXXRP": {
+        "contract_type": "crypto_binary",
+        "settlement_source": "cfb_rti",
+        "underlying": "XRPUSD",
+    },
+    # Crypto DOGE binary
+    r"^KXDOGE": {
+        "contract_type": "crypto_binary",
+        "settlement_source": "cfb_rti",
+        "underlying": "DOGEUSD",
+    },
     # Weather temperature high
     r"^KXTEMP": {
         "settlement_source": "nws_cli_dsm",

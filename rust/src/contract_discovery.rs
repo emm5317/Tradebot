@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::crypto_asset::CryptoAsset;
 use crate::lock_ext::RwLockExt;
 
 use crate::kalshi::websocket::WsSubscriptionHandle;
@@ -21,8 +22,10 @@ pub struct CryptoContract {
     pub strike: f64,
     pub settlement_time: DateTime<Utc>,
     /// True for directional "price up?" contracts (e.g. KXBTC15M).
-    /// For these, the strike is set to the current BTC price at eval time.
+    /// For these, the strike is set to the current price at eval time.
     pub directional: bool,
+    /// The underlying crypto asset (BTC, ETH, SOL, XRP, DOGE).
+    pub asset: CryptoAsset,
 }
 
 /// Cached discovery of active crypto contracts from the database.
@@ -59,7 +62,13 @@ impl ContractDiscovery {
             FROM contracts c
             LEFT JOIN contract_rules cr ON cr.market_ticker = c.ticker
             WHERE c.status IN ('active', 'initialized', 'open')
-              AND (c.category ILIKE '%crypto%' OR c.category ILIKE '%bitcoin%' OR c.category ILIKE '%btc%'
+              AND (c.category ILIKE '%crypto%' OR c.category ILIKE '%bitcoin%'
+                   OR c.category ILIKE '%btc%' OR c.category ILIKE '%ethereum%'
+                   OR c.category ILIKE '%eth%' OR c.category ILIKE '%sol%'
+                   OR c.category ILIKE '%xrp%' OR c.category ILIKE '%doge%'
+                   OR c.ticker LIKE 'KXBTC%' OR c.ticker LIKE 'KXETH%'
+                   OR c.ticker LIKE 'KXSOL%' OR c.ticker LIKE 'KXXRP%'
+                   OR c.ticker LIKE 'KXDOGE%'
                    OR cr.contract_type = 'crypto_binary')
               AND c.settlement_time > now()
               AND c.settlement_time < now() + interval '65 minutes'
@@ -74,6 +83,9 @@ impl ContractDiscovery {
                 let contracts: Vec<CryptoContract> = rows
                     .into_iter()
                     .filter_map(|(ticker, strike, settlement_time, title)| {
+                        // Derive asset from ticker prefix
+                        let asset = CryptoAsset::from_ticker(&ticker)?;
+
                         // Detect directional "price up?" contracts (e.g. KXBTC15M)
                         let is_directional = ticker.contains("15M")
                             || title.as_deref().unwrap_or("").contains("price up");
@@ -86,6 +98,7 @@ impl ContractDiscovery {
                                 strike: 0.0,
                                 settlement_time,
                                 directional: true,
+                                asset,
                             })
                         } else {
                             // Strike-based binary options — require valid strike
@@ -98,6 +111,7 @@ impl ContractDiscovery {
                                 strike,
                                 settlement_time,
                                 directional: false,
+                                asset,
                             })
                         }
                     })

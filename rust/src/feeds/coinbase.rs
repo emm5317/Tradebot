@@ -1,9 +1,9 @@
-//! Coinbase Advanced Trade WebSocket feed for BTC-USD.
+//! Coinbase Advanced Trade WebSocket feed — multi-asset support.
 //!
-//! Subscribes to the `level2` channel (public, no auth) to maintain
-//! best bid/ask/mid. Flushes to Redis every 500ms for Python model consumption.
+//! Subscribes to `level2` and `market_trades` channels for all enabled
+//! crypto assets. Routes updates to per-asset CryptoState via the registry.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,25 +15,24 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::crypto_state::CryptoState;
+use crate::crypto_asset::CryptoAsset;
+use crate::crypto_state_registry::CryptoStateRegistry;
 use crate::feed_health::FeedHealth;
 
 /// 5-minute rolling window for trade volume accumulation.
 const VOLUME_WINDOW: Duration = Duration::from_secs(300);
 
-/// Coinbase feed state written to Redis.
+/// Per-asset Coinbase feed state.
 #[derive(Debug, Clone)]
-struct CoinbaseState {
+struct CoinbaseAssetState {
     spot: f64,
     best_bid: f64,
     best_ask: f64,
-    /// Trade-by-trade volume accumulation for 5-min rolling window.
     trade_volumes: VecDeque<(Instant, f64)>,
-    /// Cached 5-minute rolling trade volume (BTC).
     trade_volume_5m: f64,
 }
 
-impl Default for CoinbaseState {
+impl Default for CoinbaseAssetState {
     fn default() -> Self {
         Self {
             spot: 0.0,
@@ -45,8 +44,7 @@ impl Default for CoinbaseState {
     }
 }
 
-impl CoinbaseState {
-    /// Recompute 5-minute rolling trade volume, evicting stale entries.
+impl CoinbaseAssetState {
     fn recompute_volume_5m(&mut self) {
         let cutoff = Instant::now() - VOLUME_WINDOW;
         while self
@@ -60,22 +58,23 @@ impl CoinbaseState {
     }
 }
 
-/// Coinbase WebSocket feed for BTC-USD spot price.
+/// Coinbase WebSocket feed — multi-product.
 pub struct CoinbaseFeed {
     ws_url: String,
+    assets: Vec<CryptoAsset>,
     cancel: CancellationToken,
 }
 
 impl CoinbaseFeed {
-    pub fn new(ws_url: String, cancel: CancellationToken) -> Self {
-        Self { ws_url, cancel }
+    pub fn new(ws_url: String, assets: Vec<CryptoAsset>, cancel: CancellationToken) -> Self {
+        Self { ws_url, assets, cancel }
     }
 
-    /// Run the feed with auto-reconnect. Writes to CryptoState + Redis.
+    /// Run the feed with auto-reconnect. Writes to per-asset CryptoState + Redis.
     pub async fn run(
         &self,
         redis: RedisClient,
-        crypto_state: Arc<CryptoState>,
+        registry: Arc<CryptoStateRegistry>,
         feed_health: Arc<FeedHealth>,
     ) {
         let mut backoff_secs = 1u64;
@@ -88,7 +87,7 @@ impl CoinbaseFeed {
             }
 
             match self
-                .connect_and_stream(&redis, &crypto_state, &feed_health)
+                .connect_and_stream(&redis, &registry, &feed_health)
                 .await
             {
                 Ok(()) => {
@@ -113,7 +112,7 @@ impl CoinbaseFeed {
     async fn connect_and_stream(
         &self,
         redis: &RedisClient,
-        crypto_state: &CryptoState,
+        registry: &CryptoStateRegistry,
         feed_health: &FeedHealth,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let request = self.ws_url.as_str().into_client_request()?;
@@ -122,10 +121,19 @@ impl CoinbaseFeed {
 
         let (mut write, mut read) = ws_stream.split();
 
-        // Subscribe to level2 + market_trades channels for BTC-USD (public, no auth needed)
+        // Build product IDs from enabled assets
+        let product_ids: Vec<&str> = self.assets.iter().map(|a| a.coinbase_product_id()).collect();
+
+        // Build product_id → CryptoAsset lookup
+        let product_map: HashMap<&str, CryptoAsset> = self
+            .assets
+            .iter()
+            .map(|a| (a.coinbase_product_id(), *a))
+            .collect();
+
         let subscribe_l2 = serde_json::json!({
             "type": "subscribe",
-            "product_ids": ["BTC-USD"],
+            "product_ids": product_ids,
             "channel": "level2"
         });
         write
@@ -134,14 +142,20 @@ impl CoinbaseFeed {
 
         let subscribe_trades = serde_json::json!({
             "type": "subscribe",
-            "product_ids": ["BTC-USD"],
+            "product_ids": product_ids,
             "channel": "market_trades"
         });
         write
             .send(Message::Text(subscribe_trades.to_string().into()))
             .await?;
 
-        let mut state = CoinbaseState::default();
+        info!(products = ?product_ids, "coinbase subscribed to products");
+
+        let mut states: HashMap<CryptoAsset, CoinbaseAssetState> = self
+            .assets
+            .iter()
+            .map(|a| (*a, CoinbaseAssetState::default()))
+            .collect();
         let mut flush_interval = tokio::time::interval(Duration::from_millis(500));
 
         loop {
@@ -153,8 +167,14 @@ impl CoinbaseFeed {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            parse_coinbase_message(&text, &mut state);
-                            feed_health.record_update("coinbase");
+                            if let Some(asset) = parse_coinbase_message_multi(&text, &mut states, &product_map) {
+                                let feed_name = format!("coinbase_{}", asset.short_name());
+                                feed_health.record_update(&feed_name);
+                                // Also record the legacy "coinbase" name for BTC backward compat
+                                if asset == CryptoAsset::BTC {
+                                    feed_health.record_update("coinbase");
+                                }
+                            }
                         }
                         Some(Ok(Message::Close(_))) => return Ok(()),
                         Some(Err(e)) => return Err(Box::new(e)),
@@ -163,15 +183,19 @@ impl CoinbaseFeed {
                     }
                 }
                 _ = flush_interval.tick() => {
-                    if state.spot > 0.0 {
-                        state.recompute_volume_5m();
-                        crypto_state.update_coinbase(
-                            state.spot,
-                            state.best_bid,
-                            state.best_ask,
-                            state.trade_volume_5m,
-                        );
-                        flush_coinbase_state(&state, redis).await;
+                    for (&asset, state) in &mut states {
+                        if state.spot > 0.0 {
+                            state.recompute_volume_5m();
+                            if let Some(cs) = registry.get(asset) {
+                                cs.update_coinbase(
+                                    state.spot,
+                                    state.best_bid,
+                                    state.best_ask,
+                                    state.trade_volume_5m,
+                                );
+                            }
+                            flush_coinbase_state(asset, state, redis).await;
+                        }
                     }
                 }
             }
@@ -179,95 +203,125 @@ impl CoinbaseFeed {
     }
 }
 
-fn parse_coinbase_message(text: &str, state: &mut CoinbaseState) {
-    // Parse the Coinbase level2 message
-    let Ok(msg) = serde_json::from_str::<serde_json::Value>(text) else {
-        return;
-    };
-
+/// Parse a Coinbase message, routing to the correct per-asset state.
+/// Returns the asset that was updated, if any.
+fn parse_coinbase_message_multi(
+    text: &str,
+    states: &mut HashMap<CryptoAsset, CoinbaseAssetState>,
+    product_map: &HashMap<&str, CryptoAsset>,
+) -> Option<CryptoAsset> {
+    let msg: serde_json::Value = serde_json::from_str(text).ok()?;
     let channel = msg.get("channel").and_then(|v| v.as_str()).unwrap_or("");
 
     match channel {
         "l2_data" => {
-            // Level 2 updates contain bids/asks
             if let Some(events) = msg.get("events").and_then(|v| v.as_array()) {
-                for event in events {
-                    if let Some(updates) = event.get("updates").and_then(|v| v.as_array()) {
-                        for update in updates {
-                            let side = update.get("side").and_then(|v| v.as_str()).unwrap_or("");
-                            let price: f64 = update
-                                .get("price_level")
-                                .and_then(|v| v.as_str())
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0.0);
+                // Extract product_id from the event
+                let product_id = events
+                    .first()
+                    .and_then(|e| e.get("product_id"))
+                    .and_then(|v| v.as_str());
 
-                            if price > 0.0 {
-                                match side {
-                                    "bid" => {
-                                        if price > state.best_bid {
-                                            state.best_bid = price;
+                let asset = product_id.and_then(|pid| product_map.get(pid)).copied();
+
+                if let Some(asset) = asset {
+                    if let Some(state) = states.get_mut(&asset) {
+                        for event in events {
+                            if let Some(updates) = event.get("updates").and_then(|v| v.as_array()) {
+                                for update in updates {
+                                    let side = update.get("side").and_then(|v| v.as_str()).unwrap_or("");
+                                    let price: f64 = update
+                                        .get("price_level")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(0.0);
+
+                                    if price > 0.0 {
+                                        match side {
+                                            "bid" => {
+                                                if price > state.best_bid {
+                                                    state.best_bid = price;
+                                                }
+                                            }
+                                            "offer" => {
+                                                if state.best_ask == 0.0 || price < state.best_ask {
+                                                    state.best_ask = price;
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
-                                    "offer" => {
-                                        if state.best_ask == 0.0 || price < state.best_ask {
-                                            state.best_ask = price;
-                                        }
-                                    }
-                                    _ => {}
                                 }
                             }
                         }
+                        if state.best_bid > 0.0 && state.best_ask > 0.0 {
+                            state.spot = (state.best_bid + state.best_ask) / 2.0;
+                        }
                     }
                 }
-
-                // Update spot as mid of bid/ask
-                if state.best_bid > 0.0 && state.best_ask > 0.0 {
-                    state.spot = (state.best_bid + state.best_ask) / 2.0;
-                }
+                return asset;
             }
         }
         "market_trades" => {
-            // Extract trade sizes for volume tracking
             if let Some(events) = msg.get("events").and_then(|v| v.as_array()) {
+                let mut updated_asset = None;
                 for event in events {
                     if let Some(trades) = event.get("trades").and_then(|v| v.as_array()) {
                         for trade in trades {
-                            let size: f64 = trade
-                                .get("size")
-                                .and_then(|v| v.as_str())
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0.0);
-                            if size > 0.0 {
-                                state.trade_volumes.push_back((Instant::now(), size));
+                            let product_id = trade.get("product_id").and_then(|v| v.as_str());
+                            let asset = product_id.and_then(|pid| product_map.get(pid)).copied();
+                            if let Some(asset) = asset {
+                                if let Some(state) = states.get_mut(&asset) {
+                                    let size: f64 = trade
+                                        .get("size")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(0.0);
+                                    if size > 0.0 {
+                                        state.trade_volumes.push_back((Instant::now(), size));
+                                    }
+                                }
+                                updated_asset = Some(asset);
                             }
                         }
                     }
                 }
+                return updated_asset;
             }
         }
         "ticker" | "ticker_batch" => {
             // Fallback: use ticker price if available
-            if let Some(price) = msg
-                .get("events")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|e| e.get("tickers"))
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|t| t.get("price"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<f64>().ok())
-            {
-                if price > 0.0 {
-                    state.spot = price;
+            if let Some(events) = msg.get("events").and_then(|v| v.as_array()) {
+                for event in events {
+                    if let Some(tickers) = event.get("tickers").and_then(|v| v.as_array()) {
+                        for ticker in tickers {
+                            let product_id = ticker.get("product_id").and_then(|v| v.as_str());
+                            let asset = product_id.and_then(|pid| product_map.get(pid)).copied();
+                            if let Some(asset) = asset {
+                                if let Some(state) = states.get_mut(&asset) {
+                                    if let Some(price) = ticker
+                                        .get("price")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| s.parse::<f64>().ok())
+                                    {
+                                        if price > 0.0 {
+                                            state.spot = price;
+                                        }
+                                    }
+                                }
+                                return Some(asset);
+                            }
+                        }
+                    }
                 }
             }
         }
         _ => {}
     }
+    None
 }
 
-async fn flush_coinbase_state(state: &CoinbaseState, redis: &RedisClient) {
+async fn flush_coinbase_state(asset: CryptoAsset, state: &CoinbaseAssetState, redis: &RedisClient) {
     let summary = serde_json::json!({
         "spot": state.spot,
         "best_bid": state.best_bid,
@@ -275,9 +329,11 @@ async fn flush_coinbase_state(state: &CoinbaseState, redis: &RedisClient) {
         "updated_at": chrono::Utc::now().to_rfc3339(),
     });
 
+    // Per-asset key
+    let key = format!("crypto:coinbase:{}", asset.short_name());
     let result: Result<(), _> = redis
         .set(
-            "crypto:coinbase",
+            key.as_str(),
             summary.to_string().as_str(),
             Some(fred::types::Expiration::EX(30)),
             None,
@@ -286,7 +342,20 @@ async fn flush_coinbase_state(state: &CoinbaseState, redis: &RedisClient) {
         .await;
 
     if let Err(e) = result {
-        warn!(error = %e, "failed to write coinbase state to redis");
+        warn!(error = %e, asset = %asset, "failed to write coinbase state to redis");
+    }
+
+    // BTC backward compat: also write to legacy key
+    if asset == CryptoAsset::BTC {
+        let _: Result<(), _> = redis
+            .set(
+                "crypto:coinbase",
+                summary.to_string().as_str(),
+                Some(fred::types::Expiration::EX(30)),
+                None,
+                false,
+            )
+            .await;
     }
 }
 
@@ -294,29 +363,65 @@ async fn flush_coinbase_state(state: &CoinbaseState, redis: &RedisClient) {
 mod tests {
     use super::*;
 
+    fn make_product_map() -> HashMap<&'static str, CryptoAsset> {
+        let mut m = HashMap::new();
+        m.insert("BTC-USD", CryptoAsset::BTC);
+        m.insert("ETH-USD", CryptoAsset::ETH);
+        m
+    }
+
+    fn make_states() -> HashMap<CryptoAsset, CoinbaseAssetState> {
+        let mut m = HashMap::new();
+        m.insert(CryptoAsset::BTC, CoinbaseAssetState::default());
+        m.insert(CryptoAsset::ETH, CoinbaseAssetState::default());
+        m
+    }
+
     #[test]
     fn test_parse_l2_bid() {
-        let mut state = CoinbaseState::default();
-        let msg = r#"{"channel":"l2_data","events":[{"type":"update","updates":[{"side":"bid","price_level":"95000.50","new_quantity":"1.5"}]}]}"#;
-        parse_coinbase_message(msg, &mut state);
-        assert!((state.best_bid - 95000.50).abs() < 0.01);
+        let mut states = make_states();
+        let product_map = make_product_map();
+        let msg = r#"{"channel":"l2_data","events":[{"type":"update","product_id":"BTC-USD","updates":[{"side":"bid","price_level":"95000.50","new_quantity":"1.5"}]}]}"#;
+        let asset = parse_coinbase_message_multi(msg, &mut states, &product_map);
+        assert_eq!(asset, Some(CryptoAsset::BTC));
+        assert!((states[&CryptoAsset::BTC].best_bid - 95000.50).abs() < 0.01);
+        // ETH should be unchanged
+        assert_eq!(states[&CryptoAsset::ETH].best_bid, 0.0);
     }
 
     #[test]
     fn test_parse_l2_ask() {
-        let mut state = CoinbaseState::default();
-        let msg = r#"{"channel":"l2_data","events":[{"type":"update","updates":[{"side":"offer","price_level":"95100.00","new_quantity":"2.0"}]}]}"#;
-        parse_coinbase_message(msg, &mut state);
-        assert!((state.best_ask - 95100.0).abs() < 0.01);
+        let mut states = make_states();
+        let product_map = make_product_map();
+        let msg = r#"{"channel":"l2_data","events":[{"type":"update","product_id":"ETH-USD","updates":[{"side":"offer","price_level":"3500.00","new_quantity":"2.0"}]}]}"#;
+        let asset = parse_coinbase_message_multi(msg, &mut states, &product_map);
+        assert_eq!(asset, Some(CryptoAsset::ETH));
+        assert!((states[&CryptoAsset::ETH].best_ask - 3500.0).abs() < 0.01);
     }
 
     #[test]
     fn test_parse_l2_mid_price() {
-        let mut state = CoinbaseState::default();
-        let bid_msg = r#"{"channel":"l2_data","events":[{"type":"update","updates":[{"side":"bid","price_level":"95000.00","new_quantity":"1.0"}]}]}"#;
-        let ask_msg = r#"{"channel":"l2_data","events":[{"type":"update","updates":[{"side":"offer","price_level":"95100.00","new_quantity":"1.0"}]}]}"#;
-        parse_coinbase_message(bid_msg, &mut state);
-        parse_coinbase_message(ask_msg, &mut state);
-        assert!((state.spot - 95050.0).abs() < 0.01);
+        let mut states = make_states();
+        let product_map = make_product_map();
+        let bid_msg = r#"{"channel":"l2_data","events":[{"type":"update","product_id":"BTC-USD","updates":[{"side":"bid","price_level":"95000.00","new_quantity":"1.0"}]}]}"#;
+        let ask_msg = r#"{"channel":"l2_data","events":[{"type":"update","product_id":"BTC-USD","updates":[{"side":"offer","price_level":"95100.00","new_quantity":"1.0"}]}]}"#;
+        parse_coinbase_message_multi(bid_msg, &mut states, &product_map);
+        parse_coinbase_message_multi(ask_msg, &mut states, &product_map);
+        assert!((states[&CryptoAsset::BTC].spot - 95050.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_multi_product_subscription_message() {
+        let assets = vec![CryptoAsset::BTC, CryptoAsset::ETH, CryptoAsset::SOL];
+        let product_ids: Vec<&str> = assets.iter().map(|a| a.coinbase_product_id()).collect();
+        let sub = serde_json::json!({
+            "type": "subscribe",
+            "product_ids": product_ids,
+            "channel": "level2"
+        });
+        let sub_str = sub.to_string();
+        assert!(sub_str.contains("BTC-USD"));
+        assert!(sub_str.contains("ETH-USD"));
+        assert!(sub_str.contains("SOL-USD"));
     }
 }

@@ -1,5 +1,6 @@
 //! Binance Futures WebSocket feed for BTCUSDT perpetual.
 //!
+//! BTC-only — only BTC has perps on Binance.us.
 //! Subscribes to aggTrade, depth, and markPrice streams.
 //! Maintains perp price, mark price, funding rate, and order book imbalance.
 //! Flushes to Redis every 500ms.

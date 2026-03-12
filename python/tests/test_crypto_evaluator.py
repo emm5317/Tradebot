@@ -65,16 +65,16 @@ class TestCryptoEvaluator:
         assert rejection is not None
         assert "stale" in rejection.rejection_reason
 
-    def test_missing_vol_rejects(self):
+    def test_missing_vol_uses_fallback(self):
         evaluator = CryptoSignalEvaluator()
         contract = _make_contract()
         book = _make_orderbook()
         now = datetime.now(UTC)
 
+        # Phase 12.3: missing vol now falls back to DEFAULT_VOL=0.60 instead of rejecting
         signal, rejection, state = evaluator.evaluate(contract, 65500.0, None, now, book)
-        assert signal is None
-        assert rejection is not None
-        assert "volatility" in rejection.rejection_reason
+        assert signal is not None
+        assert signal.signal_type == "crypto"
 
     def test_signal_generated_with_edge(self):
         evaluator = CryptoSignalEvaluator()

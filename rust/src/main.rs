@@ -6,9 +6,11 @@
 mod clock;
 mod config;
 mod contract_discovery;
+mod crypto_asset;
 mod crypto_evaluator;
 mod crypto_fv;
 mod crypto_state;
+mod crypto_state_registry;
 mod dashboard;
 mod dead_letter;
 mod decision_log;
@@ -188,56 +190,72 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Canonical crypto state — shared across all feeds and execution
+    // Phase 13: Per-asset crypto state registry
     let rti_config = crypto_state::RtiConfig {
         stale_threshold_secs: config.rti_stale_threshold_secs,
         outlier_threshold_pct: config.rti_outlier_threshold_pct,
         min_venues: config.rti_min_venues,
     };
-    let crypto_state = Arc::new(crypto_state::CryptoState::with_config(rti_config));
+    let enabled_assets = config.enabled_crypto_assets();
+    tracing::info!(assets = ?enabled_assets, "enabled crypto assets");
+    let registry = Arc::new(crypto_state_registry::CryptoStateRegistry::new(
+        &enabled_assets,
+        rti_config,
+    ));
 
     // Spawn crypto exchange feeds (gated by config)
     if config.enable_coinbase {
-        let feed =
-            feeds::coinbase::CoinbaseFeed::new(config.coinbase_ws_url.clone(), cancel.clone());
+        let feed = feeds::coinbase::CoinbaseFeed::new(
+            config.coinbase_ws_url.clone(),
+            enabled_assets.clone(),
+            cancel.clone(),
+        );
         let redis_clone = redis.clone();
-        let cs = Arc::clone(&crypto_state);
+        let reg = Arc::clone(&registry);
         let fh = Arc::clone(&feed_health);
-        tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
-        tracing::info!("coinbase feed enabled");
+        tokio::spawn(async move { feed.run(redis_clone, reg, fh).await });
+        tracing::info!("coinbase feed enabled (multi-asset)");
     }
 
     if config.enable_binance_spot {
         let feed = feeds::binance_spot::BinanceSpotFeed::new(
             config.binance_spot_ws_url.clone(),
+            enabled_assets.clone(),
             cancel.clone(),
         );
         let redis_clone = redis.clone();
-        let cs = Arc::clone(&crypto_state);
+        let reg = Arc::clone(&registry);
         let fh = Arc::clone(&feed_health);
-        tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
-        tracing::info!("binance spot feed enabled");
+        tokio::spawn(async move { feed.run(redis_clone, reg, fh).await });
+        tracing::info!("binance spot feed enabled (multi-asset)");
     }
 
     if config.enable_binance_futures {
-        let feed = feeds::binance_futures::BinanceFuturesFeed::new(
-            config.binance_futures_ws_url.clone(),
-            cancel.clone(),
-        );
-        let redis_clone = redis.clone();
-        let cs = Arc::clone(&crypto_state);
-        let fh = Arc::clone(&feed_health);
-        tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
-        tracing::info!("binance futures feed enabled");
+        // BTC-only — only BTC has perps on Binance.us
+        if let Some(btc_state) = registry.get(crypto_asset::CryptoAsset::BTC) {
+            let feed = feeds::binance_futures::BinanceFuturesFeed::new(
+                config.binance_futures_ws_url.clone(),
+                cancel.clone(),
+            );
+            let redis_clone = redis.clone();
+            let cs = Arc::clone(btc_state);
+            let fh = Arc::clone(&feed_health);
+            tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
+            tracing::info!("binance futures feed enabled (BTC-only)");
+        }
     }
 
     if config.enable_deribit {
-        let feed = feeds::deribit::DeribitFeed::new(config.deribit_ws_url.clone(), cancel.clone());
-        let redis_clone = redis.clone();
-        let cs = Arc::clone(&crypto_state);
-        let fh = Arc::clone(&feed_health);
-        tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
-        tracing::info!("deribit dvol feed enabled");
+        // BTC-only — only BTC has DVOL
+        if let Some(btc_state) = registry.get(crypto_asset::CryptoAsset::BTC) {
+            let feed =
+                feeds::deribit::DeribitFeed::new(config.deribit_ws_url.clone(), cancel.clone());
+            let redis_clone = redis.clone();
+            let cs = Arc::clone(btc_state);
+            let fh = Arc::clone(&feed_health);
+            tokio::spawn(async move { feed.run(redis_clone, cs, fh).await });
+            tracing::info!("deribit dvol feed enabled (BTC-only)");
+        }
     }
 
     // Phase 3: Contract discovery for crypto evaluator (with WS subscription wiring)
@@ -268,7 +286,7 @@ async fn main() -> Result<()> {
     // Phase 3: Spawn event-driven crypto evaluator (with Phase 4.3 trade tape)
     supervisor.spawn("crypto_evaluator", TaskCriticality::Critical, {
         let config = Arc::new(config.clone());
-        let cs = Arc::clone(&crypto_state);
+        let reg = Arc::clone(&registry);
         let cd = Arc::clone(&contract_discovery);
         let ob = Arc::clone(&orderbooks);
         let tt = Arc::clone(&trade_tape);
@@ -283,7 +301,7 @@ async fn main() -> Result<()> {
         let dw = decision_writer.clone();
         async move {
             crypto_evaluator::run(
-                config, cs, cd, ob, tt, om, k, ks, fh, pool, redis, nats, cancel, dw,
+                config, reg, cd, ob, tt, om, k, ks, fh, pool, redis, nats, cancel, dw,
             )
             .await;
         }
@@ -292,7 +310,7 @@ async fn main() -> Result<()> {
     // Start Axum HTTP server (kill switch + health + dashboard)
     let dashboard_state = dashboard::DashboardState {
         config: Arc::new(config.clone()),
-        crypto_state: Arc::clone(&crypto_state),
+        crypto_registry: Arc::clone(&registry),
         order_mgr: Arc::clone(&order_mgr),
         kill_switch: Arc::clone(&kill_switch),
         feed_health: Arc::clone(&feed_health),
@@ -331,13 +349,18 @@ async fn main() -> Result<()> {
         "all systems operational — tradebot ready"
     );
 
-    // Run execution engine
+    // Run execution engine (uses BTC state for advisory pricing)
     supervisor.spawn("execution", TaskCriticality::Critical, {
         let config = config.clone();
         let pool = pool.clone();
         let ks = Arc::clone(&kill_switch);
         let fh = Arc::clone(&feed_health);
-        let cs = Arc::clone(&crypto_state);
+        // Execution engine uses BTC CryptoState for advisory snapshot;
+        // fall back to a fresh empty state if BTC is not enabled
+        let cs = registry
+            .get(crypto_asset::CryptoAsset::BTC)
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::new(crypto_state::CryptoState::new()));
         let kalshi = Arc::clone(&kalshi);
         let om = Arc::clone(&order_mgr);
         let nats = nats.clone();

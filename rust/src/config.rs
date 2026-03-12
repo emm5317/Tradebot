@@ -86,6 +86,18 @@ pub struct Config {
     pub crypto_max_market_disagreement: f64,
     #[serde(default = "default_crypto_directional_min_conviction")]
     pub crypto_directional_min_conviction: f64,
+
+    // Phase 13: Per-asset enable flags (BTC default true, others false)
+    #[serde(default = "default_true")]
+    pub enable_crypto_btc: bool,
+    #[serde(default)]
+    pub enable_crypto_eth: bool,
+    #[serde(default)]
+    pub enable_crypto_sol: bool,
+    #[serde(default)]
+    pub enable_crypto_xrp: bool,
+    #[serde(default)]
+    pub enable_crypto_doge: bool,
 }
 
 fn default_db_pool_size() -> u32 {
@@ -160,9 +172,25 @@ fn default_rti_min_venues() -> usize {
     2
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, envy::Error> {
         envy::from_env::<Self>()
+    }
+
+    /// Return list of enabled crypto assets based on config flags.
+    pub fn enabled_crypto_assets(&self) -> Vec<crate::crypto_asset::CryptoAsset> {
+        use crate::crypto_asset::CryptoAsset;
+        let mut assets = Vec::new();
+        if self.enable_crypto_btc { assets.push(CryptoAsset::BTC); }
+        if self.enable_crypto_eth { assets.push(CryptoAsset::ETH); }
+        if self.enable_crypto_sol { assets.push(CryptoAsset::SOL); }
+        if self.enable_crypto_xrp { assets.push(CryptoAsset::XRP); }
+        if self.enable_crypto_doge { assets.push(CryptoAsset::DOGE); }
+        assets
     }
 
     /// Log non-secret configuration values at startup.

@@ -1793,6 +1793,11 @@ mod tests {
             crypto_max_edge: 0.25,
             crypto_max_market_disagreement: 0.25,
             crypto_directional_min_conviction: 0.05,
+            enable_crypto_btc: true,
+            enable_crypto_eth: false,
+            enable_crypto_sol: false,
+            enable_crypto_xrp: false,
+            enable_crypto_doge: false,
         }
     }
 

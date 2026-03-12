@@ -12,7 +12,8 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::contract_discovery::ContractDiscovery;
-use crate::crypto_state::CryptoState;
+use crate::crypto_asset::CryptoAsset;
+use crate::crypto_state_registry::CryptoStateRegistry;
 use crate::feed_health::FeedHealth;
 use crate::kill_switch::KillSwitchState;
 use crate::order_manager::OrderManager;
@@ -21,7 +22,7 @@ use crate::order_manager::OrderManager;
 #[derive(Clone)]
 pub struct DashboardState {
     pub config: Arc<Config>,
-    pub crypto_state: Arc<CryptoState>,
+    pub crypto_registry: Arc<CryptoStateRegistry>,
     pub order_mgr: Arc<tokio::sync::Mutex<OrderManager>>,
     pub kill_switch: Arc<KillSwitchState>,
     pub feed_health: Arc<FeedHealth>,
@@ -125,7 +126,12 @@ struct ContractInfo {
 }
 
 async fn api_state(State(st): State<DashboardState>) -> Json<ApiState> {
-    let snap = st.crypto_state.snapshot();
+    // Use BTC state for the dashboard (backward compat)
+    let snap = st
+        .crypto_registry
+        .get(CryptoAsset::BTC)
+        .map(|s| s.snapshot())
+        .unwrap_or_default();
 
     // Feed health with age
     let feed_age = |updated: &Option<std::time::Instant>| -> Option<u64> {

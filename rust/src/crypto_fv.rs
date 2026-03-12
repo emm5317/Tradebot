@@ -6,6 +6,7 @@
 //! Phase 1.2: Inline shadow RTI + N(d2) binary fair value in Rust.
 //! Phase 4.1: Levy approximation for RTI averaging window near expiry.
 
+use crate::crypto_asset::CryptoAsset;
 use crate::crypto_state::CryptoStateInner;
 
 /// Seconds per year for annualization.
@@ -14,22 +15,64 @@ const SECONDS_PER_YEAR: f64 = 525_600.0 * 60.0;
 /// Default risk-free rate (5% annual).
 const RISK_FREE_RATE: f64 = 0.05;
 
-/// Default BTC annualized vol when no data available.
+/// Per-asset tuning constants for the fair-value model.
+#[derive(Debug, Clone)]
+pub struct AssetConfig {
+    pub default_vol: f64,
+    pub binary_vol_multiplier: f64,
+    pub excess_kurtosis: f64,
+    pub prob_floor: f64,
+    pub prob_ceiling: f64,
+}
+
+impl AssetConfig {
+    /// Return tuned configuration for a specific crypto asset.
+    pub fn for_asset(asset: CryptoAsset) -> Self {
+        match asset {
+            CryptoAsset::BTC => Self {
+                default_vol: 0.50,
+                binary_vol_multiplier: 2.5,
+                excess_kurtosis: 7.0,
+                prob_floor: 0.03,
+                prob_ceiling: 0.90,
+            },
+            CryptoAsset::ETH => Self {
+                default_vol: 0.60,
+                binary_vol_multiplier: 2.8,
+                excess_kurtosis: 8.0,
+                prob_floor: 0.03,
+                prob_ceiling: 0.90,
+            },
+            CryptoAsset::SOL => Self {
+                default_vol: 0.90,
+                binary_vol_multiplier: 3.0,
+                excess_kurtosis: 10.0,
+                prob_floor: 0.03,
+                prob_ceiling: 0.90,
+            },
+            CryptoAsset::XRP => Self {
+                default_vol: 0.80,
+                binary_vol_multiplier: 3.0,
+                excess_kurtosis: 9.0,
+                prob_floor: 0.03,
+                prob_ceiling: 0.90,
+            },
+            CryptoAsset::DOGE => Self {
+                default_vol: 1.00,
+                binary_vol_multiplier: 3.2,
+                excess_kurtosis: 12.0,
+                prob_floor: 0.03,
+                prob_ceiling: 0.90,
+            },
+        }
+    }
+}
+
+/// Legacy constants for backward compat (BTC defaults).
 const DEFAULT_VOL: f64 = 0.50;
-
-/// Probability floor — irreducible jump/tail risk.
-/// Low enough to avoid creating phantom edge on deep OTM contracts
-/// that markets correctly price at 3-5 cents.
 const PROB_FLOOR: f64 = 0.03;
-/// Probability ceiling — symmetric.
 const PROB_CEILING: f64 = 0.90;
-/// BTC excess kurtosis over normal (empirically 7-12).
 const EXCESS_KURTOSIS: f64 = 7.0;
-
-/// Volatility multiplier for binary option pricing.
-/// GBM realized vol underestimates short-term tail risk for BTC binary options.
-/// This accounts for jump risk, fat tails, and microstructure noise.
-/// With 2.5x: $500 ITM → ~0.69, $1K ITM → ~0.84, ATM → ~0.50 (vs 0.998/0.998/0.50 raw).
 const BINARY_VOL_MULTIPLIER: f64 = 2.5;
 
 /// CFB RTI averaging window duration in seconds.
@@ -67,9 +110,19 @@ pub fn compute_crypto_fair_value(
     strike: f64,
     minutes_remaining: f64,
 ) -> CryptoFairValue {
+    compute_crypto_fair_value_with_config(state, strike, minutes_remaining, &AssetConfig::for_asset(CryptoAsset::BTC))
+}
+
+/// Asset-aware version of `compute_crypto_fair_value`.
+pub fn compute_crypto_fair_value_with_config(
+    state: &CryptoStateInner,
+    strike: f64,
+    minutes_remaining: f64,
+    asset_config: &AssetConfig,
+) -> CryptoFairValue {
     let shadow_rti = state.shadow_rti;
-    let base_vol = estimate_volatility(state);
-    let vol = base_vol * BINARY_VOL_MULTIPLIER;
+    let base_vol = estimate_volatility(state, asset_config.default_vol);
+    let vol = base_vol * asset_config.binary_vol_multiplier;
 
     let seconds_remaining = (minutes_remaining * 60.0).max(0.01);
 
@@ -77,7 +130,7 @@ pub fn compute_crypto_fair_value(
     let p_core = if shadow_rti <= 0.0 || strike <= 0.0 {
         0.5
     } else {
-        compute_settlement_probability(shadow_rti, strike, seconds_remaining, vol)
+        compute_settlement_probability_with_config(shadow_rti, strike, seconds_remaining, vol, asset_config)
     };
 
     // Basis signal: positive basis (contango) → bullish
@@ -101,7 +154,7 @@ pub fn compute_crypto_fair_value(
 
     // Combine
     let p_adjusted = p_core + basis_signal + funding_signal;
-    let p_final = p_adjusted.clamp(PROB_FLOOR, PROB_CEILING);
+    let p_final = p_adjusted.clamp(asset_config.prob_floor, asset_config.prob_ceiling);
 
     // Confidence — base 0.40, with additive bonuses per feed.
     // Single healthy spot venue is sufficient to trade (0.40 + 0.15 = 0.55 > MIN_CONFIDENCE).
@@ -153,7 +206,25 @@ pub fn compute_directional_fair_value(
     depth_imbalance: f64,
     volume_surge_aligned: bool,
 ) -> CryptoFairValue {
-    let vol = estimate_volatility(state);
+    compute_directional_fair_value_with_config(
+        state, _minutes_remaining, price_momentum, trade_imbalance,
+        vwap_deviation, depth_imbalance, volume_surge_aligned,
+        &AssetConfig::for_asset(CryptoAsset::BTC),
+    )
+}
+
+/// Asset-aware version of `compute_directional_fair_value`.
+pub fn compute_directional_fair_value_with_config(
+    state: &CryptoStateInner,
+    _minutes_remaining: f64,
+    price_momentum: f64,
+    trade_imbalance: f64,
+    vwap_deviation: f64,
+    depth_imbalance: f64,
+    volume_surge_aligned: bool,
+    asset_config: &AssetConfig,
+) -> CryptoFairValue {
+    let vol = estimate_volatility(state, asset_config.default_vol);
 
     // Weights for signal combination
     const W_MOMENTUM: f64 = 0.40;
@@ -263,11 +334,16 @@ pub fn estimate_fill_price(direction: &str, mid_price: f64, spread: f64) -> f64 
 
 /// Estimate volatility from available sources.
 /// Priority: DVOL > EWMA > realized > default.
-fn estimate_volatility(state: &CryptoStateInner) -> f64 {
-    state.best_vol.unwrap_or(DEFAULT_VOL)
+fn estimate_volatility(state: &CryptoStateInner, default_vol: f64) -> f64 {
+    state.best_vol.unwrap_or(default_vol)
 }
 
-/// Settlement-aware probability computation.
+/// Settlement-aware probability computation (legacy BTC wrapper).
+fn compute_settlement_probability(spot: f64, strike: f64, seconds_remaining: f64, vol: f64) -> f64 {
+    compute_settlement_probability_with_config(spot, strike, seconds_remaining, vol, &AssetConfig::for_asset(CryptoAsset::BTC))
+}
+
+/// Settlement-aware probability computation with per-asset config.
 ///
 /// Uses three regimes based on distance to settlement:
 /// 1. **Far (>5 min):** Standard Black-Scholes N(d2) for point-in-time settlement.
@@ -275,20 +351,20 @@ fn estimate_volatility(state: &CryptoStateInner) -> f64 {
 /// 3. **Within RTI window (≤60s):** Levy approximation for arithmetic average options.
 ///    The CFB RTI is a 60-second TWAP — the variance of a TWAP over interval τ
 ///    is σ²τ/3 (vs σ²τ for point-in-time), reducing tail risk near expiry.
-fn compute_settlement_probability(spot: f64, strike: f64, seconds_remaining: f64, vol: f64) -> f64 {
+fn compute_settlement_probability_with_config(spot: f64, strike: f64, seconds_remaining: f64, vol: f64, asset_config: &AssetConfig) -> f64 {
     if seconds_remaining <= 0.01 {
         // Expired — deterministic
         return if spot >= strike { 1.0 } else { 0.0 };
     }
 
-    let p_standard = standard_binary_prob(spot, strike, seconds_remaining, vol);
+    let p_standard = standard_binary_prob_with_config(spot, strike, seconds_remaining, vol, asset_config);
 
     if seconds_remaining > RTI_WINDOW_SECS + TRANSITION_SECS {
         // Far from expiry — standard model (averaging effect negligible)
         return p_standard;
     }
 
-    let p_averaging = levy_averaging_prob(spot, strike, seconds_remaining, vol);
+    let p_averaging = levy_averaging_prob_with_config(spot, strike, seconds_remaining, vol, asset_config);
 
     if seconds_remaining <= RTI_WINDOW_SECS {
         // Inside the averaging window — pure Levy model
@@ -304,8 +380,13 @@ fn compute_settlement_probability(spot: f64, strike: f64, seconds_remaining: f64
     p_standard * (1.0 - blend) + p_averaging * blend
 }
 
-/// Standard Black-Scholes binary option probability: N(d2).
+/// Standard Black-Scholes binary option probability: N(d2) (legacy BTC wrapper).
 fn standard_binary_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64) -> f64 {
+    standard_binary_prob_with_config(spot, strike, seconds_remaining, vol, &AssetConfig::for_asset(CryptoAsset::BTC))
+}
+
+/// Standard Black-Scholes binary option probability: N(d2) with per-asset config.
+fn standard_binary_prob_with_config(spot: f64, strike: f64, seconds_remaining: f64, vol: f64, asset_config: &AssetConfig) -> f64 {
     let t = seconds_remaining / SECONDS_PER_YEAR;
     let vol_period = vol * t.sqrt();
 
@@ -318,12 +399,17 @@ fn standard_binary_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64
     // Far-OTM kurtosis correction: GBM underestimates tail probability
     let z_score = (spot / strike).ln().abs() / vol_period;
     let p = if z_score > 2.0 {
-        let tail_adj = (EXCESS_KURTOSIS / z_score.powi(4)) * 0.01;
+        let tail_adj = (asset_config.excess_kurtosis / z_score.powi(4)) * 0.01;
         p.max(tail_adj).min(1.0 - tail_adj)
     } else {
         p
     };
-    p.clamp(PROB_FLOOR, PROB_CEILING)
+    p.clamp(asset_config.prob_floor, asset_config.prob_ceiling)
+}
+
+/// Levy approximation for binary option on arithmetic average (legacy BTC wrapper).
+fn levy_averaging_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64) -> f64 {
+    levy_averaging_prob_with_config(spot, strike, seconds_remaining, vol, &AssetConfig::for_asset(CryptoAsset::BTC))
 }
 
 /// Levy approximation for binary option on arithmetic average (TWAP).
@@ -337,7 +423,7 @@ fn standard_binary_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64
 /// - RTI = α·Ā_known + (1-α)·Ā_future, where α = fraction elapsed
 /// - Effective strike shifts: K_eff = (K - α·S) / (1-α)
 /// - Variance further reduces by (1-α)²
-fn levy_averaging_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64) -> f64 {
+fn levy_averaging_prob_with_config(spot: f64, strike: f64, seconds_remaining: f64, vol: f64, asset_config: &AssetConfig) -> f64 {
     // Fraction of the 60s window already elapsed
     let elapsed = (RTI_WINDOW_SECS - seconds_remaining).max(0.0);
     let alpha = elapsed / RTI_WINDOW_SECS;
@@ -374,7 +460,7 @@ fn levy_averaging_prob(spot: f64, strike: f64, seconds_remaining: f64, vol: f64)
     // d2 with Levy-adjusted volatility
     // Drift adjustment: (r - σ²/6) instead of (r - σ²/2) for the average
     let d2 = ((spot / k_eff).ln() + (RISK_FREE_RATE - vol * vol / 6.0) * tau) / (vol_avg);
-    norm_cdf(d2).clamp(PROB_FLOOR, PROB_CEILING)
+    norm_cdf(d2).clamp(asset_config.prob_floor, asset_config.prob_ceiling)
 }
 
 /// Standard normal CDF using erfc (matches Python's math.erfc implementation).
@@ -999,6 +1085,47 @@ mod tests {
             (fv.probability - 0.50).abs() < 0.10,
             "ATM should be near 0.50, got {}",
             fv.probability
+        );
+    }
+
+    #[test]
+    fn test_asset_config_per_asset_values() {
+        let btc = AssetConfig::for_asset(CryptoAsset::BTC);
+        let eth = AssetConfig::for_asset(CryptoAsset::ETH);
+        let sol = AssetConfig::for_asset(CryptoAsset::SOL);
+
+        // BTC has lowest vol
+        assert!(btc.default_vol < eth.default_vol);
+        assert!(eth.default_vol < sol.default_vol);
+
+        // Higher vol multipliers for alts
+        assert!(btc.binary_vol_multiplier < eth.binary_vol_multiplier);
+        assert!(eth.binary_vol_multiplier <= sol.binary_vol_multiplier);
+
+        // DOGE has highest kurtosis
+        let doge = AssetConfig::for_asset(CryptoAsset::DOGE);
+        assert!(doge.excess_kurtosis > btc.excess_kurtosis);
+    }
+
+    #[test]
+    fn test_fv_with_config_eth_differs_from_btc() {
+        let cs = CryptoState::new();
+        cs.update_coinbase(3500.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(3500.0, None, Some(0.60), 30, 10.0);
+        let snap = cs.snapshot();
+
+        let btc_config = AssetConfig::for_asset(CryptoAsset::BTC);
+        let eth_config = AssetConfig::for_asset(CryptoAsset::ETH);
+
+        // Use ATM-ish strike so probability is in a sensitive range (not clamped at ceiling)
+        let fv_btc = compute_crypto_fair_value_with_config(&snap, 3480.0, 30.0, &btc_config);
+        let fv_eth = compute_crypto_fair_value_with_config(&snap, 3480.0, 30.0, &eth_config);
+
+        // ETH has higher vol multiplier → more uncertainty → prob closer to 0.5
+        assert!(
+            (fv_btc.probability - fv_eth.probability).abs() > 0.001,
+            "ETH and BTC configs should produce different probabilities: btc={}, eth={}",
+            fv_btc.probability, fv_eth.probability
         );
     }
 

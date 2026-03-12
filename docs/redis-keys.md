@@ -6,10 +6,20 @@ Tradebot uses Redis as a shared state cache between Rust and Python components.
 
 ```
 orderbook:{ticker}          # Kalshi book state (from Rust, 500ms flush)
-crypto:coinbase             # Coinbase BTC-USD spot/bid/ask + trade volume
-crypto:binance_spot         # Binance spot + realized/EWMA vol
-crypto:binance_futures      # Binance perp/mark/funding/OBI
-crypto:deribit_dvol         # Deribit BTC volatility index
+crypto:coinbase             # Coinbase BTC-USD spot/bid/ask + trade volume (legacy BTC alias)
+crypto:coinbase:btc         # Coinbase BTC-USD per-asset state
+crypto:coinbase:eth         # Coinbase ETH-USD per-asset state
+crypto:coinbase:sol         # Coinbase SOL-USD per-asset state (when enabled)
+crypto:coinbase:xrp         # Coinbase XRP-USD per-asset state (when enabled)
+crypto:coinbase:doge        # Coinbase DOGE-USD per-asset state (when enabled)
+crypto:binance_spot         # Binance spot BTC (legacy alias)
+crypto:binance_spot:btc     # Binance spot BTC per-asset state
+crypto:binance_spot:eth     # Binance spot ETH per-asset state
+crypto:binance_spot:sol     # Binance spot SOL per-asset state (when enabled)
+crypto:binance_spot:xrp     # Binance spot XRP per-asset state (when enabled)
+crypto:binance_spot:doge    # Binance spot DOGE per-asset state (when enabled)
+crypto:binance_futures      # Binance perp/mark/funding/OBI (BTC-only)
+crypto:deribit_dvol         # Deribit BTC volatility index (BTC-only)
 model_state:{ticker}        # Model output for dashboard
 feed:status:{ticker}        # Feed health/staleness
 crypto:rti                  # Real-time index estimate (shadow RTI from Rust)

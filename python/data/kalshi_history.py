@@ -158,8 +158,11 @@ def _matches_category(market: dict, category: str) -> bool:
     elif category == "crypto":
         return (
             cat == "crypto"
-            or any(kw in title for kw in ["bitcoin", "btc", "crypto"])
-            or ticker.startswith(("KXBTC", "KXETH", "KXCRYPTO"))
+            or any(kw in title for kw in [
+                "bitcoin", "btc", "crypto", "ethereum", "eth",
+                "solana", "sol", "ripple", "xrp", "dogecoin", "doge",
+            ])
+            or ticker.startswith(("KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE", "KXCRYPTO"))
         )
     return cat == category
 
@@ -249,7 +252,13 @@ async def pull_active_contracts(
     total = 0
 
     # Known series tickers for targeted pulls (Kalshi category field is often None)
-    _CRYPTO_SERIES = ["KXBTC", "KXBTCD", "KXBTC15M", "KXETH"]
+    _CRYPTO_SERIES = [
+        "KXBTC", "KXBTCD", "KXBTC15M",
+        "KXETH", "KXETHD", "KXETH15M",
+        "KXSOL", "KXSOLD", "KXSOL15M",
+        "KXXRP", "KXXRPD", "KXXRP15M",
+        "KXDOGE", "KXDOGED", "KXDOGE15M",
+    ]
     _WEATHER_SERIES = ["KXTEMP", "KXTEMPHI", "KXTEMPLO"]
 
     try:
@@ -470,7 +479,14 @@ def _categorize(market: dict) -> str:
     if cat in ("weather", "crypto"):
         return cat
     title = market.get("title", "").lower()
-    if any(kw in title for kw in ["bitcoin", "btc", "crypto"]):
+    ticker = market.get("ticker", "").upper()
+    if (
+        any(kw in title for kw in [
+            "bitcoin", "btc", "crypto", "ethereum", "eth",
+            "solana", "sol", "ripple", "xrp", "dogecoin", "doge",
+        ])
+        or ticker.startswith(("KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE"))
+    ):
         return "crypto"
     return "weather"
 

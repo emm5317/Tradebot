@@ -20,8 +20,10 @@ use crate::lock_ext::RwLockExt;
 
 use crate::config::Config;
 use crate::contract_discovery::ContractDiscovery;
-use crate::crypto_fv;
+use crate::crypto_asset::CryptoAsset;
+use crate::crypto_fv::{self, AssetConfig};
 use crate::crypto_state::CryptoState;
+use crate::crypto_state_registry::CryptoStateRegistry;
 use crate::decision_log::{self, DecisionEntry, DecisionLogWriter};
 use crate::feed_health::FeedHealth;
 use crate::kalshi::client::KalshiClient;
@@ -232,7 +234,7 @@ fn contract_phase(minutes_remaining: f64, min_minutes: f64, max_minutes: f64) ->
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: Arc<Config>,
-    crypto_state: Arc<CryptoState>,
+    registry: Arc<CryptoStateRegistry>,
     contract_discovery: Arc<ContractDiscovery>,
     orderbooks: Arc<OrderbookManager>,
     trade_tape: Arc<RwLock<TradeTape>>,
@@ -246,32 +248,42 @@ pub async fn run(
     cancel: CancellationToken,
     decision_writer: DecisionLogWriter,
 ) {
-    let mut rx = crypto_state.subscribe();
+    let mut rx = registry.subscribe();
     let mut last_eval: HashMap<String, Instant> = HashMap::new();
     let mut last_summary = Instant::now();
     let mut edge_tracker = EdgeTracker::new();
 
-    info!("crypto evaluator started (event-driven)");
+    info!("crypto evaluator started (event-driven, multi-asset)");
 
     loop {
         tokio::select! {
             result = rx.changed() => {
                 if result.is_err() {
-                    // Sender dropped — CryptoState is gone
+                    // Sender dropped — registry is gone
                     break;
                 }
 
                 let eval_start = Instant::now();
-                let snap = crypto_state.snapshot();
 
                 // Periodic 60s summary
                 if last_summary.elapsed() >= Duration::from_secs(60) {
                     let contracts = contract_discovery.active_contracts();
+
+                    // Log per-asset contract counts
+                    let mut asset_counts: HashMap<CryptoAsset, usize> = HashMap::new();
+                    for c in &contracts {
+                        *asset_counts.entry(c.asset).or_default() += 1;
+                    }
+                    let asset_summary: String = asset_counts
+                        .iter()
+                        .map(|(a, n)| format!("{}={}", a.short_name(), n))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+
                     info!(
-                        shadow_rti = %format!("{:.0}", snap.shadow_rti),
-                        rti_reliable = snap.rti_reliable,
                         contract_count = contracts.len(),
-                        dvol = %format!("{:.1}", snap.dvol),
+                        assets = %asset_summary,
+                        enabled_assets = ?registry.enabled_assets(),
                         "crypto eval: 60s summary"
                     );
                     last_summary = Instant::now();
@@ -295,12 +307,6 @@ pub async fn run(
                     });
                 }
 
-                // Skip if we don't have meaningful state yet
-                if snap.shadow_rti <= 0.0 {
-                    trace!(shadow_rti = %snap.shadow_rti, "crypto eval: skipping, shadow_rti <= 0");
-                    continue;
-                }
-
                 let contracts = contract_discovery.active_contracts();
                 if contracts.is_empty() {
                     trace!("crypto eval: skipping, no active contracts");
@@ -308,6 +314,16 @@ pub async fn run(
                 }
 
                 for contract in &contracts {
+                    // Get the per-asset CryptoState
+                    let asset_state = match registry.get(contract.asset) {
+                        Some(s) => s,
+                        None => continue, // asset not enabled
+                    };
+                    let snap = asset_state.snapshot();
+                    if snap.shadow_rti <= 0.0 {
+                        continue; // no price data yet for this asset
+                    }
+
                     // Per-ticker debounce
                     if let Some(last) = last_eval.get(&contract.ticker) {
                         if last.elapsed().as_millis() < DEBOUNCE_MS {
@@ -323,6 +339,8 @@ pub async fn run(
                     if minutes_remaining <= 0.0 {
                         continue;
                     }
+
+                    let asset_config = AssetConfig::for_asset(contract.asset);
 
                     match contract_phase(minutes_remaining, config.crypto_entry_min_minutes, config.crypto_entry_max_minutes) {
                         ContractPhase::Eligible => {
@@ -344,9 +362,10 @@ pub async fn run(
                                 &pool,
                                 &redis,
                                 &nats,
-                                &crypto_state,
+                                asset_state,
                                 &mut edge_tracker,
                                 &decision_writer,
+                                &asset_config,
                             )
                             .await;
                         }
@@ -362,7 +381,8 @@ pub async fn run(
                                 &kalshi,
                                 &pool,
                                 &redis,
-                                &crypto_state,
+                                asset_state,
+                                &asset_config,
                             )
                             .await;
                         }
@@ -410,6 +430,7 @@ async fn evaluate_entry(
     crypto_state: &CryptoState,
     edge_tracker: &mut EdgeTracker,
     decision_writer: &DecisionLogWriter,
+    asset_config: &AssetConfig,
 ) {
     let eval_start = Instant::now();
 
@@ -521,7 +542,7 @@ async fn evaluate_entry(
         let dir_sign = if price_momentum >= 0.0 { 1.0 } else { -1.0 };
         let surge_aligned = volume_surge && (tape_data.0 * dir_sign) > 0.0;
 
-        crypto_fv::compute_directional_fair_value(
+        crypto_fv::compute_directional_fair_value_with_config(
             snap,
             minutes_remaining,
             price_momentum,
@@ -529,10 +550,11 @@ async fn evaluate_entry(
             tape_data.1,     // vwap_deviation
             order_imbalance, // depth_imbalance
             surge_aligned,
+            asset_config,
         )
     } else {
         // Strike-based contracts — standard N(d2) model
-        crypto_fv::compute_crypto_fair_value(snap, contract.strike, minutes_remaining)
+        crypto_fv::compute_crypto_fair_value_with_config(snap, contract.strike, minutes_remaining, asset_config)
     };
 
     // 3. Check confidence
@@ -958,6 +980,7 @@ async fn evaluate_exit(
     pool: &sqlx::PgPool,
     redis: &fred::clients::Client,
     crypto_state: &CryptoState,
+    asset_config: &AssetConfig,
 ) {
     // Check if we hold a position on this ticker
     let (has_pos, held_direction) = {
@@ -1015,7 +1038,7 @@ async fn evaluate_exit(
         };
         let dir_sign = if price_momentum >= 0.0 { 1.0 } else { -1.0 };
         let surge_aligned = volume_surge && (tape_data.0 * dir_sign) > 0.0;
-        crypto_fv::compute_directional_fair_value(
+        crypto_fv::compute_directional_fair_value_with_config(
             snap,
             minutes_remaining,
             price_momentum,
@@ -1023,9 +1046,10 @@ async fn evaluate_exit(
             tape_data.1,
             order_imbalance,
             surge_aligned,
+            asset_config,
         )
     } else {
-        crypto_fv::compute_crypto_fair_value(snap, contract.strike, minutes_remaining)
+        crypto_fv::compute_crypto_fair_value_with_config(snap, contract.strike, minutes_remaining, asset_config)
     };
 
     // Check if edge has flipped

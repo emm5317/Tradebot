@@ -13,10 +13,22 @@ use tracing::warn;
 /// Per-feed staleness thresholds.
 const THRESHOLDS: &[(&str, u64)] = &[
     ("kalshi_ws", 5),
+    // Legacy BTC names (backward compat)
     ("coinbase", 5),
     ("binance_spot", 10),
     ("binance_futures", 5),
     ("deribit", 10),
+    // Per-asset feed names (Phase 13)
+    ("coinbase_btc", 5),
+    ("coinbase_eth", 5),
+    ("coinbase_sol", 5),
+    ("coinbase_xrp", 5),
+    ("coinbase_doge", 5),
+    ("binance_spot_btc", 10),
+    ("binance_spot_eth", 10),
+    ("binance_spot_sol", 10),
+    ("binance_spot_xrp", 10),
+    ("binance_spot_doge", 10),
 ];
 
 /// Required feeds per strategy.
@@ -39,6 +51,16 @@ const P50_THRESHOLDS: &[(&str, u64)] = &[
     ("binance_spot", 1),
     ("binance_futures", 1),
     ("deribit", 5),
+    ("coinbase_btc", 1),
+    ("coinbase_eth", 1),
+    ("coinbase_sol", 1),
+    ("coinbase_xrp", 1),
+    ("coinbase_doge", 1),
+    ("binance_spot_btc", 1),
+    ("binance_spot_eth", 1),
+    ("binance_spot_sol", 1),
+    ("binance_spot_xrp", 1),
+    ("binance_spot_doge", 1),
 ];
 
 impl FeedHealth {

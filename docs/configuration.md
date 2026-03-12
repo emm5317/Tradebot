@@ -71,6 +71,18 @@ All configuration is via environment variables. See `config/.env.example` for th
 | `CRYPTO_COOLDOWN_SECS` | Per-ticker cooldown after trade | `30` |
 | `WEATHER_COOLDOWN_SECS` | Per-ticker cooldown for weather | `120` |
 
+### Multi-Asset Crypto
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ENABLE_CRYPTO_BTC` | Enable BTC contract trading | `true` |
+| `ENABLE_CRYPTO_ETH` | Enable ETH contract trading | `false` |
+| `ENABLE_CRYPTO_SOL` | Enable SOL contract trading | `false` |
+| `ENABLE_CRYPTO_XRP` | Enable XRP contract trading | `false` |
+| `ENABLE_CRYPTO_DOGE` | Enable DOGE contract trading | `false` |
+
+Each enabled asset gets its own CryptoState, Coinbase product subscription, and Binance spot stream. Binance futures and Deribit DVOL are BTC-only regardless of these flags. Per-asset feed health is tracked as `coinbase_{asset}` and `binance_spot_{asset}`.
+
 ### Kill Switches
 
 | Variable | Description | Default |
