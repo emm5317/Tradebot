@@ -58,11 +58,11 @@ impl ContractDiscovery {
                    c.title
             FROM contracts c
             LEFT JOIN contract_rules cr ON cr.market_ticker = c.ticker
-            WHERE c.status = 'active'
+            WHERE c.status IN ('active', 'initialized', 'open')
               AND (c.category ILIKE '%crypto%' OR c.category ILIKE '%bitcoin%' OR c.category ILIKE '%btc%'
                    OR cr.contract_type = 'crypto_binary')
               AND c.settlement_time > now()
-              AND c.settlement_time < now() + interval '30 minutes'
+              AND c.settlement_time < now() + interval '65 minutes'
             ORDER BY c.settlement_time
             "#,
         )

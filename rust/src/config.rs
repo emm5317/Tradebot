@@ -109,11 +109,11 @@ fn default_deribit_ws_url() -> String {
 }
 
 fn default_crypto_entry_min_minutes() -> f64 {
-    3.0
+    0.17 // ~10 seconds before close
 }
 
 fn default_crypto_entry_max_minutes() -> f64 {
-    20.0
+    55.0
 }
 
 fn default_crypto_min_edge() -> f64 {
