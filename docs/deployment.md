@@ -126,10 +126,20 @@ Bloomberg terminal-style UI with 6 pages:
 - **RISK** — Exposure bars, kill switches, feed health matrix
 - **WEAT** — Station cards, HRRR skill heatmap, settlement outcomes
 
+### Health Endpoints (Rust binary, port 3030)
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health/live` | Liveness probe — always returns 200 if process is running |
+| `GET /health/ready` | Readiness probe — checks DB, Redis, NATS, feed connectivity |
+| `GET /metrics` | Prometheus metrics (eval latency, order counts, feed health scores) |
+
 ### Health Check
 
 ```bash
 just health          # curl localhost:8050/api/health
+curl localhost:3030/health/ready   # Readiness probe
+curl localhost:3030/metrics        # Prometheus metrics
 just ps              # Docker container status
 just logs            # Follow tradebot logs
 just logs-all        # Follow all container logs
@@ -139,7 +149,7 @@ just logs-all        # Follow all container logs
 
 ### Migrations
 
-23 SQL migrations (000-022) in `migrations/`. All use `IF NOT EXISTS` / `ON CONFLICT` — safe to re-run.
+23 SQL migrations (000-022) in `migrations/`. All use `IF NOT EXISTS` / `ON CONFLICT` — safe to re-run. Migrations run automatically on container startup via the `migrate` service.
 
 ```bash
 just migrate         # Run all migrations

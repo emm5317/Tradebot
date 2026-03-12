@@ -9,7 +9,7 @@ Brief description of what this PR does and why.
 
 ## Test Plan
 
-- [ ] `just test-all` passes (354 tests)
+- [ ] `just test-all` passes (590 tests)
 - [ ] `just fmt-check` passes
 - [ ] `just clippy` passes
 - [ ] New tests added for changed behavior

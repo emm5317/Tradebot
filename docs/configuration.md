@@ -64,9 +64,10 @@ All configuration is via environment variables. See `config/.env.example` for th
 |----------|-------------|---------|
 | `CRYPTO_ENTRY_MIN_MINUTES` | Min minutes to expiry for entry | `3.0` |
 | `CRYPTO_ENTRY_MAX_MINUTES` | Max minutes to expiry for entry | `20.0` |
-| `CRYPTO_MIN_EDGE` | Minimum edge to trade | `0.06` |
-| `CRYPTO_MIN_KELLY` | Minimum Kelly fraction | `0.04` |
-| `CRYPTO_MIN_CONFIDENCE` | Minimum model confidence | `0.50` |
+| `CRYPTO_MIN_EDGE` | Minimum edge to trade | `0.03` |
+| `CRYPTO_MAX_EDGE` | Maximum edge (reject as miscalibration above this) | `0.25` |
+| `CRYPTO_MIN_KELLY` | Minimum Kelly fraction | `0.02` |
+| `CRYPTO_MIN_CONFIDENCE` | Minimum model confidence | `0.40` |
 | `CRYPTO_COOLDOWN_SECS` | Per-ticker cooldown after trade | `30` |
 | `WEATHER_COOLDOWN_SECS` | Per-ticker cooldown for weather | `120` |
 

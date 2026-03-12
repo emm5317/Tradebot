@@ -1,8 +1,9 @@
 # Tradebot — Algorithmic Trading Bot for Kalshi Prediction Markets
 
-![Tests](https://img.shields.io/badge/tests-568-brightgreen)
+[![CI](https://github.com/emm5317/Tradebot/actions/workflows/ci.yml/badge.svg)](https://github.com/emm5317/Tradebot/actions/workflows/ci.yml)
+![Tests](https://img.shields.io/badge/tests-590-brightgreen)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 ![Exchange](https://img.shields.io/badge/exchange-Kalshi-purple)
 
@@ -10,7 +11,7 @@ Algorithmic trading system for [Kalshi](https://kalshi.com) prediction markets. 
 
 Built with **Rust** (low-latency execution, exchange feeds) and **Python** (signal generation, fair-value models), connected via NATS messaging and Redis state cache.
 
-> **568 tests** (165 Rust + 403 Python) | Paper trading mode for safe development
+> **590 tests** (187 Rust + 403 Python) | Paper trading mode for safe development
 
 ---
 
@@ -37,7 +38,8 @@ Most trading bots follow price action. Tradebot takes a fundamentally different 
 - **Station-specific calibration** — Per-(station, month, hour) sigma, HRRR bias correction, skill-weighted ensemble blending
 - **Kalshi microstructure layer** — Trade tape aggressiveness, spread regime detection, depth imbalance adjustments
 - **Order state machine** — Full 10-state lifecycle tracking with restart recovery and kill switch integration
-- **Risk management** — Kelly criterion sizing, max position limits, daily loss stops, spread-adjusted edge thresholds
+- **Risk management** — Kelly criterion sizing, max position limits, daily loss stops, spread-adjusted edge thresholds, max edge filter for model miscalibration
+- **Production hardening** — Lock poison recovery, graceful shutdown with order draining, task supervision with criticality levels, batch decision logging
 - **Per-strategy analytics** — Brier scoring, P&L attribution with model component tracking, calibration dashboard
 - **Parameter sweep framework** — Grid search over model hyperparameters with walk-forward optimization
 - **Dynamic WS subscription** — Contract discovery drives automatic orderbook feed subscriptions
@@ -244,6 +246,11 @@ Tradebot/
 │       ├── clock.rs              # Clock discipline (HTTP Date header sync)
 │       ├── dead_letter.rs        # Dead-letter handling (NATS + DB persistence)
 │       ├── contract_discovery.rs # Contract enumeration from DB
+│       ├── lock_ext.rs            # RwLock poison recovery (RwLockExt trait)
+│       ├── supervisor.rs          # Task supervision with criticality levels
+│       ├── metrics_registry.rs    # Prometheus metrics recorder + constants
+│       ├── health.rs              # Liveness, readiness, and Prometheus endpoints
+│       ├── discord.rs             # Fire-and-forget Discord webhook alerts
 │       ├── integration_tests.rs  # Integration test scenarios
 │       ├── feeds/                # External exchange WebSocket feeds
 │       │   ├── coinbase.rs       # Coinbase BTC-USD level2 + trade volume
@@ -321,20 +328,27 @@ Tradebot/
 | 11.2 | SGNL + EXEC pages (signal log, execution metrics, latency histogram) | Complete |
 | 11.3 | ANAL + RISK pages (Brier trend, calibration curve, P&L charts, feed matrix) | Complete |
 | 11.4 | WEAT page (station cards, HRRR skill heatmap, settlement outcomes) | Complete |
+| 12.0a | Lock poison recovery (RwLockExt trait, 12 panic sites eliminated) | Complete |
+| 12.0b | Graceful shutdown with order draining (5-stage shutdown sequence) | Complete |
+| 12.0c | Task supervision with criticality levels (Critical/NonCritical) | Complete |
+| 12.0d | Batch decision log writer (mpsc channel, 100-entry batches) | Complete |
+| 12.0e | Parallel Python I/O (asyncio.gather, Redis MGET, cycle timing) | Complete |
+| 12.1 | Prometheus metrics, health endpoints, Discord alerts | Complete |
+| 12.2 | Crypto model accuracy fixes (orderbook delta complement, tail risk floor/ceiling, max edge filter) | Complete |
 
 ### What's Next
 
-- Phase 12: Live trading transition (production credentials, real order execution)
-- Performance optimization and latency reduction
+- Live trading transition (production credentials, real order execution)
 - Additional asset classes and market types
+- Advanced position management (multi-leg strategies, portfolio optimization)
 
 ## Development Commands
 
 ```bash
 # Testing
-just test              # Rust tests (165 tests)
+just test              # Rust tests (187 tests)
 just test-python       # Python tests (403 tests)
-just test-all          # Both (568 tests)
+just test-all          # Both (590 tests)
 
 # Code quality
 just fmt               # Format Rust code
@@ -369,9 +383,26 @@ just ps                # Docker container status
 - **Python**: asyncio, asyncpg, httpx, pydantic, FastAPI, structlog, pytest, Chart.js
 - **Infrastructure**: PostgreSQL 17/TimescaleDB, Redis 7, NATS 2 (JetStream), Grafana, Docker Compose, just
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Configuration](docs/configuration.md) | Environment variable reference |
+| [Trading Models](docs/trading-models.md) | Fair-value model documentation |
+| [Deployment](docs/deployment.md) | Docker operations guide |
+| [Redis Keys](docs/redis-keys.md) | Redis key structure and data flow |
+| [SQL Reference](docs/sql-reference.md) | Common queries and data exploration |
+| [Changelog](CHANGELOG.md) | Release history |
+
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and guidelines.
+
+Please review the [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
+
+## Security
+
+If you discover a security vulnerability, please see [SECURITY.md](SECURITY.md) for responsible disclosure guidelines. Do not open a public issue for security reports.
 
 ## License
 

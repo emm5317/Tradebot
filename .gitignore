@@ -34,3 +34,14 @@ node_modules/
 package.json
 package-lock.json
 *.png
+
+# Logs
+*.log
+tradebot.log
+
+# Obsidian
+Tradebot/.obsidian/
+Tradebot/
+
+# Docker env overrides
+docker/.env
