@@ -474,6 +474,29 @@ async fn evaluate_entry(
     } else {
         raw_spread
     };
+
+    // 1b. Early reject extreme-price contracts (market ≤2¢ or ≥98¢)
+    // These will always fail the kelly fill_price guard [0.03, 0.97],
+    // so skip the expensive FV/microstructure computation entirely.
+    if mid_price <= 0.02 || mid_price >= 0.98 {
+        debug!(
+            ticker = %contract.ticker,
+            mid = %format!("{:.4}", mid_price),
+            "crypto eval: extreme market price, skipping"
+        );
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "skipped".into(),
+            rejection_reason: Some("extreme_market_price".into()),
+            market_price: Some(mid_price),
+            minutes_remaining: Some(minutes_remaining),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
+        });
+        return;
+    }
+
     let order_imbalance = orderbooks.order_imbalance(&contract.ticker).unwrap_or(0.5);
 
     // 2. Compute fair value
