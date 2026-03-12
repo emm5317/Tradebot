@@ -296,7 +296,10 @@ impl KalshiClient {
 /// Parse Kalshi error response body into typed error.
 fn parse_error_response(status: u16, body: &str) -> KalshiError {
     match status {
-        401 | 403 => KalshiError::AuthFailure,
+        401 | 403 => {
+            tracing::warn!(status, body, "kalshi auth error response body");
+            KalshiError::AuthFailure
+        }
         429 => {
             // Try to parse retry-after from body
             let retry_after = Duration::from_secs(1);

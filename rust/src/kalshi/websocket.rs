@@ -138,7 +138,7 @@ impl KalshiWsFeed {
                     return;
                 }
                 Err(e) => {
-                    error!(error = %e, "kalshi ws disconnected");
+                    error!(error = %e, error_debug = ?e, "kalshi ws disconnected");
                     if tx.send(WsFeedMessage::Disconnected).await.is_err() {
                         warn!("ws feed receiver dropped, stopping");
                         return;
