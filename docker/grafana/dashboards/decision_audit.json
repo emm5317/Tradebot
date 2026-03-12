@@ -42,7 +42,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "datasource": { "uid": "tradebot_pg", "type": "postgres" },
       "targets": [{
-        "rawSql": "SELECT width_bucket(edge, 0, 0.20, 20) AS bucket, ROUND(((width_bucket(edge, 0, 0.20, 20) - 1) * 0.01)::numeric, 2) AS edge_range, COUNT(*) AS count FROM decision_log WHERE $__timeFilter(created_at) AND outcome = 'rejected' AND rejection_reason = 'edge_below_minimum' AND edge IS NOT NULL GROUP BY bucket ORDER BY bucket",
+        "rawSql": "SELECT ROUND(((width_bucket(edge, 0, 0.20, 20) - 1) * 0.01)::numeric, 2)::text AS edge_range, COUNT(*) AS count FROM decision_log WHERE $__timeFilter(created_at) AND outcome = 'rejected' AND rejection_reason = 'edge_below_minimum' AND edge IS NOT NULL GROUP BY 1 ORDER BY 1",
         "format": "table",
         "refId": "A"
       }]
