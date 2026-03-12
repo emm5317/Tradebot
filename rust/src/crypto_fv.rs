@@ -18,11 +18,18 @@ const RISK_FREE_RATE: f64 = 0.05;
 const DEFAULT_VOL: f64 = 0.50;
 
 /// Probability floor — irreducible jump/tail risk.
-const PROB_FLOOR: f64 = 0.02;
+/// BTC can flash-crash or spike; even deep OTM/ITM has meaningful uncertainty.
+const PROB_FLOOR: f64 = 0.10;
 /// Probability ceiling — symmetric.
-const PROB_CEILING: f64 = 0.98;
+const PROB_CEILING: f64 = 0.90;
 /// BTC excess kurtosis over normal (empirically 7-12).
 const EXCESS_KURTOSIS: f64 = 7.0;
+
+/// Volatility multiplier for binary option pricing.
+/// GBM realized vol underestimates short-term tail risk for BTC binary options.
+/// This accounts for jump risk, fat tails, and microstructure noise.
+/// With 2.5x: $500 ITM → ~0.69, $1K ITM → ~0.84, ATM → ~0.50 (vs 0.998/0.998/0.50 raw).
+const BINARY_VOL_MULTIPLIER: f64 = 2.5;
 
 /// CFB RTI averaging window duration in seconds.
 const RTI_WINDOW_SECS: f64 = 60.0;
@@ -60,7 +67,8 @@ pub fn compute_crypto_fair_value(
     minutes_remaining: f64,
 ) -> CryptoFairValue {
     let shadow_rti = state.shadow_rti;
-    let vol = estimate_volatility(state);
+    let base_vol = estimate_volatility(state);
+    let vol = base_vol * BINARY_VOL_MULTIPLIER;
 
     let seconds_remaining = (minutes_remaining * 60.0).max(0.01);
 
@@ -118,7 +126,7 @@ pub fn compute_crypto_fair_value(
     CryptoFairValue {
         probability: p_final,
         shadow_rti,
-        vol_used: vol,
+        vol_used: vol, // includes BINARY_VOL_MULTIPLIER
         basis,
         basis_signal,
         funding_signal,
@@ -465,10 +473,10 @@ mod tests {
 
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 94000.0, 0.0);
-        assert!(fv.probability > 0.9, "ITM at expiry should be ~1.0");
+        assert!(fv.probability >= PROB_CEILING, "ITM at expiry should be at ceiling, got {}", fv.probability);
 
         let fv = compute_crypto_fair_value(&snap, 96000.0, 0.0);
-        assert!(fv.probability < 0.1, "OTM at expiry should be ~0.0");
+        assert!(fv.probability <= PROB_FLOOR, "OTM at expiry should be at floor, got {}", fv.probability);
     }
 
     #[test]
@@ -663,8 +671,9 @@ mod tests {
     #[test]
     fn test_levy_partial_window_strike_shift() {
         // Use ATM-ish strike so probabilities are in a sensitive range
+        // With vol multiplier, use very small moneyness to stay within [FLOOR, CEILING]
         let spot = 95000.0;
-        let strike = 94950.0; // slightly ITM
+        let strike = 94999.0; // barely ITM ($1)
         let vol = 0.50;
 
         // Full window: 60s remaining, alpha=0 (nothing observed yet)
@@ -724,13 +733,13 @@ mod tests {
     fn test_levy_deterministic_at_expiry() {
         let spot = 95000.0;
 
-        // ITM at expiry → ~1.0
+        // ITM at expiry → capped at PROB_CEILING
         let p = compute_settlement_probability(spot, 94000.0, 0.001, 0.50);
-        assert!(p > 0.95, "ITM at expiry should be ~1.0, got {}", p);
+        assert!(p >= PROB_CEILING, "ITM at expiry should be at ceiling, got {}", p);
 
-        // OTM at expiry → ~0.0
+        // OTM at expiry → floored at PROB_FLOOR
         let p = compute_settlement_probability(spot, 96000.0, 0.001, 0.50);
-        assert!(p < 0.05, "OTM at expiry should be ~0.0, got {}", p);
+        assert!(p <= PROB_FLOOR, "OTM at expiry should be at floor, got {}", p);
     }
 
     // --- Directional model tests ---
@@ -839,9 +848,9 @@ mod tests {
     #[test]
     fn test_levy_effective_strike_exceeds() {
         // When observed average * alpha already exceeds strike, k_eff ≤ 0
-        // Should return high probability
+        // Should return high probability (capped at PROB_CEILING by levy clamp)
         let p = levy_averaging_prob(100000.0, 90000.0, 5.0, 0.50);
-        assert!(p > 0.95, "k_eff<=0 should give high prob, got {}", p);
+        assert!(p >= PROB_CEILING, "k_eff<=0 should give high prob, got {}", p);
     }
 
     #[test]
@@ -946,6 +955,48 @@ mod tests {
             fv.probability >= PROB_FLOOR,
             "Deep OTM bracket should be floored at {}, got {}",
             PROB_FLOOR,
+            fv.probability
+        );
+    }
+
+    #[test]
+    fn test_vol_multiplier_calibration() {
+        // With 2.5x vol multiplier, probabilities should be spread across a reasonable range
+        // instead of clustering at 0.998
+        let cs = CryptoState::new();
+        cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
+        cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
+        let snap = cs.snapshot();
+
+        // $500 ITM (strike 94500) at 30 min — should be ~0.65-0.75 (not 0.998)
+        let fv = compute_crypto_fair_value(&snap, 94500.0, 30.0);
+        assert!(
+            fv.probability > 0.55 && fv.probability < 0.85,
+            "$500 ITM should be moderate prob, got {}",
+            fv.probability
+        );
+
+        // $1000 ITM (strike 94000) at 30 min — should be ~0.75-0.90
+        let fv = compute_crypto_fair_value(&snap, 94000.0, 30.0);
+        assert!(
+            fv.probability > 0.70 && fv.probability <= PROB_CEILING,
+            "$1K ITM should be high-moderate prob, got {}",
+            fv.probability
+        );
+
+        // $500 OTM (strike 95500) at 30 min — should be ~0.25-0.45
+        let fv = compute_crypto_fair_value(&snap, 95500.0, 30.0);
+        assert!(
+            fv.probability > 0.15 && fv.probability < 0.45,
+            "$500 OTM should be moderate-low prob, got {}",
+            fv.probability
+        );
+
+        // ATM — should still be ~0.50
+        let fv = compute_crypto_fair_value(&snap, 95000.0, 30.0);
+        assert!(
+            (fv.probability - 0.50).abs() < 0.10,
+            "ATM should be near 0.50, got {}",
             fv.probability
         );
     }

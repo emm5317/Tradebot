@@ -358,7 +358,7 @@ class Backtester:
                 FROM observations
                 WHERE source = 'binance'
                   AND observed_at <= $1
-                  AND observed_at > $1 - interval '5 minutes'
+                  AND observed_at > $1 - interval '15 minutes'
                 ORDER BY observed_at DESC
                 LIMIT 1
                 """,

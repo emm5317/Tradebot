@@ -129,7 +129,7 @@ fn default_crypto_min_confidence() -> f64 {
 }
 
 fn default_crypto_max_edge() -> f64 {
-    0.25
+    0.35
 }
 
 fn default_crypto_cooldown_secs() -> u64 {
@@ -141,7 +141,7 @@ fn default_weather_cooldown_secs() -> u64 {
 }
 
 fn default_crypto_max_market_disagreement() -> f64 {
-    0.25
+    0.35
 }
 
 fn default_crypto_directional_min_conviction() -> f64 {

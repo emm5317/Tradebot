@@ -87,18 +87,19 @@ class TestLevyAveragingProb:
 
     def test_half_window_itm(self) -> None:
         """Half window elapsed with spot > strike → higher prob."""
-        p_full = _levy_averaging_prob(95200, 95000, 60.0, 0.50)
-        p_half = _levy_averaging_prob(95200, 95000, 30.0, 0.50)
+        # Use barely ITM to avoid both hitting PROB_CEILING
+        p_full = _levy_averaging_prob(95001, 95000, 60.0, 0.50)
+        p_half = _levy_averaging_prob(95001, 95000, 30.0, 0.50)
         assert p_half > p_full
 
     def test_expired(self) -> None:
         p = _levy_averaging_prob(95000, 94000, 0.005, 0.50)
-        assert p > 0.95
+        assert p >= 0.90  # capped at PROB_CEILING
 
     def test_k_eff_negative(self) -> None:
         """When observed avg already exceeds strike contribution."""
         p = _levy_averaging_prob(100000, 90000, 5.0, 0.50)
-        assert p > 0.95
+        assert p >= 0.90  # capped at PROB_CEILING
 
 
 class TestSettlementProbability:
@@ -194,8 +195,8 @@ class TestComputeCryptoFairValue:
         )
         fv = compute_crypto_fair_value(inputs)
 
-        # Verify probability is valid
-        assert 0.01 <= fv.probability <= 0.99, f"{desc}: prob={fv.probability}"
+        # Verify probability is valid (within [PROB_FLOOR, PROB_CEILING])
+        assert 0.10 <= fv.probability <= 0.90, f"{desc}: prob={fv.probability}"
 
         # Verify confidence is valid
         assert 0.0 <= fv.confidence <= 1.0, f"{desc}: confidence={fv.confidence}"

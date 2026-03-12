@@ -56,6 +56,9 @@ _EXIT_MIN_MINUTES = 2.0
 # Max staleness for BTC feed
 _MAX_BTC_STALENESS_SECONDS = 30
 
+# Default annualized vol when realized vol is unavailable
+_DEFAULT_VOL = 0.60
+
 
 class BlackoutWindow:
     """A time window during which crypto signals are suppressed."""
@@ -148,16 +151,10 @@ class CryptoSignalEvaluator:
             model_state.rejection_reason = "btc_feed_stale"
             return None, rejection, model_state
 
-        # 4. Check we have volatility data
+        # 4. Volatility: use realized if available, otherwise default
         if realized_vol is None or realized_vol <= 0:
-            rejection = RejectedSignal(
-                ticker=contract.ticker,
-                signal_type="crypto",
-                rejection_reason="missing_volatility",
-                minutes_remaining=minutes,
-            )
-            model_state.rejection_reason = "missing_volatility"
-            return None, rejection, model_state
+            realized_vol = _DEFAULT_VOL
+            logger.debug("crypto_vol_fallback", ticker=contract.ticker, vol=_DEFAULT_VOL)
 
         # 5. Check strike
         if contract_strike is None or contract_strike <= 0:

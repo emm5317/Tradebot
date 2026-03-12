@@ -64,8 +64,9 @@ def compute_crypto_fair_value(inputs: CryptoInputs) -> CryptoFairValue:
     shadow_rti = _estimate_shadow_rti(inputs)
     components["shadow_rti"] = shadow_rti
 
-    # --- Step 2: Volatility estimate ---
-    vol = _estimate_volatility(inputs)
+    # --- Step 2: Volatility estimate (with jump risk multiplier) ---
+    base_vol = _estimate_volatility(inputs)
+    vol = base_vol * _BINARY_VOL_MULTIPLIER
     components["vol_annualized"] = vol
 
     # --- Step 3: Time-scaled volatility ---
@@ -103,7 +104,7 @@ def compute_crypto_fair_value(inputs: CryptoInputs) -> CryptoFairValue:
 
     # --- Step 7: Combine ---
     p_adjusted = p_core + basis_signal + funding_signal
-    p_final = max(0.01, min(0.99, p_adjusted))
+    p_final = max(_PROB_FLOOR, min(_PROB_CEILING, p_adjusted))
 
     # --- Step 9: Confidence ---
     confidence = 0.5
@@ -182,6 +183,12 @@ _TRANSITION_SECS = 240.0
 _SECONDS_PER_YEAR = 525_600.0 * 60.0
 _RISK_FREE_RATE = 0.05
 
+# Volatility multiplier for binary option pricing — accounts for BTC jump risk/fat tails.
+_BINARY_VOL_MULTIPLIER = 2.5
+# Probability floor/ceiling — irreducible jump/tail risk for BTC.
+_PROB_FLOOR = 0.10
+_PROB_CEILING = 0.90
+
 
 def _compute_settlement_probability(spot: float, strike: float, seconds_remaining: float, vol: float) -> float:
     """Settlement-aware probability using Levy averaging near expiry."""
@@ -211,7 +218,7 @@ def _standard_binary_prob(spot: float, strike: float, seconds_remaining: float, 
     if vol_period <= 0:
         return 1.0 if spot >= strike else 0.0
     d2 = (math.log(spot / strike) + (_RISK_FREE_RATE - 0.5 * vol * vol) * t) / (vol * math.sqrt(t))
-    return _norm_cdf(d2)
+    return max(_PROB_FLOOR, min(_PROB_CEILING, _norm_cdf(d2)))
 
 
 def _levy_averaging_prob(spot: float, strike: float, seconds_remaining: float, vol: float) -> float:
@@ -238,7 +245,7 @@ def _levy_averaging_prob(spot: float, strike: float, seconds_remaining: float, v
         return 1.0 if spot >= k_eff else 0.0
 
     d2 = (math.log(spot / k_eff) + (_RISK_FREE_RATE - vol * vol / 6.0) * tau) / vol_avg
-    return _norm_cdf(d2)
+    return max(_PROB_FLOOR, min(_PROB_CEILING, _norm_cdf(d2)))
 
 
 def _norm_cdf(x: float) -> float:

@@ -25,9 +25,9 @@ class TestCryptoThresholdGrid:
         assert "kelly_multiplier" in CRYPTO_THRESHOLD_GRID
 
     def test_grid_produces_combinations(self):
-        combos = _generate_combinations(CRYPTO_THRESHOLD_GRID, 500)
-        # 5 × 4 × 4 × 4 = 320
-        assert len(combos) == 320
+        combos = _generate_combinations(CRYPTO_THRESHOLD_GRID, 1000)
+        # 5 × 4 × 3 × 3 × 4 = 720
+        assert len(combos) == 720
 
     def test_max_combos_cap(self):
         combos = _generate_combinations(CRYPTO_THRESHOLD_GRID, 50)
