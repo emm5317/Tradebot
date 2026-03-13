@@ -1,0 +1,343 @@
+{
+  "uid": "tradebot-execution-spreads",
+  "title": "Execution & Spreads",
+  "tags": ["tradebot"],
+  "timezone": "utc",
+  "refresh": "30s",
+  "time": { "from": "now-12h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Trades Today",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT COUNT(*) AS trades FROM orders WHERE status = 'filled' AND filled_at >= CURRENT_DATE",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "green", "value": 10 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Win Rate %",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT ROUND(100.0 * SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN outcome IN ('win','loss') THEN 1 ELSE 0 END), 0), 1) AS win_rate FROM orders WHERE filled_at >= CURRENT_DATE",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 45 },
+              { "color": "green", "value": 55 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Avg Slippage (cents)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT ROUND(AVG(ABS(fill_price - limit_price)) * 100, 2) AS avg_slippage_cents FROM orders WHERE status = 'filled' AND fill_price IS NOT NULL AND limit_price IS NOT NULL AND filled_at >= CURRENT_DATE",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Avg Latency (ms)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT ROUND(AVG(latency_ms)::numeric, 1) AS avg_latency FROM orders WHERE status = 'filled' AND latency_ms IS NOT NULL AND filled_at >= CURRENT_DATE",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 200 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "P&L Today ($)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT COALESCE(SUM(pnl_cents), 0) / 100.0 AS pnl_dollars FROM orders WHERE pnl_cents IS NOT NULL AND settled_at >= CURRENT_DATE",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 0 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Per-Asset Trades",
+      "type": "bargauge",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT CASE WHEN ticker LIKE 'KXBTC%' THEN 'BTC' WHEN ticker LIKE 'KXETH%' THEN 'ETH' WHEN ticker LIKE 'KXSOL%' THEN 'SOL' WHEN ticker LIKE 'KXXRP%' THEN 'XRP' WHEN ticker LIKE 'KXDOGE%' OR ticker LIKE 'KXDOG%' THEN 'DOGE' ELSE 'Weather' END AS asset, COUNT(*) AS trades FROM orders WHERE status = 'filled' AND filled_at >= CURRENT_DATE GROUP BY 1 ORDER BY trades DESC",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      }
+    },
+    {
+      "id": 7,
+      "title": "Trade Execution Timeline",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 4 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT filled_at AS time, fill_price FROM orders WHERE $__timeFilter(filled_at) AND status = 'filled' AND fill_price IS NOT NULL ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        },
+        {
+          "rawSql": "SELECT o.filled_at AS time, s.model_prob FROM orders o JOIN signals s ON o.signal_id = s.id WHERE $__timeFilter(o.filled_at) AND o.status = 'filled' AND s.model_prob IS NOT NULL ORDER BY 1",
+          "format": "time_series",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "points", "pointSize": 6 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "fill_price" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "model_prob" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "title": "Spread Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 4 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT $__timeGroup(captured_at, '1m') AS time, AVG(spread) AS avg_spread FROM market_snapshots WHERE $__timeFilter(captured_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        },
+        {
+          "rawSql": "SELECT $__timeGroup(captured_at, '1m') AS time, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY spread) AS p95_spread FROM market_snapshots WHERE $__timeFilter(captured_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 10 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "p95_spread" },
+            "properties": [
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } },
+              { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "title": "Slippage Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT filled_at AS time, (fill_price - limit_price) * 100 AS slippage_cents FROM orders WHERE $__timeFilter(filled_at) AND status = 'filled' AND fill_price IS NOT NULL AND limit_price IS NOT NULL ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "points", "pointSize": 5 },
+          "color": { "mode": "continuous-GrYlRd" }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Latency Distribution",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT CASE WHEN latency_ms < 50 THEN '0-50' WHEN latency_ms < 100 THEN '50-100' WHEN latency_ms < 200 THEN '100-200' WHEN latency_ms < 500 THEN '200-500' WHEN latency_ms < 1000 THEN '500-1000' ELSE '1000+' END AS bucket, COUNT(*) AS count FROM orders WHERE $__timeFilter(filled_at) AND status = 'filled' AND latency_ms IS NOT NULL GROUP BY 1 ORDER BY MIN(latency_ms)",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Edge Capture: Expected vs Realized",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT $__timeGroup(o.filled_at, '1h') AS time, AVG(s.edge) AS avg_expected_edge FROM orders o JOIN signals s ON o.signal_id = s.id WHERE $__timeFilter(o.filled_at) AND o.status = 'filled' GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        },
+        {
+          "rawSql": "SELECT $__timeGroup(filled_at, '1h') AS time, AVG(pnl_cents) / 100.0 AS avg_realized_pnl FROM orders WHERE $__timeFilter(filled_at) AND status = 'filled' AND pnl_cents IS NOT NULL GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "avg_expected_edge" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "avg_realized_pnl" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          }
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "title": "Per-Asset P&L Breakdown",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT CASE WHEN ticker LIKE 'KXBTC%' THEN 'BTC' WHEN ticker LIKE 'KXETH%' THEN 'ETH' WHEN ticker LIKE 'KXSOL%' THEN 'SOL' WHEN ticker LIKE 'KXXRP%' THEN 'XRP' WHEN ticker LIKE 'KXDOGE%' OR ticker LIKE 'KXDOG%' THEN 'DOGE' ELSE 'Weather' END AS asset, COALESCE(SUM(pnl_cents), 0) / 100.0 AS pnl_dollars, COUNT(*) AS trades, ROUND(100.0 * SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN outcome IN ('win','loss') THEN 1 ELSE 0 END), 0), 1) AS win_pct FROM orders WHERE $__timeFilter(filled_at) AND status = 'filled' GROUP BY 1 ORDER BY pnl_dollars DESC",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Recent Trade Executions",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT o.filled_at, o.ticker, o.direction, ROUND(o.limit_price::numeric, 3) AS limit_price, ROUND(o.fill_price::numeric, 3) AS fill_price, ROUND(s.model_prob::numeric, 3) AS model_prob, ROUND(((o.fill_price - o.limit_price) * 100)::numeric, 2) AS slip_cents, ROUND(o.latency_ms::numeric, 1) AS latency_ms, o.outcome, o.pnl_cents, ROUND(s.edge::numeric, 4) AS edge, ROUND(s.kelly_fraction::numeric, 4) AS kelly FROM orders o LEFT JOIN signals s ON o.signal_id = s.id WHERE o.status = 'filled' AND o.filled_at IS NOT NULL ORDER BY o.filled_at DESC LIMIT 100",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "outcome" },
+            "properties": [{
+              "id": "custom.displayMode",
+              "value": "color-text"
+            }, {
+              "id": "mappings",
+              "value": [
+                { "type": "value", "options": { "win": { "color": "green", "text": "win" }, "loss": { "color": "red", "text": "loss" }, "pending": { "color": "blue", "text": "pending" } } }
+              ]
+            }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "pnl_cents" },
+            "properties": [{
+              "id": "custom.displayMode",
+              "value": "color-text"
+            }, {
+              "id": "thresholds",
+              "value": {
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "green", "value": 0 }
+                ]
+              }
+            }]
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 39
+}

@@ -88,6 +88,29 @@
           }
         ]
       }
+    },
+    {
+      "id": 6,
+      "title": "Microstructure Breakdown",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 26 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT $__timeGroup(created_at, '15m') AS time, AVG(micro_trade) AS micro_trade, AVG(micro_spread) AS micro_spread, AVG(micro_depth) AS micro_depth, AVG(micro_vwap) AS micro_vwap, AVG(micro_momentum) AS micro_momentum, AVG(micro_vol_surge) AS micro_vol_surge FROM decision_log WHERE $__timeFilter(created_at) AND outcome = 'signal' AND micro_total IS NOT NULL GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 30,
+            "stacking": { "mode": "normal" },
+            "lineWidth": 1
+          }
+        }
+      }
     }
   ],
   "schemaVersion": 39

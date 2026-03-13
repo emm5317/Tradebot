@@ -102,10 +102,95 @@
       }
     },
     {
+      "id": 7,
+      "title": "Trades Per Hour",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT $__timeGroup(o.filled_at, '1h') AS time, s.signal_type, COUNT(*) AS fills FROM orders o JOIN signals s ON o.signal_id = s.id WHERE $__timeFilter(o.filled_at) AND o.status = 'filled' GROUP BY 1, s.signal_type ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Spread at Trade Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT $__timeGroup(captured_at, '5m') AS time, AVG(spread) AS avg_spread FROM market_snapshots WHERE $__timeFilter(captured_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        },
+        {
+          "rawSql": "SELECT o.filled_at AS time, ms.spread AS spread_at_fill FROM orders o LEFT JOIN LATERAL (SELECT spread FROM market_snapshots ms WHERE ms.ticker = o.ticker AND ms.captured_at <= o.filled_at ORDER BY ms.captured_at DESC LIMIT 1) ms ON true WHERE $__timeFilter(o.filled_at) AND o.status = 'filled' ORDER BY 1",
+          "format": "time_series",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "avg_spread" },
+            "properties": [
+              { "id": "custom.fillOpacity", "value": 10 },
+              { "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "spread_at_fill" },
+            "properties": [
+              { "id": "custom.drawStyle", "value": "points" },
+              { "id": "custom.pointSize", "value": 6 },
+              { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "title": "Open Positions",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT o.ticker, c.title, o.direction, ROUND(o.fill_price::numeric, 3) AS fill_price, ROUND(c.minutes_to_settlement::numeric, 0) AS mins_to_settle, o.filled_at FROM orders o JOIN contracts c ON o.ticker = c.ticker WHERE o.status = 'filled' AND o.outcome = 'pending' AND c.status = 'active' ORDER BY c.minutes_to_settlement ASC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 10,
+      "title": "Daily P&L by Strategy",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "uid": "tradebot_pg", "type": "postgres" },
+      "targets": [{
+        "rawSql": "SELECT date::timestamptz AS time, strategy, realized_pnl_cents / 100.0 AS pnl_dollars FROM strategy_performance WHERE $__timeFilter(date::timestamptz) ORDER BY date",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } },
+          "unit": "currencyUSD"
+        }
+      }
+    },
+    {
       "id": 6,
       "title": "Recent Signals",
       "type": "table",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
       "datasource": { "uid": "tradebot_pg", "type": "postgres" },
       "targets": [{
         "rawSql": "SELECT created_at, ticker, signal_type, direction, ROUND(model_prob::numeric, 3) AS model_prob, ROUND(market_price::numeric, 3) AS market_price, ROUND(edge::numeric, 4) AS edge, ROUND(kelly_fraction::numeric, 4) AS kelly, acted_on, rejection_reason FROM signals WHERE $__timeFilter(created_at) ORDER BY created_at DESC LIMIT 50",

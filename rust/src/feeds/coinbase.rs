@@ -131,13 +131,13 @@ impl CoinbaseFeed {
             .map(|a| (a.coinbase_product_id(), *a))
             .collect();
 
-        let subscribe_l2 = serde_json::json!({
+        let subscribe_ticker = serde_json::json!({
             "type": "subscribe",
             "product_ids": product_ids,
-            "channel": "level2"
+            "channel": "ticker"
         });
         write
-            .send(Message::Text(subscribe_l2.to_string().into()))
+            .send(Message::Text(subscribe_ticker.to_string().into()))
             .await?;
 
         let subscribe_trades = serde_json::json!({
@@ -214,52 +214,48 @@ fn parse_coinbase_message_multi(
     let channel = msg.get("channel").and_then(|v| v.as_str()).unwrap_or("");
 
     match channel {
-        "l2_data" => {
+        "ticker" | "ticker_batch" => {
             if let Some(events) = msg.get("events").and_then(|v| v.as_array()) {
-                // Extract product_id from the event
-                let product_id = events
-                    .first()
-                    .and_then(|e| e.get("product_id"))
-                    .and_then(|v| v.as_str());
-
-                let asset = product_id.and_then(|pid| product_map.get(pid)).copied();
-
-                if let Some(asset) = asset {
-                    if let Some(state) = states.get_mut(&asset) {
-                        for event in events {
-                            if let Some(updates) = event.get("updates").and_then(|v| v.as_array()) {
-                                for update in updates {
-                                    let side = update.get("side").and_then(|v| v.as_str()).unwrap_or("");
-                                    let price: f64 = update
-                                        .get("price_level")
+                for event in events {
+                    if let Some(tickers) = event.get("tickers").and_then(|v| v.as_array()) {
+                        for ticker in tickers {
+                            let product_id = ticker.get("product_id").and_then(|v| v.as_str());
+                            let asset = product_id.and_then(|pid| product_map.get(pid)).copied();
+                            if let Some(asset) = asset {
+                                if let Some(state) = states.get_mut(&asset) {
+                                    if let Some(price) = ticker
+                                        .get("price")
                                         .and_then(|v| v.as_str())
-                                        .and_then(|s| s.parse().ok())
-                                        .unwrap_or(0.0);
-
-                                    if price > 0.0 {
-                                        match side {
-                                            "bid" => {
-                                                if price > state.best_bid {
-                                                    state.best_bid = price;
-                                                }
-                                            }
-                                            "offer" => {
-                                                if state.best_ask == 0.0 || price < state.best_ask {
-                                                    state.best_ask = price;
-                                                }
-                                            }
-                                            _ => {}
+                                        .and_then(|s| s.parse::<f64>().ok())
+                                    {
+                                        if price > 0.0 {
+                                            state.spot = price;
+                                        }
+                                    }
+                                    if let Some(bid) = ticker
+                                        .get("best_bid")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| s.parse::<f64>().ok())
+                                    {
+                                        if bid > 0.0 {
+                                            state.best_bid = bid;
+                                        }
+                                    }
+                                    if let Some(ask) = ticker
+                                        .get("best_ask")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| s.parse::<f64>().ok())
+                                    {
+                                        if ask > 0.0 {
+                                            state.best_ask = ask;
                                         }
                                     }
                                 }
+                                return Some(asset);
                             }
-                        }
-                        if state.best_bid > 0.0 && state.best_ask > 0.0 {
-                            state.spot = (state.best_bid + state.best_ask) / 2.0;
                         }
                     }
                 }
-                return asset;
             }
         }
         "market_trades" => {
@@ -287,33 +283,6 @@ fn parse_coinbase_message_multi(
                     }
                 }
                 return updated_asset;
-            }
-        }
-        "ticker" | "ticker_batch" => {
-            // Fallback: use ticker price if available
-            if let Some(events) = msg.get("events").and_then(|v| v.as_array()) {
-                for event in events {
-                    if let Some(tickers) = event.get("tickers").and_then(|v| v.as_array()) {
-                        for ticker in tickers {
-                            let product_id = ticker.get("product_id").and_then(|v| v.as_str());
-                            let asset = product_id.and_then(|pid| product_map.get(pid)).copied();
-                            if let Some(asset) = asset {
-                                if let Some(state) = states.get_mut(&asset) {
-                                    if let Some(price) = ticker
-                                        .get("price")
-                                        .and_then(|v| v.as_str())
-                                        .and_then(|s| s.parse::<f64>().ok())
-                                    {
-                                        if price > 0.0 {
-                                            state.spot = price;
-                                        }
-                                    }
-                                }
-                                return Some(asset);
-                            }
-                        }
-                    }
-                }
             }
         }
         _ => {}
@@ -378,35 +347,38 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_l2_bid() {
+    fn test_parse_ticker_btc() {
         let mut states = make_states();
         let product_map = make_product_map();
-        let msg = r#"{"channel":"l2_data","events":[{"type":"update","product_id":"BTC-USD","updates":[{"side":"bid","price_level":"95000.50","new_quantity":"1.5"}]}]}"#;
+        let msg = r#"{"channel":"ticker","events":[{"type":"ticker","tickers":[{"product_id":"BTC-USD","price":"95000.50","best_bid":"95000.00","best_ask":"95001.00"}]}]}"#;
         let asset = parse_coinbase_message_multi(msg, &mut states, &product_map);
         assert_eq!(asset, Some(CryptoAsset::BTC));
-        assert!((states[&CryptoAsset::BTC].best_bid - 95000.50).abs() < 0.01);
+        assert!((states[&CryptoAsset::BTC].spot - 95000.50).abs() < 0.01);
+        assert!((states[&CryptoAsset::BTC].best_bid - 95000.0).abs() < 0.01);
+        assert!((states[&CryptoAsset::BTC].best_ask - 95001.0).abs() < 0.01);
         // ETH should be unchanged
         assert_eq!(states[&CryptoAsset::ETH].best_bid, 0.0);
     }
 
     #[test]
-    fn test_parse_l2_ask() {
+    fn test_parse_ticker_eth() {
         let mut states = make_states();
         let product_map = make_product_map();
-        let msg = r#"{"channel":"l2_data","events":[{"type":"update","product_id":"ETH-USD","updates":[{"side":"offer","price_level":"3500.00","new_quantity":"2.0"}]}]}"#;
+        let msg = r#"{"channel":"ticker","events":[{"type":"ticker","tickers":[{"product_id":"ETH-USD","price":"3500.00","best_bid":"3499.50","best_ask":"3500.50"}]}]}"#;
         let asset = parse_coinbase_message_multi(msg, &mut states, &product_map);
         assert_eq!(asset, Some(CryptoAsset::ETH));
-        assert!((states[&CryptoAsset::ETH].best_ask - 3500.0).abs() < 0.01);
+        assert!((states[&CryptoAsset::ETH].spot - 3500.0).abs() < 0.01);
+        assert!((states[&CryptoAsset::ETH].best_bid - 3499.5).abs() < 0.01);
+        assert!((states[&CryptoAsset::ETH].best_ask - 3500.5).abs() < 0.01);
     }
 
     #[test]
-    fn test_parse_l2_mid_price() {
+    fn test_parse_ticker_batch() {
         let mut states = make_states();
         let product_map = make_product_map();
-        let bid_msg = r#"{"channel":"l2_data","events":[{"type":"update","product_id":"BTC-USD","updates":[{"side":"bid","price_level":"95000.00","new_quantity":"1.0"}]}]}"#;
-        let ask_msg = r#"{"channel":"l2_data","events":[{"type":"update","product_id":"BTC-USD","updates":[{"side":"offer","price_level":"95100.00","new_quantity":"1.0"}]}]}"#;
-        parse_coinbase_message_multi(bid_msg, &mut states, &product_map);
-        parse_coinbase_message_multi(ask_msg, &mut states, &product_map);
+        let msg = r#"{"channel":"ticker_batch","events":[{"type":"ticker","tickers":[{"product_id":"BTC-USD","price":"95050.00","best_bid":"95000.00","best_ask":"95100.00"}]}]}"#;
+        let asset = parse_coinbase_message_multi(msg, &mut states, &product_map);
+        assert_eq!(asset, Some(CryptoAsset::BTC));
         assert!((states[&CryptoAsset::BTC].spot - 95050.0).abs() < 0.01);
     }
 
@@ -417,7 +389,7 @@ mod tests {
         let sub = serde_json::json!({
             "type": "subscribe",
             "product_ids": product_ids,
-            "channel": "level2"
+            "channel": "ticker"
         });
         let sub_str = sub.to_string();
         assert!(sub_str.contains("BTC-USD"));

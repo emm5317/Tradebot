@@ -46,7 +46,7 @@ impl CryptoAsset {
         }
     }
 
-    /// Binance spot trade stream symbol (lowercase).
+    /// Binance.US spot trade stream symbol (lowercase, USDT pairs for combined stream).
     pub fn binance_symbol(&self) -> &'static str {
         match self {
             CryptoAsset::BTC => "btcusdt",
@@ -57,7 +57,7 @@ impl CryptoAsset {
         }
     }
 
-    /// Binance symbol in uppercase (for matching "s" field in trade messages).
+    /// Binance.US symbol in uppercase (for matching "s" field in trade messages).
     pub fn binance_symbol_upper(&self) -> &'static str {
         match self {
             CryptoAsset::BTC => "BTCUSDT",

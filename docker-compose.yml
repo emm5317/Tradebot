@@ -1,0 +1,255 @@
+name: tradebot
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg17
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_DB: tradebot
+      POSTGRES_USER: tradebot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tradebot_dev}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradebot"]
+      interval: 5s
+      retries: 5
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+    restart: "no"
+
+  nats:
+    image: nats:2-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["--jetstream", "--store_dir=/data"]
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      test: ["CMD", "nats-server", "--help"]
+      interval: 5s
+      retries: 5
+    restart: "no"
+
+  migrate:
+    image: timescale/timescaledb:latest-pg17
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: tradebot
+      PGPASSWORD: ${POSTGRES_PASSWORD:-tradebot_dev}
+      PGDATABASE: tradebot
+    volumes:
+      - ./migrations:/migrations:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        for f in /migrations/*.sql; do
+          echo "Applying $$(basename $$f)..."
+          psql -v ON_ERROR_STOP=0 -f "$$f"
+        done
+        echo "All migrations applied."
+    restart: "no"
+
+  tradebot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./.env
+    command: ["tradebot"]
+    ports:
+      - "3030:3030"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://tradebot:${POSTGRES_PASSWORD:-tradebot_dev}@postgres:5432/tradebot
+      DATABASE_POOL_SIZE: 10
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      KALSHI_BASE_URL: ${KALSHI_BASE_URL:-https://api.elections.kalshi.com}
+      KALSHI_PRIVATE_KEY_PATH: /app/${KALSHI_PRIVATE_KEY_PATH:-config/kalshi_prod.pem}
+      KALSHI_WS_URL: ${KALSHI_WS_URL:-wss://api.elections.kalshi.com/trade-api/ws/v2}
+      BINANCE_WS_URL: ${BINANCE_WS_URL:-wss://stream.binance.us:9443/ws/btcusd@trade}
+      BINANCE_SPOT_WS_URL: ${BINANCE_SPOT_WS_URL:-wss://stream.binance.us:9443/ws/btcusd@trade}
+      ENABLE_BINANCE_SPOT: "true"
+      ENABLE_COINBASE: "true"
+      ENABLE_BINANCE_FUTURES: "true"
+      ENABLE_DERIBIT: "true"
+      MESONET_BASE_URL: https://mesonet.agron.iastate.edu
+      PAPER_MODE: "true"
+      MAX_TRADE_SIZE_CENTS: ${MAX_TRADE_SIZE_CENTS:-25000}
+      MAX_DAILY_LOSS_CENTS: ${MAX_DAILY_LOSS_CENTS:-100000}
+      MAX_POSITIONS: ${MAX_POSITIONS:-25}
+      MAX_EXPOSURE_CENTS: ${MAX_EXPOSURE_CENTS:-1000000}
+      KELLY_FRACTION_MULTIPLIER: ${KELLY_FRACTION_MULTIPLIER:-0.25}
+      LOG_LEVEL: info
+      LOG_FORMAT: pretty
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      KILL_SWITCH_ALL: "false"
+      KILL_SWITCH_CRYPTO: "false"
+      KILL_SWITCH_WEATHER: "false"
+      CRYPTO_ENTRY_MIN_MINUTES: 0.17
+      CRYPTO_ENTRY_MAX_MINUTES: 59
+      CRYPTO_MIN_EDGE: 0.02
+      CRYPTO_MAX_EDGE: 0.35
+      CRYPTO_MIN_KELLY: 0.01
+      CRYPTO_MIN_CONFIDENCE: 0.40
+      CRYPTO_COOLDOWN_SECS: 15
+      WEATHER_COOLDOWN_SECS: 120
+      CRYPTO_VOL_MULTIPLIER: 2.0
+      CRYPTO_PROB_CEILING: 0.95
+      CRYPTO_RISK_REWARD_MAX_RATIO: 5.0
+      CRYPTO_KELLY_FILL_MIN: 0.02
+      ENABLE_CRYPTO_BTC: "true"
+      ENABLE_CRYPTO_ETH: "true"
+      ENABLE_CRYPTO_SOL: "true"
+      ENABLE_CRYPTO_XRP: "true"
+      ENABLE_CRYPTO_DOGE: "true"
+      HTTP_PORT: 3030
+    restart: unless-stopped
+
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./.env
+    command: ["python", "-m", "collector.daemon"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://tradebot:${POSTGRES_PASSWORD:-tradebot_dev}@postgres:5432/tradebot
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      KALSHI_BASE_URL: ${KALSHI_BASE_URL:-https://api.elections.kalshi.com}
+      KALSHI_PRIVATE_KEY_PATH: /app/${KALSHI_PRIVATE_KEY_PATH:-config/kalshi_prod.pem}
+      MESONET_BASE_URL: https://mesonet.agron.iastate.edu
+      LOG_LEVEL: info
+    restart: unless-stopped
+
+  evaluator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./.env
+    command: ["python", "-m", "evaluator.daemon"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://tradebot:${POSTGRES_PASSWORD:-tradebot_dev}@postgres:5432/tradebot
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      KALSHI_BASE_URL: ${KALSHI_BASE_URL:-https://api.elections.kalshi.com}
+      KALSHI_PRIVATE_KEY_PATH: /app/${KALSHI_PRIVATE_KEY_PATH:-config/kalshi_prod.pem}
+      MESONET_BASE_URL: https://mesonet.agron.iastate.edu
+      LOG_LEVEL: info
+    restart: unless-stopped
+
+  calibrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./.env
+    command: ["python", "-m", "calibrator.daemon"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://tradebot:${POSTGRES_PASSWORD:-tradebot_dev}@postgres:5432/tradebot
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: info
+    restart: unless-stopped
+
+  contract-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./.env
+    command: ["python", "-m", "sync_contracts", "--active", "--loop", "300"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://tradebot:${POSTGRES_PASSWORD:-tradebot_dev}@postgres:5432/tradebot
+      LOG_LEVEL: info
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:11.4.0
+    ports:
+      - "3033:3033"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      GF_SERVER_HTTP_PORT: "3033"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-tradebot_grafana}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_UNIFIED_ALERTING_ENABLED: "true"
+      GF_ALERTING_ENABLED: "false"
+      GF_LOG_MODE: console
+      GF_LOG_LEVEL: warn
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tradebot_dev}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/etc/grafana/dashboards:ro
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  natsdata:
+  grafanadata:
+
