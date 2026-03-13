@@ -340,7 +340,11 @@ pub async fn run(
                         continue;
                     }
 
-                    let asset_config = AssetConfig::for_asset(contract.asset);
+                    let asset_config = AssetConfig::for_asset_with_overrides(
+                        contract.asset,
+                        config.crypto_vol_multiplier,
+                        config.crypto_prob_ceiling,
+                    );
 
                     match contract_phase(minutes_remaining, config.crypto_entry_min_minutes, config.crypto_entry_max_minutes) {
                         ContractPhase::Eligible => {
@@ -765,8 +769,9 @@ async fn evaluate_entry(
         .and_then(|d| d.to_f64())
         .unwrap_or_else(|| crypto_fv::estimate_fill_price(direction, mid_price, spread));
 
-    // 8. Kelly criterion
-    let kelly = crypto_fv::compute_kelly(fv.probability, fill_price, direction);
+    // 8. Kelly criterion (with configurable fill price bounds)
+    let fill_max = 1.0 - config.crypto_kelly_fill_min;
+    let kelly = crypto_fv::compute_kelly_with_bounds(fv.probability, fill_price, direction, config.crypto_kelly_fill_min, fill_max);
 
     // 8b. Reject trades with terrible risk/reward ratio
     let (win_payout, lose_payout) = if direction == "yes" {
@@ -774,13 +779,14 @@ async fn evaluate_entry(
     } else {
         (fill_price, 1.0 - fill_price)
     };
-    if lose_payout > 4.0 * win_payout {
+    if lose_payout > config.crypto_risk_reward_max_ratio * win_payout {
         debug!(
             ticker = %contract.ticker,
             fill_price = %format!("{:.4}", fill_price),
             win_payout = %format!("{:.4}", win_payout),
             lose_payout = %format!("{:.4}", lose_payout),
-            "crypto eval: bad risk/reward ratio (>4:1)"
+            ratio = config.crypto_risk_reward_max_ratio,
+            "crypto eval: bad risk/reward ratio"
         );
         decision_writer.send(DecisionEntry {
             ticker: contract.ticker.clone(),
@@ -1501,25 +1507,35 @@ mod tests {
 
     #[test]
     fn test_risk_reward_guard_logic() {
-        // YES direction: fill_price=0.85 → win=0.15, lose=0.85 → ratio=5.67 > 4.0 → REJECT
+        let max_ratio = 5.0; // default config value
+
+        // YES direction: fill_price=0.85 → win=0.15, lose=0.85 → ratio=5.67 > 5.0 → REJECT
         let fill_price = 0.85;
         let (win, lose) = (1.0 - fill_price, fill_price);
         assert!(
-            lose > 4.0 * win,
+            lose > max_ratio * win,
             "0.85 YES fill should fail risk/reward: win={win}, lose={lose}"
         );
 
-        // NO direction: fill_price=0.15 → win=0.15, lose=0.85 → ratio=5.67 > 4.0 → REJECT
+        // YES direction: fill_price=0.82 → win=0.18, lose=0.82 → ratio=4.56 < 5.0 → PASS
+        let fill_price = 0.82;
+        let (win, lose) = (1.0 - fill_price, fill_price);
+        assert!(
+            !(lose > max_ratio * win),
+            "0.82 YES fill should pass risk/reward with 5.0 ratio: win={win}, lose={lose}"
+        );
+
+        // NO direction: fill_price=0.15 → win=0.15, lose=0.85 → ratio=5.67 > 5.0 → REJECT
         let fill_price = 0.15;
         let (win, lose) = (fill_price, 1.0 - fill_price);
         assert!(
-            lose > 4.0 * win,
+            lose > max_ratio * win,
             "0.15 NO fill should fail risk/reward: win={win}, lose={lose}"
         );
 
         // YES direction: fill_price=0.50 → win=0.50, lose=0.50 → ratio=1.0 → PASS
         let fill_price = 0.50;
         let (win, lose) = (1.0 - fill_price, fill_price);
-        assert!(!(lose > 4.0 * win), "0.50 YES fill should pass risk/reward");
+        assert!(!(lose > max_ratio * win), "0.50 YES fill should pass risk/reward");
     }
 }

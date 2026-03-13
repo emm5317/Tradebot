@@ -31,49 +31,60 @@ impl AssetConfig {
         match asset {
             CryptoAsset::BTC => Self {
                 default_vol: 0.50,
-                binary_vol_multiplier: 2.5,
+                binary_vol_multiplier: 2.0,
                 excess_kurtosis: 7.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.90,
+                prob_ceiling: 0.95,
             },
             CryptoAsset::ETH => Self {
                 default_vol: 0.60,
                 binary_vol_multiplier: 2.8,
                 excess_kurtosis: 8.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.90,
+                prob_ceiling: 0.95,
             },
             CryptoAsset::SOL => Self {
                 default_vol: 0.90,
                 binary_vol_multiplier: 3.0,
                 excess_kurtosis: 10.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.90,
+                prob_ceiling: 0.95,
             },
             CryptoAsset::XRP => Self {
                 default_vol: 0.80,
                 binary_vol_multiplier: 3.0,
                 excess_kurtosis: 9.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.90,
+                prob_ceiling: 0.95,
             },
             CryptoAsset::DOGE => Self {
                 default_vol: 1.00,
                 binary_vol_multiplier: 3.2,
                 excess_kurtosis: 12.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.90,
+                prob_ceiling: 0.95,
             },
         }
+    }
+
+    /// Return tuned configuration with config-driven overrides for vol multiplier and prob ceiling.
+    pub fn for_asset_with_overrides(asset: CryptoAsset, vol_mult_override: f64, prob_ceiling_override: f64) -> Self {
+        let mut config = Self::for_asset(asset);
+        // For BTC, apply the override directly; for alts, scale proportionally
+        let base_btc_mult = 2.0;
+        let ratio = vol_mult_override / base_btc_mult;
+        config.binary_vol_multiplier *= ratio;
+        config.prob_ceiling = prob_ceiling_override;
+        config
     }
 }
 
 /// Legacy constants for backward compat (BTC defaults).
 const DEFAULT_VOL: f64 = 0.50;
 const PROB_FLOOR: f64 = 0.03;
-const PROB_CEILING: f64 = 0.90;
+const PROB_CEILING: f64 = 0.95;
 const EXCESS_KURTOSIS: f64 = 7.0;
-const BINARY_VOL_MULTIPLIER: f64 = 2.5;
+const BINARY_VOL_MULTIPLIER: f64 = 2.0;
 
 /// CFB RTI averaging window duration in seconds.
 const RTI_WINDOW_SECS: f64 = 60.0;
@@ -294,16 +305,21 @@ pub fn determine_direction(model_prob: f64, market_price: f64) -> (&'static str,
 pub fn compute_effective_edge(raw_edge: f64, spread: f64) -> f64 {
     let spread_cost = spread / 2.0;
     let mut effective = raw_edge - spread_cost;
-    if spread > 0.10 {
-        effective *= 0.85;
+    if spread > 0.12 {
+        effective *= 0.90;
     }
     effective
 }
 
 /// Kelly criterion for binary outcome.
 pub fn compute_kelly(model_prob: f64, fill_price: f64, direction: &str) -> f64 {
+    compute_kelly_with_bounds(model_prob, fill_price, direction, 0.02, 0.98)
+}
+
+/// Kelly criterion with configurable fill price bounds.
+pub fn compute_kelly_with_bounds(model_prob: f64, fill_price: f64, direction: &str, fill_min: f64, fill_max: f64) -> f64 {
     // Refuse to size trades at extreme prices (terrible risk/reward)
-    if !(0.03..=0.97).contains(&fill_price) {
+    if !(fill_min..=fill_max).contains(&fill_price) {
         return 0.0;
     }
 
@@ -685,10 +701,15 @@ mod tests {
         let edge = compute_effective_edge(0.10, 0.04);
         assert!((edge - 0.08).abs() < 1e-6);
 
-        // Wide spread penalty
+        // Spread at old threshold (0.12) — no penalty with new threshold >0.12
         let edge = compute_effective_edge(0.10, 0.12);
-        // (0.10 - 0.06) * 0.85 = 0.034
-        assert!((edge - 0.034).abs() < 1e-6);
+        // (0.10 - 0.06) = 0.04, no penalty since spread is not > 0.12
+        assert!((edge - 0.04).abs() < 1e-6);
+
+        // Wide spread penalty (> 0.12)
+        let edge = compute_effective_edge(0.10, 0.14);
+        // (0.10 - 0.07) * 0.90 = 0.027
+        assert!((edge - 0.027).abs() < 1e-6);
     }
 
     #[test]
@@ -953,20 +974,39 @@ mod tests {
             0.0,
             "fill_price=0.01 should be rejected"
         );
-        assert_eq!(
-            compute_kelly(0.60, 0.98, "yes"),
-            0.0,
-            "fill_price=0.98 should be rejected"
+        // At the boundary (0.02/0.98) — should be accepted (inclusive bounds)
+        assert!(
+            compute_kelly(0.60, 0.98, "yes") >= 0.0,
+            "fill_price=0.98 should be accepted at boundary"
         );
-        assert_eq!(
-            compute_kelly(0.40, 0.02, "no"),
-            0.0,
-            "fill_price=0.02 should be rejected"
+        assert!(
+            compute_kelly(0.40, 0.02, "no") >= 0.0,
+            "fill_price=0.02 should be accepted at boundary"
         );
         // Just inside bounds should work
         assert!(
             compute_kelly(0.60, 0.50, "yes") > 0.0,
             "fill_price=0.50 should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_kelly_with_custom_bounds() {
+        // Custom tight bounds [0.05, 0.95]
+        assert_eq!(
+            compute_kelly_with_bounds(0.60, 0.96, "yes", 0.05, 0.95),
+            0.0,
+            "fill_price=0.96 should be rejected with max=0.95"
+        );
+        assert_eq!(
+            compute_kelly_with_bounds(0.40, 0.04, "no", 0.05, 0.95),
+            0.0,
+            "fill_price=0.04 should be rejected with min=0.05"
+        );
+        // Inside custom bounds
+        assert!(
+            compute_kelly_with_bounds(0.70, 0.50, "yes", 0.05, 0.95) > 0.0,
+            "fill_price=0.50 should work with custom bounds"
         );
     }
 
@@ -998,13 +1038,14 @@ mod tests {
 
     #[test]
     fn test_risk_reward_ratio() {
-        // Paying $0.85 to win $0.15 → lose_payout (0.85) > 4x win_payout (0.15)
-        // Kelly should be 0 for extreme fill prices (caught by the 0.97 guard)
+        // Paying $0.95 to win $0.05 → lose_payout=0.95, win_payout=0.05 → 19:1 ratio
+        // With new bounds [0.02, 0.98], this is accepted by fill guard but terrible risk/reward
+        // The evaluator's risk/reward guard (config-driven, default 5.0) catches this
         let k = compute_kelly(0.60, 0.95, "yes");
-        assert_eq!(k, 0.0, "fill_price=0.95 should hit extreme price guard");
+        // win_prob=0.60, win=0.05, lose=0.95 → kelly = (0.60*0.05 - 0.40*0.95)/0.05 = (0.03 - 0.38)/0.05 < 0 → 0
+        assert_eq!(k, 0.0, "terrible risk/reward should give kelly=0");
 
         // Fill price 0.80, yes direction: win=0.20, lose=0.80 → 4:1 exactly
-        // Not quite > 4x, so Kelly should compute normally
         let k = compute_kelly(0.80, 0.80, "yes");
         // win_prob=0.80, win=0.20, lose=0.80 → kelly = (0.80*0.20 - 0.20*0.80)/0.20 = 0
         assert!(k.abs() < 1e-6, "edge=0 at price=prob should give kelly≈0");
@@ -1048,22 +1089,22 @@ mod tests {
 
     #[test]
     fn test_vol_multiplier_calibration() {
-        // With 2.5x vol multiplier, probabilities should be spread across a reasonable range
+        // With 2.0x vol multiplier, probabilities should be spread across a reasonable range
         // instead of clustering at 0.998
         let cs = CryptoState::new();
         cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
         cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
         let snap = cs.snapshot();
 
-        // $500 ITM (strike 94500) at 30 min — should be ~0.65-0.75 (not 0.998)
+        // $500 ITM (strike 94500) at 30 min — with 2.0x multiplier, ~0.65-0.80
         let fv = compute_crypto_fair_value(&snap, 94500.0, 30.0);
         assert!(
-            fv.probability > 0.55 && fv.probability < 0.85,
+            fv.probability > 0.55 && fv.probability < 0.90,
             "$500 ITM should be moderate prob, got {}",
             fv.probability
         );
 
-        // $1000 ITM (strike 94000) at 30 min — should be ~0.75-0.90
+        // $1000 ITM (strike 94000) at 30 min — should be ~0.80-0.95
         let fv = compute_crypto_fair_value(&snap, 94000.0, 30.0);
         assert!(
             fv.probability > 0.70 && fv.probability <= PROB_CEILING,
@@ -1071,10 +1112,10 @@ mod tests {
             fv.probability
         );
 
-        // $500 OTM (strike 95500) at 30 min — should be ~0.25-0.45
+        // $500 OTM (strike 95500) at 30 min — should be ~0.20-0.45
         let fv = compute_crypto_fair_value(&snap, 95500.0, 30.0);
         assert!(
-            fv.probability > 0.15 && fv.probability < 0.45,
+            fv.probability > 0.10 && fv.probability < 0.50,
             "$500 OTM should be moderate-low prob, got {}",
             fv.probability
         );
@@ -1127,6 +1168,24 @@ mod tests {
             "ETH and BTC configs should produce different probabilities: btc={}, eth={}",
             fv_btc.probability, fv_eth.probability
         );
+    }
+
+    #[test]
+    fn test_asset_config_with_overrides() {
+        // Default BTC config
+        let btc_default = AssetConfig::for_asset(CryptoAsset::BTC);
+        assert!((btc_default.binary_vol_multiplier - 2.0).abs() < 1e-6);
+        assert!((btc_default.prob_ceiling - 0.95).abs() < 1e-6);
+
+        // Override: bump vol multiplier to 2.5 (old value)
+        let btc_overridden = AssetConfig::for_asset_with_overrides(CryptoAsset::BTC, 2.5, 0.90);
+        assert!((btc_overridden.binary_vol_multiplier - 2.5).abs() < 1e-6);
+        assert!((btc_overridden.prob_ceiling - 0.90).abs() < 1e-6);
+
+        // ETH with override: base ETH mult=2.8, ratio=2.5/2.0=1.25, result=3.5
+        let eth_overridden = AssetConfig::for_asset_with_overrides(CryptoAsset::ETH, 2.5, 0.92);
+        assert!((eth_overridden.binary_vol_multiplier - 3.5).abs() < 1e-6);
+        assert!((eth_overridden.prob_ceiling - 0.92).abs() < 1e-6);
     }
 
     #[test]

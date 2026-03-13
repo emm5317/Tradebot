@@ -87,6 +87,16 @@ pub struct Config {
     #[serde(default = "default_crypto_directional_min_conviction")]
     pub crypto_directional_min_conviction: f64,
 
+    // Phase 14: Configurable model parameters (previously hardcoded)
+    #[serde(default = "default_crypto_vol_multiplier")]
+    pub crypto_vol_multiplier: f64,
+    #[serde(default = "default_crypto_prob_ceiling")]
+    pub crypto_prob_ceiling: f64,
+    #[serde(default = "default_crypto_risk_reward_max_ratio")]
+    pub crypto_risk_reward_max_ratio: f64,
+    #[serde(default = "default_crypto_kelly_fill_min")]
+    pub crypto_kelly_fill_min: f64,
+
     // Phase 13: Per-asset enable flags (BTC default true, others false)
     #[serde(default = "default_true")]
     pub enable_crypto_btc: bool,
@@ -125,15 +135,15 @@ fn default_crypto_entry_min_minutes() -> f64 {
 }
 
 fn default_crypto_entry_max_minutes() -> f64 {
-    55.0
+    59.0
 }
 
 fn default_crypto_min_edge() -> f64 {
-    0.03
+    0.02
 }
 
 fn default_crypto_min_kelly() -> f64 {
-    0.02
+    0.01
 }
 
 fn default_crypto_min_confidence() -> f64 {
@@ -145,7 +155,23 @@ fn default_crypto_max_edge() -> f64 {
 }
 
 fn default_crypto_cooldown_secs() -> u64 {
-    30
+    15
+}
+
+fn default_crypto_vol_multiplier() -> f64 {
+    2.0
+}
+
+fn default_crypto_prob_ceiling() -> f64 {
+    0.95
+}
+
+fn default_crypto_risk_reward_max_ratio() -> f64 {
+    5.0
+}
+
+fn default_crypto_kelly_fill_min() -> f64 {
+    0.02
 }
 
 fn default_weather_cooldown_secs() -> u64 {
@@ -204,7 +230,12 @@ impl Config {
             kelly_fraction = self.kelly_fraction_multiplier,
             crypto_entry_window = %format!("{}-{} min", self.crypto_entry_min_minutes, self.crypto_entry_max_minutes),
             crypto_min_edge = self.crypto_min_edge,
+            crypto_min_kelly = self.crypto_min_kelly,
             crypto_min_confidence = self.crypto_min_confidence,
+            crypto_vol_multiplier = self.crypto_vol_multiplier,
+            crypto_prob_ceiling = self.crypto_prob_ceiling,
+            crypto_risk_reward_max_ratio = self.crypto_risk_reward_max_ratio,
+            crypto_kelly_fill_min = self.crypto_kelly_fill_min,
             crypto_cooldown_secs = self.crypto_cooldown_secs,
             weather_cooldown_secs = self.weather_cooldown_secs,
             database_pool_size = self.database_pool_size,
