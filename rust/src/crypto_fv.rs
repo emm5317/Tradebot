@@ -1420,4 +1420,28 @@ mod tests {
         assert!((config.max_market_disagreement - 0.20).abs() < 1e-6);
         assert_eq!(config.cooldown_secs, 120);
     }
+
+    #[test]
+    fn test_trading_overrides_apply_to_non_btc() {
+        // SOL has per-asset defaults: min_edge=0.10, cooldown=240
+        let sol_base = AssetConfig::for_asset(CryptoAsset::SOL);
+        assert!((sol_base.min_edge - 0.10).abs() < 1e-6);
+        assert_eq!(sol_base.cooldown_secs, 240);
+
+        // Global overrides should flatten SOL to global values
+        let sol_overridden = AssetConfig::for_asset_with_full_overrides(
+            CryptoAsset::SOL, 2.5, 0.80, 0.20,
+        ).with_trading_overrides(0.08, 0.04, 0.25, 0.25, 300);
+        assert!((sol_overridden.min_edge - 0.08).abs() < 1e-6, "SOL min_edge should be overridden to 0.08, got {}", sol_overridden.min_edge);
+        assert!((sol_overridden.min_kelly - 0.04).abs() < 1e-6);
+        assert!((sol_overridden.max_edge - 0.25).abs() < 1e-6);
+        assert!((sol_overridden.max_market_disagreement - 0.25).abs() < 1e-6);
+        assert_eq!(sol_overridden.cooldown_secs, 300);
+
+        // Zero sentinel should preserve per-asset defaults
+        let sol_preserved = AssetConfig::for_asset(CryptoAsset::SOL)
+            .with_trading_overrides(0.0, 0.0, 0.0, 0.0, 0);
+        assert!((sol_preserved.min_edge - 0.10).abs() < 1e-6, "Zero sentinel should preserve SOL default");
+        assert_eq!(sol_preserved.cooldown_secs, 240);
+    }
 }

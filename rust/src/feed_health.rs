@@ -10,6 +10,8 @@ use dashmap::DashMap;
 use serde::Serialize;
 use tracing::warn;
 
+use crate::crypto_asset::CryptoAsset;
+
 /// Per-feed staleness thresholds.
 const THRESHOLDS: &[(&str, u64)] = &[
     ("kalshi_ws", 5),
@@ -191,6 +193,40 @@ impl FeedHealth {
                 "feed" => *name
             )
             .set(score);
+        }
+    }
+
+    /// Per-asset feed health gate for crypto contracts.
+    /// Checks the asset-specific feed names (e.g. `coinbase_sol`, `binance_spot_sol`).
+    /// For BTC, also checks legacy names for backward compatibility.
+    /// OR-based: at least one spot venue must be healthy.
+    pub fn required_feeds_healthy_for_asset(&self, asset: CryptoAsset) -> Result<(), Vec<String>> {
+        let short = asset.short_name();
+        let mut feed_names: Vec<String> = vec![
+            format!("coinbase_{}", short),
+            format!("binance_spot_{}", short),
+        ];
+        // BTC: also check legacy names for backward compat
+        if asset == CryptoAsset::BTC {
+            feed_names.push("coinbase".to_string());
+            feed_names.push("binance_spot".to_string());
+        }
+
+        let any_healthy = feed_names.iter().any(|name| self.is_healthy(name));
+        if any_healthy {
+            Ok(())
+        } else {
+            let stale: Vec<String> = feed_names
+                .iter()
+                .filter(|name| !self.is_healthy(name))
+                .cloned()
+                .collect();
+            warn!(
+                asset = %short,
+                stale_feeds = ?stale,
+                "all spot venues stale for asset"
+            );
+            Err(stale)
         }
     }
 
@@ -394,6 +430,35 @@ mod tests {
         health.record_update("binance_spot");
         health.record_update("kalshi_ws");
         assert_eq!(health.system_health(), 1.0);
+    }
+
+    #[test]
+    fn test_per_asset_sol_stale() {
+        let health = FeedHealth::new();
+        // No SOL feeds recorded — should fail
+        let result = health.required_feeds_healthy_for_asset(CryptoAsset::SOL);
+        assert!(result.is_err());
+        let stale = result.unwrap_err();
+        assert!(stale.contains(&"coinbase_sol".to_string()));
+        assert!(stale.contains(&"binance_spot_sol".to_string()));
+        // Should NOT contain legacy BTC names
+        assert!(!stale.contains(&"coinbase".to_string()));
+    }
+
+    #[test]
+    fn test_per_asset_btc_legacy_compat() {
+        let health = FeedHealth::new();
+        // Only legacy name updated — BTC should still pass
+        health.record_update("coinbase");
+        assert!(health.required_feeds_healthy_for_asset(CryptoAsset::BTC).is_ok());
+    }
+
+    #[test]
+    fn test_per_asset_btc_new_name() {
+        let health = FeedHealth::new();
+        // Only new per-asset name updated — BTC should pass
+        health.record_update("coinbase_btc");
+        assert!(health.required_feeds_healthy_for_asset(CryptoAsset::BTC).is_ok());
     }
 
     #[test]

@@ -348,6 +348,12 @@ pub async fn run(
                         config.crypto_vol_multiplier,
                         config.crypto_prob_ceiling,
                         config.crypto_compress_factor,
+                    ).with_trading_overrides(
+                        config.crypto_min_edge,
+                        config.crypto_min_kelly,
+                        config.crypto_max_edge,
+                        config.crypto_max_market_disagreement,
+                        config.crypto_cooldown_secs,
                     );
 
                     match contract_phase(minutes_remaining, config.crypto_entry_min_minutes, config.crypto_entry_max_minutes) {
@@ -888,6 +894,32 @@ async fn evaluate_entry(
             micro_vwap: Some(micro.vwap_signal),
             micro_momentum: Some(micro.momentum_signal),
             micro_vol_surge: Some(micro.volume_surge_signal),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
+        });
+        return;
+    }
+
+    // 9b. Per-asset feed health gate (Phase 15 fix #3)
+    if let Err(stale) = feed_health.required_feeds_healthy_for_asset(contract.asset) {
+        warn!(
+            ticker = %contract.ticker,
+            asset = %contract.asset.short_name(),
+            stale_feeds = ?stale,
+            "crypto eval: asset feeds stale"
+        );
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some(format!("asset_feeds_stale:{}", contract.asset.short_name())),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            edge: Some(effective_edge),
+            adjusted_edge: Some(adjusted_edge),
+            direction: Some(direction.to_string()),
+            minutes_remaining: Some(minutes_remaining),
+            confidence: Some(fv.confidence),
             eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
             ..Default::default()
         });

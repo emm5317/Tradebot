@@ -43,7 +43,7 @@ class EvaluationDaemon:
         self.rules_resolver = ContractRulesResolver()
         self.notifier = DiscordNotifier(self.settings.discord_webhook_url or None)
         self._shutdown = asyncio.Event()
-        self._decision_log_tasks: set[asyncio.Task] = set()
+        self._decision_log_buffer: list[tuple] = []
 
     async def run(self) -> None:
         """Initialize connections, register evaluators, run evaluation loop."""
@@ -226,7 +226,7 @@ class EvaluationDaemon:
                     station = contract.station or "KORD"
                     obs = asos_obs.get(station) if asos_obs else None
                     if obs is None:
-                        self._spawn_decision_log(
+                        self._buffer_decision_log(
                                 ticker=ticker,
                                 outcome="skipped",
                                 rejection_reason="no_observation_data",
@@ -267,7 +267,7 @@ class EvaluationDaemon:
                 # Decision audit log
                 mins_left = (contract.settlement_time - datetime.now(UTC)).total_seconds() / 60.0
                 if sig is not None:
-                    self._spawn_decision_log(
+                    self._buffer_decision_log(
                             ticker=ticker,
                             outcome="signal",
                             model_prob=state.model_prob if state else None,
@@ -278,7 +278,7 @@ class EvaluationDaemon:
                             confidence=state.confidence if state else None,
                         )
                 elif rej is not None:
-                    self._spawn_decision_log(
+                    self._buffer_decision_log(
                             ticker=ticker,
                             outcome="rejected",
                             rejection_reason=rej.rejection_reason if hasattr(rej, "rejection_reason") else None,
@@ -289,7 +289,7 @@ class EvaluationDaemon:
                             confidence=state.confidence if state else None,
                         )
                 else:
-                    self._spawn_decision_log(
+                    self._buffer_decision_log(
                             ticker=ticker,
                             outcome="skipped",
                             minutes_remaining=mins_left,
@@ -298,6 +298,9 @@ class EvaluationDaemon:
             except Exception:
                 logger.exception("evaluate_contract_error", ticker=ticker)
                 await self.notifier.notify_error("evaluate_contract_error", {"ticker": ticker})
+
+        # Flush buffered decision log entries in a single batch
+        await self._flush_decision_log()
 
         t_eval = time_mod.monotonic()
         logger.info(
@@ -308,18 +311,7 @@ class EvaluationDaemon:
             total_ms=round((t_eval - t0) * 1000, 1),
         )
 
-    def _spawn_decision_log(self, **kwargs) -> None:
-        """Spawn a bounded decision_log write task with backpressure."""
-        # Prune completed tasks
-        self._decision_log_tasks = {t for t in self._decision_log_tasks if not t.done()}
-        if len(self._decision_log_tasks) >= 100:
-            logger.warning("decision_log_backpressure", pending=len(self._decision_log_tasks))
-            return
-        task = asyncio.create_task(self._write_decision_log(**kwargs))
-        self._decision_log_tasks.add(task)
-        task.add_done_callback(self._decision_log_tasks.discard)
-
-    async def _write_decision_log(
+    def _buffer_decision_log(
         self,
         ticker: str,
         outcome: str,
@@ -332,12 +324,22 @@ class EvaluationDaemon:
         confidence: float | None = None,
         signal_id: int | None = None,
     ) -> None:
-        """Fire-and-forget write to decision_log for Grafana observability."""
-        if self.pool is None:
+        """Buffer a decision_log entry for batch flush at end of cycle."""
+        self._decision_log_buffer.append((
+            ticker, outcome, rejection_reason,
+            model_prob, market_price, edge, direction,
+            minutes_remaining, confidence, signal_id,
+        ))
+
+    async def _flush_decision_log(self) -> None:
+        """Flush all buffered decision_log entries in a single batch INSERT."""
+        if not self._decision_log_buffer or self.pool is None:
             return
+        batch = self._decision_log_buffer
+        self._decision_log_buffer = []
         try:
             async with self.pool.acquire() as conn:
-                await conn.execute(
+                await conn.executemany(
                     """
                     INSERT INTO decision_log (
                         ticker, signal_type, source, outcome, rejection_reason,
@@ -346,19 +348,10 @@ class EvaluationDaemon:
                     ) VALUES ($1, 'weather', 'python', $2, $3,
                               $4, $5, $6, $7, $8, $9, $10)
                     """,
-                    ticker,
-                    outcome,
-                    rejection_reason,
-                    model_prob,
-                    market_price,
-                    edge,
-                    direction,
-                    minutes_remaining,
-                    confidence,
-                    signal_id,
+                    batch,
                 )
         except Exception:
-            logger.debug("decision_log_write_failed", ticker=ticker)
+            logger.debug("decision_log_batch_flush_failed", count=len(batch))
 
     def _infer_signal_type(self, contract: Contract) -> str:
         """Infer signal type from contract category."""
