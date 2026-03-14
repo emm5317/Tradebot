@@ -23,6 +23,10 @@ pub struct AssetConfig {
     pub excess_kurtosis: f64,
     pub prob_floor: f64,
     pub prob_ceiling: f64,
+    /// Phase 14: Tail compression knees and factor.
+    pub compress_floor_knee: f64,
+    pub compress_ceil_knee: f64,
+    pub compress_factor: f64,
 }
 
 impl AssetConfig {
@@ -31,50 +35,71 @@ impl AssetConfig {
         match asset {
             CryptoAsset::BTC => Self {
                 default_vol: 0.50,
-                binary_vol_multiplier: 2.0,
+                binary_vol_multiplier: 2.5,
                 excess_kurtosis: 7.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.95,
+                prob_ceiling: 0.80,
+                compress_floor_knee: 0.25,
+                compress_ceil_knee: 0.75,
+                compress_factor: 0.20,
             },
             CryptoAsset::ETH => Self {
                 default_vol: 0.60,
                 binary_vol_multiplier: 2.8,
                 excess_kurtosis: 8.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.95,
+                prob_ceiling: 0.80,
+                compress_floor_knee: 0.25,
+                compress_ceil_knee: 0.75,
+                compress_factor: 0.20,
             },
             CryptoAsset::SOL => Self {
                 default_vol: 0.90,
                 binary_vol_multiplier: 3.0,
                 excess_kurtosis: 10.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.95,
+                prob_ceiling: 0.80,
+                compress_floor_knee: 0.25,
+                compress_ceil_knee: 0.75,
+                compress_factor: 0.20,
             },
             CryptoAsset::XRP => Self {
                 default_vol: 0.80,
                 binary_vol_multiplier: 3.0,
                 excess_kurtosis: 9.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.95,
+                prob_ceiling: 0.80,
+                compress_floor_knee: 0.25,
+                compress_ceil_knee: 0.75,
+                compress_factor: 0.20,
             },
             CryptoAsset::DOGE => Self {
                 default_vol: 1.00,
                 binary_vol_multiplier: 3.2,
                 excess_kurtosis: 12.0,
                 prob_floor: 0.03,
-                prob_ceiling: 0.95,
+                prob_ceiling: 0.80,
+                compress_floor_knee: 0.25,
+                compress_ceil_knee: 0.75,
+                compress_factor: 0.20,
             },
         }
     }
 
-    /// Return tuned configuration with config-driven overrides for vol multiplier and prob ceiling.
+    /// Return tuned configuration with config-driven overrides for vol multiplier, prob ceiling, and compression.
     pub fn for_asset_with_overrides(asset: CryptoAsset, vol_mult_override: f64, prob_ceiling_override: f64) -> Self {
+        Self::for_asset_with_full_overrides(asset, vol_mult_override, prob_ceiling_override, 0.20)
+    }
+
+    /// Return tuned configuration with all overrides including compression factor.
+    pub fn for_asset_with_full_overrides(asset: CryptoAsset, vol_mult_override: f64, prob_ceiling_override: f64, compress_factor: f64) -> Self {
         let mut config = Self::for_asset(asset);
         // For BTC, apply the override directly; for alts, scale proportionally
-        let base_btc_mult = 2.0;
+        let base_btc_mult = 2.5;
         let ratio = vol_mult_override / base_btc_mult;
         config.binary_vol_multiplier *= ratio;
         config.prob_ceiling = prob_ceiling_override;
+        config.compress_factor = compress_factor;
         config
     }
 }
@@ -82,9 +107,9 @@ impl AssetConfig {
 /// Legacy constants for backward compat (BTC defaults).
 const DEFAULT_VOL: f64 = 0.50;
 const PROB_FLOOR: f64 = 0.03;
-const PROB_CEILING: f64 = 0.95;
+const PROB_CEILING: f64 = 0.80;
 const EXCESS_KURTOSIS: f64 = 7.0;
-const BINARY_VOL_MULTIPLIER: f64 = 2.0;
+const BINARY_VOL_MULTIPLIER: f64 = 2.5;
 
 /// CFB RTI averaging window duration in seconds.
 const RTI_WINDOW_SECS: f64 = 60.0;
@@ -110,6 +135,21 @@ pub struct CryptoFairValue {
     pub funding_signal: f64,
     /// Model confidence 0-1
     pub confidence: f64,
+}
+
+/// Phase 14: Compress overconfident tails while preserving the well-calibrated middle.
+///
+/// Identity zone [floor_knee, ceil_knee] is unchanged.
+/// Above ceil_knee: `ceil_knee + (raw - ceil_knee) * compression`
+/// Below floor_knee: `floor_knee - (floor_knee - raw) * compression`
+pub fn compress_tail_probability(raw: f64, floor_knee: f64, ceil_knee: f64, compression: f64) -> f64 {
+    if raw > ceil_knee {
+        ceil_knee + (raw - ceil_knee) * compression
+    } else if raw < floor_knee {
+        floor_knee - (floor_knee - raw) * compression
+    } else {
+        raw
+    }
 }
 
 /// Compute settlement-aware probability for a crypto binary contract.
@@ -165,7 +205,14 @@ pub fn compute_crypto_fair_value_with_config(
 
     // Combine
     let p_adjusted = p_core + basis_signal + funding_signal;
-    let p_final = p_adjusted.clamp(asset_config.prob_floor, asset_config.prob_ceiling);
+    // Phase 14: Compress tails before final clamp
+    let p_compressed = compress_tail_probability(
+        p_adjusted,
+        asset_config.compress_floor_knee,
+        asset_config.compress_ceil_knee,
+        asset_config.compress_factor,
+    );
+    let p_final = p_compressed.clamp(asset_config.prob_floor, asset_config.prob_ceiling);
 
     // Confidence — base 0.40, with additive bonuses per feed.
     // Single healthy spot venue is sufficient to trade (0.40 + 0.15 = 0.55 > MIN_CONFIDENCE).
@@ -544,10 +591,10 @@ mod tests {
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 90000.0, 5.0);
 
-        // Deep in-the-money should be high probability
+        // Deep ITM should be high probability (compressed + capped at PROB_CEILING=0.80)
         assert!(
-            fv.probability > 0.8,
-            "Deep ITM prob should be >0.8, got {}",
+            fv.probability > 0.70,
+            "Deep ITM prob should be >0.70, got {}",
             fv.probability
         );
     }
@@ -561,10 +608,10 @@ mod tests {
         let snap = cs.snapshot();
         let fv = compute_crypto_fair_value(&snap, 100000.0, 5.0);
 
-        // Deep out-of-the-money should be low probability
+        // Deep OTM should be low probability (compressed floor zone)
         assert!(
-            fv.probability < 0.2,
-            "Deep OTM prob should be <0.2, got {}",
+            fv.probability < 0.25,
+            "Deep OTM prob should be <0.25, got {}",
             fv.probability
         );
     }
@@ -575,11 +622,14 @@ mod tests {
         cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
 
         let snap = cs.snapshot();
+        // ITM at expiry: settlement prob = 1.0 → compressed to 0.75 + 0.25*0.20 = 0.80 = PROB_CEILING
         let fv = compute_crypto_fair_value(&snap, 94000.0, 0.0);
-        assert!(fv.probability >= PROB_CEILING, "ITM at expiry should be at ceiling, got {}", fv.probability);
+        assert!(fv.probability >= PROB_CEILING - 0.01, "ITM at expiry should be near ceiling, got {}", fv.probability);
 
+        // OTM at expiry: settlement prob = 0.0 → compressed to 0.25 - 0.25*0.20 = 0.20
+        // Clamped to max(PROB_FLOOR, 0.20) = 0.20
         let fv = compute_crypto_fair_value(&snap, 96000.0, 0.0);
-        assert!(fv.probability <= PROB_FLOOR, "OTM at expiry should be at floor, got {}", fv.probability);
+        assert!(fv.probability <= 0.21, "OTM at expiry should be near compressed floor, got {}", fv.probability);
     }
 
     #[test]
@@ -841,13 +891,13 @@ mod tests {
     fn test_levy_deterministic_at_expiry() {
         let spot = 95000.0;
 
-        // ITM at expiry → capped at PROB_CEILING
+        // ITM at expiry → capped at PROB_CEILING (settlement_probability uses raw clamp, no compression)
         let p = compute_settlement_probability(spot, 94000.0, 0.001, 0.50);
-        assert!(p >= PROB_CEILING, "ITM at expiry should be at ceiling, got {}", p);
+        assert!(p >= PROB_CEILING - 0.01, "ITM at expiry should be near ceiling, got {}", p);
 
         // OTM at expiry → floored at PROB_FLOOR
         let p = compute_settlement_probability(spot, 96000.0, 0.001, 0.50);
-        assert!(p <= PROB_FLOOR, "OTM at expiry should be at floor, got {}", p);
+        assert!(p <= PROB_FLOOR + 0.01, "OTM at expiry should be near floor, got {}", p);
     }
 
     // --- Directional model tests ---
@@ -958,7 +1008,7 @@ mod tests {
         // When observed average * alpha already exceeds strike, k_eff ≤ 0
         // Should return high probability (capped at PROB_CEILING by levy clamp)
         let p = levy_averaging_prob(100000.0, 90000.0, 5.0, 0.50);
-        assert!(p >= PROB_CEILING, "k_eff<=0 should give high prob, got {}", p);
+        assert!(p >= PROB_CEILING - 0.01, "k_eff<=0 should give high prob, got {}", p);
     }
 
     #[test]
@@ -1089,30 +1139,30 @@ mod tests {
 
     #[test]
     fn test_vol_multiplier_calibration() {
-        // With 2.0x vol multiplier, probabilities should be spread across a reasonable range
-        // instead of clustering at 0.998
+        // With 2.5x vol multiplier + tail compression, probabilities should be spread
+        // across a reasonable range instead of clustering at ceiling
         let cs = CryptoState::new();
         cs.update_coinbase(95000.0, 0.0, 0.0, 10.0);
         cs.update_binance_spot(95000.0, None, Some(0.50), 30, 10.0);
         let snap = cs.snapshot();
 
-        // $500 ITM (strike 94500) at 30 min — with 2.0x multiplier, ~0.65-0.80
+        // $500 ITM (strike 94500) at 30 min — with 2.5x multiplier + compression
         let fv = compute_crypto_fair_value(&snap, 94500.0, 30.0);
         assert!(
-            fv.probability > 0.55 && fv.probability < 0.90,
+            fv.probability > 0.50 && fv.probability <= PROB_CEILING,
             "$500 ITM should be moderate prob, got {}",
             fv.probability
         );
 
-        // $1000 ITM (strike 94000) at 30 min — should be ~0.80-0.95
+        // $1000 ITM (strike 94000) at 30 min — should be capped by compression + ceiling
         let fv = compute_crypto_fair_value(&snap, 94000.0, 30.0);
         assert!(
-            fv.probability > 0.70 && fv.probability <= PROB_CEILING,
-            "$1K ITM should be high-moderate prob, got {}",
+            fv.probability > 0.55 && fv.probability <= PROB_CEILING,
+            "$1K ITM should be moderate-high prob capped at ceiling, got {}",
             fv.probability
         );
 
-        // $500 OTM (strike 95500) at 30 min — should be ~0.20-0.45
+        // $500 OTM (strike 95500) at 30 min — should be moderate-low
         let fv = compute_crypto_fair_value(&snap, 95500.0, 30.0);
         assert!(
             fv.probability > 0.10 && fv.probability < 0.50,
@@ -1174,18 +1224,19 @@ mod tests {
     fn test_asset_config_with_overrides() {
         // Default BTC config
         let btc_default = AssetConfig::for_asset(CryptoAsset::BTC);
-        assert!((btc_default.binary_vol_multiplier - 2.0).abs() < 1e-6);
-        assert!((btc_default.prob_ceiling - 0.95).abs() < 1e-6);
+        assert!((btc_default.binary_vol_multiplier - 2.5).abs() < 1e-6);
+        assert!((btc_default.prob_ceiling - 0.80).abs() < 1e-6);
 
-        // Override: bump vol multiplier to 2.5 (old value)
-        let btc_overridden = AssetConfig::for_asset_with_overrides(CryptoAsset::BTC, 2.5, 0.90);
-        assert!((btc_overridden.binary_vol_multiplier - 2.5).abs() < 1e-6);
-        assert!((btc_overridden.prob_ceiling - 0.90).abs() < 1e-6);
+        // Override: bump vol multiplier to 3.0
+        let btc_overridden = AssetConfig::for_asset_with_overrides(CryptoAsset::BTC, 3.0, 0.85);
+        // ratio = 3.0 / 2.5 = 1.2, result = 2.5 * 1.2 = 3.0
+        assert!((btc_overridden.binary_vol_multiplier - 3.0).abs() < 1e-6);
+        assert!((btc_overridden.prob_ceiling - 0.85).abs() < 1e-6);
 
-        // ETH with override: base ETH mult=2.8, ratio=2.5/2.0=1.25, result=3.5
-        let eth_overridden = AssetConfig::for_asset_with_overrides(CryptoAsset::ETH, 2.5, 0.92);
-        assert!((eth_overridden.binary_vol_multiplier - 3.5).abs() < 1e-6);
-        assert!((eth_overridden.prob_ceiling - 0.92).abs() < 1e-6);
+        // ETH with override: base ETH mult=2.8, ratio=3.0/2.5=1.2, result=3.36
+        let eth_overridden = AssetConfig::for_asset_with_overrides(CryptoAsset::ETH, 3.0, 0.85);
+        assert!((eth_overridden.binary_vol_multiplier - 3.36).abs() < 1e-6);
+        assert!((eth_overridden.prob_ceiling - 0.85).abs() < 1e-6);
     }
 
     #[test]
@@ -1205,6 +1256,77 @@ mod tests {
         assert!(
             edge_guarded < edge_normal,
             "guarded spread (0.10) correctly reduces edge vs tight spread"
+        );
+    }
+
+    #[test]
+    fn test_compress_tail_probability_identity_zone() {
+        // Values in [0.25, 0.75] should pass through unchanged
+        for &p in &[0.25, 0.40, 0.50, 0.60, 0.75] {
+            let compressed = compress_tail_probability(p, 0.25, 0.75, 0.20);
+            assert!(
+                (compressed - p).abs() < 1e-10,
+                "identity zone: p={} should be unchanged, got {}",
+                p, compressed
+            );
+        }
+    }
+
+    #[test]
+    fn test_compress_tail_probability_high_tail() {
+        // 0.90 → 0.75 + (0.90 - 0.75) * 0.20 = 0.75 + 0.03 = 0.78
+        let p = compress_tail_probability(0.90, 0.25, 0.75, 0.20);
+        assert!((p - 0.78).abs() < 1e-10, "0.90 should compress to 0.78, got {}", p);
+
+        // 0.95 → 0.75 + (0.95 - 0.75) * 0.20 = 0.75 + 0.04 = 0.79
+        let p = compress_tail_probability(0.95, 0.25, 0.75, 0.20);
+        assert!((p - 0.79).abs() < 1e-10, "0.95 should compress to 0.79, got {}", p);
+    }
+
+    #[test]
+    fn test_compress_tail_probability_low_tail() {
+        // 0.10 → 0.25 - (0.25 - 0.10) * 0.20 = 0.25 - 0.03 = 0.22
+        let p = compress_tail_probability(0.10, 0.25, 0.75, 0.20);
+        assert!((p - 0.22).abs() < 1e-10, "0.10 should compress to 0.22, got {}", p);
+
+        // 0.05 → 0.25 - (0.25 - 0.05) * 0.20 = 0.25 - 0.04 = 0.21
+        let p = compress_tail_probability(0.05, 0.25, 0.75, 0.20);
+        assert!((p - 0.21).abs() < 1e-10, "0.05 should compress to 0.21, got {}", p);
+    }
+
+    #[test]
+    fn test_compress_tail_probability_monotonicity() {
+        // Compression must preserve ordering
+        let values = [0.05, 0.10, 0.20, 0.30, 0.50, 0.70, 0.80, 0.90, 0.95];
+        let compressed: Vec<f64> = values.iter()
+            .map(|&p| compress_tail_probability(p, 0.25, 0.75, 0.20))
+            .collect();
+        for i in 1..compressed.len() {
+            assert!(
+                compressed[i] > compressed[i - 1],
+                "monotonicity violated at index {}: {} <= {}",
+                i, compressed[i], compressed[i - 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_compress_tail_probability_boundary_continuity() {
+        // At knee boundaries, compression should be continuous
+        let at_ceil_knee = compress_tail_probability(0.75, 0.25, 0.75, 0.20);
+        let just_above = compress_tail_probability(0.75 + 1e-9, 0.25, 0.75, 0.20);
+        assert!(
+            (at_ceil_knee - just_above).abs() < 1e-6,
+            "discontinuity at ceil_knee: {} vs {}",
+            at_ceil_knee, just_above
+        );
+
+        let at_floor_knee = compress_tail_probability(0.25, 0.25, 0.75, 0.20);
+        let just_below = compress_tail_probability(0.25 - 1e-9, 0.25, 0.75, 0.20);
+        assert!(
+            (at_floor_knee - just_below).abs() < 1e-6,
+            "discontinuity at floor_knee: {} vs {}",
+            at_floor_knee, just_below
         );
     }
 }

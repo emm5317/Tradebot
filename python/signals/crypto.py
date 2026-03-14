@@ -40,12 +40,18 @@ _MIN_MINUTES = 5.0
 _MAX_MINUTES = 15.0
 
 # Higher edge threshold for crypto (more volatile)
-_MIN_EDGE = 0.06
+_MIN_EDGE = 0.08
 
 # Minimum Kelly fraction
 _MIN_KELLY = 0.04
 
 _WIDE_SPREAD_THRESHOLD = 0.10
+
+# Phase 14: Guards ported from Rust crypto_evaluator
+_MAX_MARKET_DISAGREEMENT = 0.25
+_MAX_EDGE = 0.25
+_RISK_REWARD_MAX_RATIO = 5.0
+_DIRECTIONAL_ATM_MIN_CONVICTION = 0.05
 
 _SIGNAL_COOLDOWN_SECONDS = 300
 
@@ -199,8 +205,50 @@ class CryptoSignalEvaluator:
         model_state.direction = direction
         model_state.edge = raw_edge
 
+        # 8a. Guard: directional ATM — no opinion when model_prob ≈ 0.50
+        if getattr(contract, "directional", False) and abs(model_prob - 0.50) < _DIRECTIONAL_ATM_MIN_CONVICTION:
+            rejection = RejectedSignal(
+                ticker=contract.ticker,
+                signal_type="crypto",
+                rejection_reason=f"directional_atm_no_opinion (|{model_prob:.3f} - 0.50| < {_DIRECTIONAL_ATM_MIN_CONVICTION})",
+                model_prob=model_prob,
+                market_price=market_price,
+                edge=raw_edge,
+                minutes_remaining=minutes,
+            )
+            model_state.rejection_reason = "directional_atm_no_opinion"
+            return None, rejection, model_state
+
+        # 8b. Guard: market disagreement — model shouldn't disagree with market by too much
+        if raw_edge > _MAX_MARKET_DISAGREEMENT:
+            rejection = RejectedSignal(
+                ticker=contract.ticker,
+                signal_type="crypto",
+                rejection_reason=f"market_disagreement ({raw_edge:.3f} > {_MAX_MARKET_DISAGREEMENT})",
+                model_prob=model_prob,
+                market_price=market_price,
+                edge=raw_edge,
+                minutes_remaining=minutes,
+            )
+            model_state.rejection_reason = "market_disagreement"
+            return None, rejection, model_state
+
         # 9. Spread-adjusted edge
         effective_edge = compute_effective_edge(raw_edge, orderbook.spread, _WIDE_SPREAD_THRESHOLD)
+
+        # 9a. Guard: max edge — likely model miscalibration
+        if effective_edge > _MAX_EDGE:
+            rejection = RejectedSignal(
+                ticker=contract.ticker,
+                signal_type="crypto",
+                rejection_reason=f"edge_too_large ({effective_edge:.3f} > {_MAX_EDGE})",
+                model_prob=model_prob,
+                market_price=market_price,
+                edge=effective_edge,
+                minutes_remaining=minutes,
+            )
+            model_state.rejection_reason = "edge_too_large"
+            return None, rejection, model_state
 
         if effective_edge < _MIN_EDGE:
             rejection = RejectedSignal(
@@ -217,6 +265,28 @@ class CryptoSignalEvaluator:
 
         # 10. Kelly using fill price
         fill_price = estimate_fill_price(direction, orderbook)
+
+        # 10a. Guard: risk/reward ratio
+        if direction == "yes":
+            win_payout = 1.0 - fill_price
+            lose_payout = fill_price
+        else:
+            win_payout = fill_price
+            lose_payout = 1.0 - fill_price
+
+        if win_payout > 0 and lose_payout > _RISK_REWARD_MAX_RATIO * win_payout:
+            rejection = RejectedSignal(
+                ticker=contract.ticker,
+                signal_type="crypto",
+                rejection_reason=f"bad_risk_reward (lose={lose_payout:.2f} > {_RISK_REWARD_MAX_RATIO}×win={win_payout:.2f})",
+                model_prob=model_prob,
+                market_price=market_price,
+                edge=effective_edge,
+                minutes_remaining=minutes,
+            )
+            model_state.rejection_reason = "bad_risk_reward"
+            return None, rejection, model_state
+
         kelly = compute_kelly(model_prob, fill_price, direction)
 
         if kelly < _MIN_KELLY:

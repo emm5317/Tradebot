@@ -20,7 +20,32 @@ BINARY_VOL_MULTIPLIER = 2.5
 
 # Probability floor/ceiling — irreducible jump/tail risk for BTC.
 PROB_FLOOR = 0.03
-PROB_CEILING = 0.90
+PROB_CEILING = 0.80
+
+# Phase 14: Tail compression knees and factor.
+# Identity zone [COMPRESS_FLOOR_KNEE, COMPRESS_CEIL_KNEE]; tails compressed by factor.
+COMPRESS_FLOOR_KNEE = 0.25
+COMPRESS_CEIL_KNEE = 0.75
+COMPRESS_FACTOR = 0.20
+
+
+def compress_tail_probability(
+    raw: float,
+    floor_knee: float = COMPRESS_FLOOR_KNEE,
+    ceil_knee: float = COMPRESS_CEIL_KNEE,
+    compression: float = COMPRESS_FACTOR,
+) -> float:
+    """Compress overconfident tails while preserving the well-calibrated middle.
+
+    Identity zone [floor_knee, ceil_knee] is unchanged.
+    Above ceil_knee: ceil_knee + (raw - ceil_knee) * compression
+    Below floor_knee: floor_knee - (floor_knee - raw) * compression
+    """
+    if raw > ceil_knee:
+        return ceil_knee + (raw - ceil_knee) * compression
+    if raw < floor_knee:
+        return floor_knee - (floor_knee - raw) * compression
+    return raw
 
 
 def compute_binary_probability(
@@ -67,6 +92,7 @@ def compute_binary_probability(
     d2 = (math.log(spot / strike) + (risk_free_rate - 0.5 * sigma**2) * T) / (sigma * sqrt_T)
 
     p = fast_norm_cdf(d2)
+    p = compress_tail_probability(p)
     return max(PROB_FLOOR, min(PROB_CEILING, p))
 
 

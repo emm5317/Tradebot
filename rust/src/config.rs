@@ -97,6 +97,12 @@ pub struct Config {
     #[serde(default = "default_crypto_kelly_fill_min")]
     pub crypto_kelly_fill_min: f64,
 
+    // Phase 14: Tail compression and rate limiting
+    #[serde(default = "default_crypto_compress_factor")]
+    pub crypto_compress_factor: f64,
+    #[serde(default = "default_crypto_max_signals_per_hour")]
+    pub crypto_max_signals_per_hour: u32,
+
     // Phase 13: Per-asset enable flags (BTC default true, others false)
     #[serde(default = "default_true")]
     pub enable_crypto_btc: bool,
@@ -135,15 +141,15 @@ fn default_crypto_entry_min_minutes() -> f64 {
 }
 
 fn default_crypto_entry_max_minutes() -> f64 {
-    59.0
+    20.0
 }
 
 fn default_crypto_min_edge() -> f64 {
-    0.02
+    0.08
 }
 
 fn default_crypto_min_kelly() -> f64 {
-    0.01
+    0.04
 }
 
 fn default_crypto_min_confidence() -> f64 {
@@ -151,19 +157,19 @@ fn default_crypto_min_confidence() -> f64 {
 }
 
 fn default_crypto_max_edge() -> f64 {
-    0.35
+    0.25
 }
 
 fn default_crypto_cooldown_secs() -> u64 {
-    15
+    300
 }
 
 fn default_crypto_vol_multiplier() -> f64 {
-    2.0
+    2.5
 }
 
 fn default_crypto_prob_ceiling() -> f64 {
-    0.95
+    0.80
 }
 
 fn default_crypto_risk_reward_max_ratio() -> f64 {
@@ -179,11 +185,19 @@ fn default_weather_cooldown_secs() -> u64 {
 }
 
 fn default_crypto_max_market_disagreement() -> f64 {
-    0.35
+    0.25
 }
 
 fn default_crypto_directional_min_conviction() -> f64 {
     0.05
+}
+
+fn default_crypto_compress_factor() -> f64 {
+    0.20
+}
+
+fn default_crypto_max_signals_per_hour() -> u32 {
+    20
 }
 
 fn default_rti_stale_threshold_secs() -> u64 {
@@ -236,6 +250,8 @@ impl Config {
             crypto_prob_ceiling = self.crypto_prob_ceiling,
             crypto_risk_reward_max_ratio = self.crypto_risk_reward_max_ratio,
             crypto_kelly_fill_min = self.crypto_kelly_fill_min,
+            crypto_compress_factor = self.crypto_compress_factor,
+            crypto_max_signals_per_hour = self.crypto_max_signals_per_hour,
             crypto_cooldown_secs = self.crypto_cooldown_secs,
             weather_cooldown_secs = self.weather_cooldown_secs,
             database_pool_size = self.database_pool_size,

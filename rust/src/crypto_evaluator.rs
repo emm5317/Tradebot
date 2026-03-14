@@ -252,6 +252,9 @@ pub async fn run(
     let mut last_eval: HashMap<String, Instant> = HashMap::new();
     let mut last_summary = Instant::now();
     let mut edge_tracker = EdgeTracker::new();
+    // Phase 14: Per-ticker signal cooldown and global rate limiter
+    let mut last_signal_fired: HashMap<String, Instant> = HashMap::new();
+    let mut signal_timestamps: VecDeque<Instant> = VecDeque::new();
 
     info!("crypto evaluator started (event-driven, multi-asset)");
 
@@ -340,10 +343,11 @@ pub async fn run(
                         continue;
                     }
 
-                    let asset_config = AssetConfig::for_asset_with_overrides(
+                    let asset_config = AssetConfig::for_asset_with_full_overrides(
                         contract.asset,
                         config.crypto_vol_multiplier,
                         config.crypto_prob_ceiling,
+                        config.crypto_compress_factor,
                     );
 
                     match contract_phase(minutes_remaining, config.crypto_entry_min_minutes, config.crypto_entry_max_minutes) {
@@ -370,6 +374,8 @@ pub async fn run(
                                 &mut edge_tracker,
                                 &decision_writer,
                                 &asset_config,
+                                &mut last_signal_fired,
+                                &mut signal_timestamps,
                             )
                             .await;
                         }
@@ -435,6 +441,8 @@ async fn evaluate_entry(
     edge_tracker: &mut EdgeTracker,
     decision_writer: &DecisionLogWriter,
     asset_config: &AssetConfig,
+    last_signal_fired: &mut HashMap<String, Instant>,
+    signal_timestamps: &mut VecDeque<Instant>,
 ) {
     let eval_start = Instant::now();
 
@@ -515,6 +523,58 @@ async fn evaluate_entry(
             outcome: "skipped".into(),
             rejection_reason: Some("extreme_market_price".into()),
             market_price: Some(mid_price),
+            minutes_remaining: Some(minutes_remaining),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
+        });
+        return;
+    }
+
+    // Phase 14: Per-ticker signal cooldown
+    if let Some(last_fired) = last_signal_fired.get(&contract.ticker) {
+        let elapsed = last_fired.elapsed().as_secs();
+        if elapsed < config.crypto_cooldown_secs {
+            trace!(
+                ticker = %contract.ticker,
+                elapsed_secs = elapsed,
+                cooldown_secs = config.crypto_cooldown_secs,
+                "crypto eval: signal cooldown"
+            );
+            decision_writer.send(DecisionEntry {
+                ticker: contract.ticker.clone(),
+                signal_type: "crypto".into(),
+                outcome: "rejected".into(),
+                rejection_reason: Some(format!("signal_cooldown ({}s/{}s)", elapsed, config.crypto_cooldown_secs)),
+                minutes_remaining: Some(minutes_remaining),
+                eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            });
+            return;
+        }
+    }
+
+    // Phase 14: Global hourly signal rate limiter
+    let now_instant = Instant::now();
+    let one_hour = Duration::from_secs(3600);
+    while let Some(front) = signal_timestamps.front() {
+        if now_instant.duration_since(*front) > one_hour {
+            signal_timestamps.pop_front();
+        } else {
+            break;
+        }
+    }
+    if signal_timestamps.len() >= config.crypto_max_signals_per_hour as usize {
+        debug!(
+            ticker = %contract.ticker,
+            signals_this_hour = signal_timestamps.len(),
+            max = config.crypto_max_signals_per_hour,
+            "crypto eval: hourly rate limit"
+        );
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("hourly_rate_limit".into()),
             minutes_remaining: Some(minutes_remaining),
             eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
             ..Default::default()
@@ -876,6 +936,10 @@ async fn evaluate_entry(
         warn!(ticker = %signal.ticker, "crypto eval: signal persist failed, skipping order");
         return;
     }
+
+    // Phase 14: Record signal fire time for cooldown and rate limiting
+    last_signal_fired.insert(contract.ticker.clone(), Instant::now());
+    signal_timestamps.push_back(Instant::now());
 
     // 11. Risk check + submit
     {
