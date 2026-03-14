@@ -21,7 +21,7 @@ import structlog
 if TYPE_CHECKING:
     import asyncpg
 
-from config import get_settings
+from config import get_db_ssl_mode, get_settings
 
 logger = structlog.get_logger()
 
@@ -203,7 +203,7 @@ async def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
-    pool = await _asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    pool = await _asyncpg.create_pool(settings.database_url, min_size=1, max_size=3, ssl=get_db_ssl_mode(settings.database_url))
 
     if args.backfill > 0:
         await backfill(pool, args.backfill)

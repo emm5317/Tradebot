@@ -35,3 +35,14 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
+
+
+def get_db_ssl_mode(database_url: str):
+    """Return ssl parameter for asyncpg.create_pool.
+
+    Local Docker Postgres doesn't support SSL; asyncpg on Python 3.14/Windows
+    intermittently fails the SSL negotiation. Disable SSL for localhost.
+    """
+    if "localhost" in database_url or "127.0.0.1" in database_url:
+        return "disable"
+    return None

@@ -20,7 +20,7 @@ from datetime import UTC, date, datetime, timedelta
 import asyncpg
 import structlog
 
-from config import Settings, get_settings
+from config import Settings, get_db_ssl_mode, get_settings
 from models.physics import compute_hrrr_skill_scores
 
 logger = structlog.get_logger()
@@ -38,7 +38,7 @@ class CalibrationDaemon:
 
     async def run(self) -> None:
         """Initialize connections and run calibration loop."""
-        self.pool = await asyncpg.create_pool(self.settings.database_url, min_size=2, max_size=5)
+        self.pool = await asyncpg.create_pool(self.settings.database_url, min_size=2, max_size=5, ssl=get_db_ssl_mode(self.settings.database_url))
         logger.info("calibrator_started")
 
         try:

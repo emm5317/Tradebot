@@ -19,14 +19,14 @@ from collections import defaultdict
 import asyncpg
 import structlog
 
-from config import Settings, get_settings
+from config import Settings, get_db_ssl_mode, get_settings
 
 logger = structlog.get_logger()
 
 
 async def discover_from_db(settings: Settings) -> dict[str, list[dict]]:
     """Query all tickers from contracts table and group by series prefix."""
-    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3, ssl=get_db_ssl_mode(settings.database_url))
 
     try:
         async with pool.acquire() as conn:

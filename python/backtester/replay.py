@@ -348,10 +348,10 @@ async def main() -> None:
     parser.add_argument("--no-fees", action="store_true", help="Disable transaction cost modeling")
     args = parser.parse_args()
 
-    from config import get_settings
+    from config import get_db_ssl_mode, get_settings
 
     settings = get_settings()
-    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3, ssl=get_db_ssl_mode(settings.database_url))
 
     fee_model = FeeModel() if not args.no_fees else FeeModel(fee_type="flat", flat_fee_cents=0)
     engine = ReplayEngine(pool, fee_model=fee_model)

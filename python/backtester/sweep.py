@@ -25,7 +25,7 @@ import structlog
 
 from backtester.costs import FeeModel
 from backtester.metrics import TradeRecord, compute_advanced_metrics
-from config import get_settings
+from config import get_db_ssl_mode, get_settings
 from data.mesonet import ASOSObservation
 from models.physics import StationCalibration
 from models.weather_fv import compute_weather_fair_value
@@ -1043,7 +1043,7 @@ async def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
-    pool = await asyncpg.create_pool(settings.database_url, min_size=2, max_size=5)
+    pool = await asyncpg.create_pool(settings.database_url, min_size=2, max_size=5, ssl=get_db_ssl_mode(settings.database_url))
 
     start = date.fromisoformat(args.start)
     end = date.fromisoformat(args.end)

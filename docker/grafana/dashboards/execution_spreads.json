@@ -61,7 +61,7 @@
       "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
       "datasource": { "uid": "tradebot_pg", "type": "postgres" },
       "targets": [{
-        "rawSql": "SELECT ROUND(AVG(ABS(fill_price - limit_price)) * 100, 2) AS avg_slippage_cents FROM orders WHERE status = 'filled' AND fill_price IS NOT NULL AND limit_price IS NOT NULL AND filled_at >= CURRENT_DATE",
+        "rawSql": "SELECT ROUND((AVG(ABS(fill_price - limit_price)) * 100)::numeric, 2) AS avg_slippage_cents FROM orders WHERE status = 'filled' AND fill_price IS NOT NULL AND limit_price IS NOT NULL AND filled_at >= CURRENT_DATE",
         "format": "table",
         "refId": "A"
       }],

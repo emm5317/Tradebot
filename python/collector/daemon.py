@@ -15,7 +15,7 @@ import httpx
 import structlog
 
 from analytics.settlement_summary import aggregate_settlement_summary
-from config import Settings, get_settings
+from config import Settings, get_db_ssl_mode, get_settings
 from data.aviationweather import METARObservation, fetch_metar
 from data.binance_ws import BinanceFeed
 from data.mesonet import ASOSObservation, fetch_all_stations
@@ -48,6 +48,7 @@ class CollectorDaemon:
             self.settings.database_url,
             min_size=2,
             max_size=5,
+            ssl=get_db_ssl_mode(self.settings.database_url),
         )
         logger.info("collector_started", stations=self.settings.asos_stations)
 

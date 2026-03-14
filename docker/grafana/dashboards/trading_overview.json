@@ -163,7 +163,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
       "datasource": { "uid": "tradebot_pg", "type": "postgres" },
       "targets": [{
-        "rawSql": "SELECT o.ticker, c.title, o.direction, ROUND(o.fill_price::numeric, 3) AS fill_price, ROUND(c.minutes_to_settlement::numeric, 0) AS mins_to_settle, o.filled_at FROM orders o JOIN contracts c ON o.ticker = c.ticker WHERE o.status = 'filled' AND o.outcome = 'pending' AND c.status = 'active' ORDER BY c.minutes_to_settlement ASC",
+        "rawSql": "SELECT o.ticker, c.title, o.direction, ROUND(o.fill_price::numeric, 3) AS fill_price, ROUND(EXTRACT(EPOCH FROM (c.settlement_time - now()))::numeric / 60, 0) AS mins_to_settle, o.filled_at FROM orders o JOIN contracts c ON o.ticker = c.ticker WHERE o.status = 'filled' AND o.outcome = 'pending' AND c.status = 'active' ORDER BY c.settlement_time ASC",
         "format": "table",
         "refId": "A"
       }]

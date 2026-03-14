@@ -27,6 +27,12 @@ pub struct AssetConfig {
     pub compress_floor_knee: f64,
     pub compress_ceil_knee: f64,
     pub compress_factor: f64,
+    /// Phase 15: Per-asset trading thresholds.
+    pub min_edge: f64,
+    pub min_kelly: f64,
+    pub max_edge: f64,
+    pub max_market_disagreement: f64,
+    pub cooldown_secs: u64,
 }
 
 impl AssetConfig {
@@ -42,6 +48,11 @@ impl AssetConfig {
                 compress_floor_knee: 0.25,
                 compress_ceil_knee: 0.75,
                 compress_factor: 0.20,
+                min_edge: 0.08,
+                min_kelly: 0.04,
+                max_edge: 0.25,
+                max_market_disagreement: 0.25,
+                cooldown_secs: 300,
             },
             CryptoAsset::ETH => Self {
                 default_vol: 0.60,
@@ -52,6 +63,11 @@ impl AssetConfig {
                 compress_floor_knee: 0.25,
                 compress_ceil_knee: 0.75,
                 compress_factor: 0.20,
+                min_edge: 0.08,
+                min_kelly: 0.04,
+                max_edge: 0.25,
+                max_market_disagreement: 0.25,
+                cooldown_secs: 300,
             },
             CryptoAsset::SOL => Self {
                 default_vol: 0.90,
@@ -62,6 +78,11 @@ impl AssetConfig {
                 compress_floor_knee: 0.25,
                 compress_ceil_knee: 0.75,
                 compress_factor: 0.20,
+                min_edge: 0.10,
+                min_kelly: 0.04,
+                max_edge: 0.30,
+                max_market_disagreement: 0.30,
+                cooldown_secs: 240,
             },
             CryptoAsset::XRP => Self {
                 default_vol: 0.80,
@@ -72,6 +93,11 @@ impl AssetConfig {
                 compress_floor_knee: 0.25,
                 compress_ceil_knee: 0.75,
                 compress_factor: 0.20,
+                min_edge: 0.10,
+                min_kelly: 0.04,
+                max_edge: 0.30,
+                max_market_disagreement: 0.30,
+                cooldown_secs: 240,
             },
             CryptoAsset::DOGE => Self {
                 default_vol: 1.00,
@@ -82,6 +108,11 @@ impl AssetConfig {
                 compress_floor_knee: 0.25,
                 compress_ceil_knee: 0.75,
                 compress_factor: 0.20,
+                min_edge: 0.12,
+                min_kelly: 0.05,
+                max_edge: 0.35,
+                max_market_disagreement: 0.30,
+                cooldown_secs: 180,
             },
         }
     }
@@ -92,6 +123,7 @@ impl AssetConfig {
     }
 
     /// Return tuned configuration with all overrides including compression factor.
+    /// Global config overrides (from env vars) are applied on top of per-asset defaults.
     pub fn for_asset_with_full_overrides(asset: CryptoAsset, vol_mult_override: f64, prob_ceiling_override: f64, compress_factor: f64) -> Self {
         let mut config = Self::for_asset(asset);
         // For BTC, apply the override directly; for alts, scale proportionally
@@ -101,6 +133,36 @@ impl AssetConfig {
         config.prob_ceiling = prob_ceiling_override;
         config.compress_factor = compress_factor;
         config
+    }
+
+    /// Apply optional global config overrides for trading thresholds.
+    /// If the global config value differs from the Rust default, it takes precedence.
+    pub fn with_trading_overrides(
+        mut self,
+        global_min_edge: f64,
+        global_min_kelly: f64,
+        global_max_edge: f64,
+        global_max_market_disagreement: f64,
+        global_cooldown_secs: u64,
+    ) -> Self {
+        // Only override if the global value is explicitly set (non-default sentinel).
+        // Use the global values as overrides — they take precedence when provided.
+        if global_min_edge > 0.0 {
+            self.min_edge = global_min_edge;
+        }
+        if global_min_kelly > 0.0 {
+            self.min_kelly = global_min_kelly;
+        }
+        if global_max_edge > 0.0 {
+            self.max_edge = global_max_edge;
+        }
+        if global_max_market_disagreement > 0.0 {
+            self.max_market_disagreement = global_max_market_disagreement;
+        }
+        if global_cooldown_secs > 0 {
+            self.cooldown_secs = global_cooldown_secs;
+        }
+        self
     }
 }
 
@@ -1328,5 +1390,34 @@ mod tests {
             "discontinuity at floor_knee: {} vs {}",
             at_floor_knee, just_below
         );
+    }
+
+    #[test]
+    fn test_per_asset_trading_thresholds_differ() {
+        let btc = AssetConfig::for_asset(CryptoAsset::BTC);
+        let doge = AssetConfig::for_asset(CryptoAsset::DOGE);
+        let sol = AssetConfig::for_asset(CryptoAsset::SOL);
+
+        // DOGE should have wider thresholds than BTC
+        assert!(doge.min_edge > btc.min_edge, "DOGE min_edge ({}) should > BTC ({})", doge.min_edge, btc.min_edge);
+        assert!(doge.min_kelly > btc.min_kelly, "DOGE min_kelly ({}) should > BTC ({})", doge.min_kelly, btc.min_kelly);
+        assert!(doge.max_edge > btc.max_edge, "DOGE max_edge ({}) should > BTC ({})", doge.max_edge, btc.max_edge);
+        assert!(doge.cooldown_secs < btc.cooldown_secs, "DOGE cooldown ({}) should < BTC ({})", doge.cooldown_secs, btc.cooldown_secs);
+
+        // SOL should have wider thresholds than BTC but narrower than DOGE
+        assert!(sol.min_edge > btc.min_edge);
+        assert!(sol.max_edge > btc.max_edge);
+        assert!(sol.max_edge <= doge.max_edge);
+    }
+
+    #[test]
+    fn test_trading_overrides_applied() {
+        let config = AssetConfig::for_asset(CryptoAsset::BTC)
+            .with_trading_overrides(0.05, 0.02, 0.20, 0.20, 120);
+        assert!((config.min_edge - 0.05).abs() < 1e-6);
+        assert!((config.min_kelly - 0.02).abs() < 1e-6);
+        assert!((config.max_edge - 0.20).abs() < 1e-6);
+        assert!((config.max_market_disagreement - 0.20).abs() < 1e-6);
+        assert_eq!(config.cooldown_secs, 120);
     }
 }

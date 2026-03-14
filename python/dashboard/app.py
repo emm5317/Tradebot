@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
-from config import Settings, get_settings
+from config import Settings, get_db_ssl_mode, get_settings
 
 logger = structlog.get_logger()
 
@@ -35,7 +35,10 @@ nats_client: nats.NATS | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pool, redis_client, nats_client
-    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(
+        settings.database_url, min_size=2, max_size=10,
+        ssl=get_db_ssl_mode(settings.database_url),
+    )
     redis_client = aioredis.from_url(settings.redis_url)
     nats_client = await nats.connect(settings.nats_url)
     logger.info("dashboard_started", port=settings.dashboard_port)
@@ -337,58 +340,47 @@ async def system_status():
     try:
         if pool:
             async with pool.acquire() as conn:
-                # Daily P&L: try strategy_performance first, fall back to orders
                 row = await conn.fetchrow("""
-                    SELECT COALESCE(SUM(realized_pnl_cents), 0) as pnl
-                    FROM strategy_performance
-                    WHERE date = CURRENT_DATE
+                    WITH pnl_strategy AS (
+                        SELECT COALESCE(SUM(realized_pnl_cents), 0) AS pnl
+                        FROM strategy_performance WHERE date = CURRENT_DATE
+                    ),
+                    pnl_orders AS (
+                        SELECT COALESCE(SUM(pnl_cents), 0) AS pnl
+                        FROM orders WHERE outcome IN ('win','loss') AND settled_at >= CURRENT_DATE
+                    ),
+                    positions AS (
+                        SELECT COUNT(*) AS cnt FROM orders
+                        WHERE status IN ('filled','pending') AND outcome = 'pending'
+                    ),
+                    sig_rate AS (
+                        SELECT COUNT(*) AS cnt FROM signals
+                        WHERE created_at >= NOW() - INTERVAL '1 hour'
+                    ),
+                    brier AS (
+                        SELECT brier_score FROM strategy_performance
+                        WHERE brier_score IS NOT NULL ORDER BY date DESC LIMIT 1
+                    ),
+                    latency AS (
+                        SELECT AVG(latency_ms)::int AS avg_lat FROM orders
+                        WHERE latency_ms IS NOT NULL AND created_at >= NOW() - INTERVAL '1 hour'
+                    )
+                    SELECT
+                        COALESCE(NULLIF((SELECT pnl FROM pnl_strategy), 0),
+                                 (SELECT pnl FROM pnl_orders)) AS daily_pnl_cents,
+                        (SELECT cnt FROM positions) AS positions_count,
+                        (SELECT cnt FROM sig_rate) AS signal_rate_1h,
+                        (SELECT brier_score FROM brier) AS brier_score,
+                        (SELECT avg_lat FROM latency) AS avg_latency_ms
                 """)
-                if row and row["pnl"]:
-                    result["daily_pnl_cents"] = row["pnl"]
-                else:
-                    # Fall back to summing settled order P&L directly
-                    row2 = await conn.fetchrow("""
-                        SELECT COALESCE(SUM(pnl_cents), 0) as pnl
-                        FROM orders
-                        WHERE outcome IN ('win', 'loss')
-                          AND settled_at >= CURRENT_DATE
-                    """)
-                    if row2:
-                        result["daily_pnl_cents"] = row2["pnl"]
-
-                # Open positions count (use order_state for granularity)
-                count = await conn.fetchval("""
-                    SELECT COUNT(*) FROM orders
-                    WHERE status IN ('filled', 'pending')
-                      AND outcome = 'pending'
-                """)
-                result["positions_count"] = count or 0
-
-                # Signal rate (last hour)
-                sig_count = await conn.fetchval("""
-                    SELECT COUNT(*) FROM signals
-                    WHERE created_at >= NOW() - INTERVAL '1 hour'
-                """)
-                result["signal_rate_1h"] = sig_count or 0
-
-                # Latest Brier score
-                brier_row = await conn.fetchrow("""
-                    SELECT brier_score FROM strategy_performance
-                    WHERE brier_score IS NOT NULL
-                    ORDER BY date DESC
-                    LIMIT 1
-                """)
-                if brier_row and brier_row["brier_score"] is not None:
-                    result["brier_score"] = float(brier_row["brier_score"])
-
-                # Average latency (last hour)
-                lat_row = await conn.fetchrow("""
-                    SELECT AVG(latency_ms)::int as avg_lat FROM orders
-                    WHERE latency_ms IS NOT NULL
-                      AND created_at >= NOW() - INTERVAL '1 hour'
-                """)
-                if lat_row and lat_row["avg_lat"] is not None:
-                    result["avg_latency_ms"] = lat_row["avg_lat"]
+                if row:
+                    result["daily_pnl_cents"] = row["daily_pnl_cents"] or 0
+                    result["positions_count"] = row["positions_count"] or 0
+                    result["signal_rate_1h"] = row["signal_rate_1h"] or 0
+                    if row["brier_score"] is not None:
+                        result["brier_score"] = float(row["brier_score"])
+                    if row["avg_latency_ms"] is not None:
+                        result["avg_latency_ms"] = row["avg_latency_ms"]
     except Exception:
         logger.warning("system_status_db_error")
 

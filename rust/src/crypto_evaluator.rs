@@ -37,7 +37,7 @@ use crate::types::{Signal, SignalPriority};
 const EXIT_EDGE_THRESHOLD: f64 = -0.03;
 
 /// Per-ticker debounce interval to avoid evaluating the same ticker too rapidly.
-const DEBOUNCE_MS: u128 = 500;
+const DEBOUNCE_MS: u128 = 250;
 
 /// Phase 4.3: Microstructure adjustment from trade tape and orderbook.
 #[derive(Debug)]
@@ -530,21 +530,21 @@ async fn evaluate_entry(
         return;
     }
 
-    // Phase 14: Per-ticker signal cooldown
+    // Phase 14: Per-ticker signal cooldown (Phase 15: per-asset thresholds)
     if let Some(last_fired) = last_signal_fired.get(&contract.ticker) {
         let elapsed = last_fired.elapsed().as_secs();
-        if elapsed < config.crypto_cooldown_secs {
+        if elapsed < asset_config.cooldown_secs {
             trace!(
                 ticker = %contract.ticker,
                 elapsed_secs = elapsed,
-                cooldown_secs = config.crypto_cooldown_secs,
+                cooldown_secs = asset_config.cooldown_secs,
                 "crypto eval: signal cooldown"
             );
             decision_writer.send(DecisionEntry {
                 ticker: contract.ticker.clone(),
                 signal_type: "crypto".into(),
                 outcome: "rejected".into(),
-                rejection_reason: Some(format!("signal_cooldown ({}s/{}s)", elapsed, config.crypto_cooldown_secs)),
+                rejection_reason: Some(format!("signal_cooldown ({}s/{}s)", elapsed, asset_config.cooldown_secs)),
                 minutes_remaining: Some(minutes_remaining),
                 eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
                 ..Default::default()
@@ -668,8 +668,8 @@ async fn evaluate_entry(
         return;
     }
 
-    // 4b. Guard: market disagreement — model shouldn't disagree with market by >25%
-    if raw_edge > config.crypto_max_market_disagreement {
+    // 4b. Guard: market disagreement — model shouldn't disagree with market by >N% (per-asset)
+    if raw_edge > asset_config.max_market_disagreement {
         debug!(
             ticker = %contract.ticker,
             raw_edge = %format!("{:.4}", raw_edge),
@@ -736,7 +736,7 @@ async fn evaluate_entry(
     edge_tracker.record(&contract.ticker, adjusted_edge);
 
     // 6a. Check maximum edge (model miscalibration filter)
-    if adjusted_edge > config.crypto_max_edge {
+    if adjusted_edge > asset_config.max_edge {
         debug!(ticker = %contract.ticker, edge = %format!("{:.4}", adjusted_edge), "crypto eval: edge too large (likely miscalibration)");
         decision_writer.send(DecisionEntry {
             ticker: contract.ticker.clone(),
@@ -764,7 +764,7 @@ async fn evaluate_entry(
     }
 
     // 6b. Check minimum edge (using microstructure-adjusted edge)
-    if adjusted_edge < config.crypto_min_edge {
+    if adjusted_edge < asset_config.min_edge {
         debug!(ticker = %contract.ticker, edge = %format!("{:.4}", adjusted_edge), "crypto eval: edge below minimum");
         decision_writer.send(DecisionEntry {
             ticker: contract.ticker.clone(),
@@ -867,7 +867,7 @@ async fn evaluate_entry(
     }
 
     // 9. Check minimum Kelly
-    if kelly < config.crypto_min_kelly {
+    if kelly < asset_config.min_kelly {
         debug!(ticker = %contract.ticker, kelly = %format!("{:.4}", kelly), "crypto eval: kelly below minimum");
         decision_writer.send(DecisionEntry {
             ticker: contract.ticker.clone(),

@@ -11,7 +11,7 @@ import httpx
 import structlog
 from pydantic import BaseModel
 
-from config import Settings, get_settings
+from config import Settings, get_db_ssl_mode, get_settings
 from rules.ticker_parser import parse_ticker
 from rules.timezone import compute_day_boundaries
 
@@ -50,7 +50,7 @@ async def pull_settlement_history(
     if categories is None:
         categories = ["weather", "crypto"]
 
-    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3, ssl=get_db_ssl_mode(settings.database_url))
     total = 0
 
     try:
@@ -248,7 +248,7 @@ async def pull_active_contracts(
     if categories is None:
         categories = ["weather", "crypto"]
 
-    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3, ssl=get_db_ssl_mode(settings.database_url))
     total = 0
 
     # Known series tickers for targeted pulls (Kalshi category field is often None)

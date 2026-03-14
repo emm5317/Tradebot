@@ -21,14 +21,14 @@ const THRESHOLDS: &[(&str, u64)] = &[
     // Per-asset feed names (Phase 13)
     ("coinbase_btc", 5),
     ("coinbase_eth", 5),
-    ("coinbase_sol", 5),
-    ("coinbase_xrp", 5),
-    ("coinbase_doge", 5),
+    ("coinbase_sol", 10),
+    ("coinbase_xrp", 15),
+    ("coinbase_doge", 30),
     ("binance_spot_btc", 10),
     ("binance_spot_eth", 10),
-    ("binance_spot_sol", 10),
-    ("binance_spot_xrp", 10),
-    ("binance_spot_doge", 10),
+    ("binance_spot_sol", 15),
+    ("binance_spot_xrp", 15),
+    ("binance_spot_doge", 30),
 ];
 
 /// Required feeds per strategy.
@@ -53,14 +53,14 @@ const P50_THRESHOLDS: &[(&str, u64)] = &[
     ("deribit", 5),
     ("coinbase_btc", 1),
     ("coinbase_eth", 1),
-    ("coinbase_sol", 1),
-    ("coinbase_xrp", 1),
-    ("coinbase_doge", 1),
+    ("coinbase_sol", 3),
+    ("coinbase_xrp", 5),
+    ("coinbase_doge", 10),
     ("binance_spot_btc", 1),
     ("binance_spot_eth", 1),
-    ("binance_spot_sol", 1),
-    ("binance_spot_xrp", 1),
-    ("binance_spot_doge", 1),
+    ("binance_spot_sol", 3),
+    ("binance_spot_xrp", 5),
+    ("binance_spot_doge", 10),
 ];
 
 impl FeedHealth {

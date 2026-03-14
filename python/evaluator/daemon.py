@@ -17,7 +17,7 @@ import redis.asyncio as aioredis
 import structlog
 
 from analytics.aggregator import aggregate_daily_performance
-from config import Settings, get_settings
+from config import Settings, get_db_ssl_mode, get_settings
 from data.mesonet import fetch_all_stations
 from models.physics import build_climo_table, build_sigma_table, build_station_calibration
 from rules.resolver import ContractRulesResolver
@@ -43,10 +43,11 @@ class EvaluationDaemon:
         self.rules_resolver = ContractRulesResolver()
         self.notifier = DiscordNotifier(self.settings.discord_webhook_url or None)
         self._shutdown = asyncio.Event()
+        self._decision_log_tasks: set[asyncio.Task] = set()
 
     async def run(self) -> None:
         """Initialize connections, register evaluators, run evaluation loop."""
-        self.pool = await asyncpg.create_pool(self.settings.database_url, min_size=2, max_size=5)
+        self.pool = await asyncpg.create_pool(self.settings.database_url, min_size=2, max_size=5, ssl=get_db_ssl_mode(self.settings.database_url))
         self.nc = await nats.connect(self.settings.nats_url)
         self.redis = aioredis.from_url(self.settings.redis_url)
 
@@ -225,13 +226,11 @@ class EvaluationDaemon:
                     station = contract.station or "KORD"
                     obs = asos_obs.get(station) if asos_obs else None
                     if obs is None:
-                        asyncio.create_task(
-                            self._write_decision_log(
+                        self._spawn_decision_log(
                                 ticker=ticker,
                                 outcome="skipped",
                                 rejection_reason="no_observation_data",
                             )
-                        )
                         continue
                     sig, rej, state = evaluator.evaluate(
                         contract=contract,
@@ -268,8 +267,7 @@ class EvaluationDaemon:
                 # Decision audit log
                 mins_left = (contract.settlement_time - datetime.now(UTC)).total_seconds() / 60.0
                 if sig is not None:
-                    asyncio.create_task(
-                        self._write_decision_log(
+                    self._spawn_decision_log(
                             ticker=ticker,
                             outcome="signal",
                             model_prob=state.model_prob if state else None,
@@ -279,10 +277,8 @@ class EvaluationDaemon:
                             minutes_remaining=mins_left,
                             confidence=state.confidence if state else None,
                         )
-                    )
                 elif rej is not None:
-                    asyncio.create_task(
-                        self._write_decision_log(
+                    self._spawn_decision_log(
                             ticker=ticker,
                             outcome="rejected",
                             rejection_reason=rej.rejection_reason if hasattr(rej, "rejection_reason") else None,
@@ -292,15 +288,12 @@ class EvaluationDaemon:
                             minutes_remaining=mins_left,
                             confidence=state.confidence if state else None,
                         )
-                    )
                 else:
-                    asyncio.create_task(
-                        self._write_decision_log(
+                    self._spawn_decision_log(
                             ticker=ticker,
                             outcome="skipped",
                             minutes_remaining=mins_left,
                         )
-                    )
 
             except Exception:
                 logger.exception("evaluate_contract_error", ticker=ticker)
@@ -314,6 +307,17 @@ class EvaluationDaemon:
             eval_ms=round((t_eval - t_io) * 1000, 1),
             total_ms=round((t_eval - t0) * 1000, 1),
         )
+
+    def _spawn_decision_log(self, **kwargs) -> None:
+        """Spawn a bounded decision_log write task with backpressure."""
+        # Prune completed tasks
+        self._decision_log_tasks = {t for t in self._decision_log_tasks if not t.done()}
+        if len(self._decision_log_tasks) >= 100:
+            logger.warning("decision_log_backpressure", pending=len(self._decision_log_tasks))
+            return
+        task = asyncio.create_task(self._write_decision_log(**kwargs))
+        self._decision_log_tasks.add(task)
+        task.add_done_callback(self._decision_log_tasks.discard)
 
     async def _write_decision_log(
         self,

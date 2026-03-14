@@ -3,7 +3,7 @@
 //! Subscribes to `level2` and `market_trades` channels for all enabled
 //! crypto assets. Routes updates to per-asset CryptoState via the registry.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -149,7 +149,63 @@ impl CoinbaseFeed {
             .send(Message::Text(subscribe_trades.to_string().into()))
             .await?;
 
-        info!(products = ?product_ids, "coinbase subscribed to products");
+        info!(products = ?product_ids, "coinbase subscribe messages sent");
+
+        // Wait for subscription ACKs (up to 5s)
+        let mut confirmed_channels: HashSet<String> = HashSet::new();
+        let ack_result = tokio::time::timeout(Duration::from_secs(5), async {
+            while confirmed_channels.len() < 2 {
+                match read.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&text) {
+                            let channel = msg.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+                            match channel {
+                                "subscriptions" => {
+                                    // Coinbase ACK: extract confirmed channels
+                                    if let Some(subs) = msg.get("events").and_then(|v| v.as_array()) {
+                                        for sub in subs {
+                                            if let Some(ch) = sub.get("subscriptions").and_then(|v| v.as_object()) {
+                                                for key in ch.keys() {
+                                                    confirmed_channels.insert(key.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    info!(channels = ?confirmed_channels, "coinbase subscription ack received");
+                                }
+                                "ticker" | "ticker_batch" | "market_trades" => {
+                                    // Data event received — subscription implicitly confirmed
+                                    confirmed_channels.insert(channel.to_string());
+                                    info!(channel = channel, "coinbase subscription implicitly confirmed via data");
+                                    break;
+                                }
+                                _ => {
+                                    // Check for error type
+                                    if let Some(err_type) = msg.get("type").and_then(|v| v.as_str()) {
+                                        if err_type == "error" {
+                                            warn!(msg = %text, "coinbase subscription error");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Err(e)) => {
+                        warn!(error = %e, "coinbase ws error during ack wait");
+                        break;
+                    }
+                    None => break,
+                    _ => {}
+                }
+            }
+        }).await;
+
+        if ack_result.is_err() {
+            warn!("coinbase_subscription_ack_timeout: no confirmation within 5s, continuing anyway");
+        } else {
+            info!(confirmed = ?confirmed_channels, "coinbase subscriptions confirmed");
+        }
 
         let mut states: HashMap<CryptoAsset, CoinbaseAssetState> = self
             .assets
@@ -395,5 +451,42 @@ mod tests {
         assert!(sub_str.contains("BTC-USD"));
         assert!(sub_str.contains("ETH-USD"));
         assert!(sub_str.contains("SOL-USD"));
+    }
+
+    #[test]
+    fn test_parse_subscription_ack() {
+        // Coinbase subscription ACK format
+        let ack_msg = r#"{"channel":"subscriptions","events":[{"subscriptions":{"ticker":["BTC-USD","ETH-USD"],"market_trades":["BTC-USD","ETH-USD"]}}]}"#;
+        let msg: serde_json::Value = serde_json::from_str(ack_msg).unwrap();
+        let channel = msg.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(channel, "subscriptions");
+
+        let mut confirmed: HashSet<String> = HashSet::new();
+        if let Some(events) = msg.get("events").and_then(|v| v.as_array()) {
+            for event in events {
+                if let Some(subs) = event.get("subscriptions").and_then(|v| v.as_object()) {
+                    for key in subs.keys() {
+                        confirmed.insert(key.clone());
+                    }
+                }
+            }
+        }
+        assert!(confirmed.contains("ticker"));
+        assert!(confirmed.contains("market_trades"));
+        assert_eq!(confirmed.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_subscription_ack_ignores_data() {
+        // A ticker data message should not parse as a subscription ACK
+        let mut states = make_states();
+        let product_map = make_product_map();
+        let ticker_msg = r#"{"channel":"ticker","events":[{"type":"ticker","tickers":[{"product_id":"BTC-USD","price":"95000.50","best_bid":"95000.00","best_ask":"95001.00"}]}]}"#;
+        let msg: serde_json::Value = serde_json::from_str(ticker_msg).unwrap();
+        let channel = msg.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        assert_ne!(channel, "subscriptions");
+        // But it should still parse as valid data
+        let asset = parse_coinbase_message_multi(ticker_msg, &mut states, &product_map);
+        assert_eq!(asset, Some(CryptoAsset::BTC));
     }
 }

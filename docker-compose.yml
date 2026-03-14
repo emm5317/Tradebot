@@ -5,6 +5,15 @@ services:
     image: timescale/timescaledb:latest-pg17
     ports:
       - "15432:5432"
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c work_mem=16MB
+      -c effective_cache_size=512MB
+      -c maintenance_work_mem=128MB
+      -c max_connections=50
+      -c random_page_cost=1.1
+      -c checkpoint_completion_target=0.9
     environment:
       POSTGRES_DB: tradebot
       POSTGRES_USER: tradebot

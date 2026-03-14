@@ -16,7 +16,7 @@ import asyncpg
 import structlog
 
 from backtester.costs import FeeModel
-from config import get_settings
+from config import get_db_ssl_mode, get_settings
 from data.mesonet import ASOSObservation
 from models.physics import build_climo_table, build_sigma_table
 from rules.ticker_parser import _extract_crypto_strike
@@ -387,7 +387,7 @@ async def main() -> None:
     signal_types = [args.type] if args.type else None
 
     settings = get_settings()
-    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3, ssl=get_db_ssl_mode(settings.database_url))
 
     # Build tables and evaluators
     sigma_table = await build_sigma_table(pool)
