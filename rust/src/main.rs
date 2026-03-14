@@ -55,6 +55,17 @@ async fn main() -> Result<()> {
          Copy config/.env.example to .env and fill in required values.",
     )?;
 
+    // Validate configuration bounds and cross-field invariants
+    if let Err(errors) = config.validate() {
+        for err in &errors {
+            eprintln!("config error: {err}");
+        }
+        anyhow::bail!(
+            "Configuration validation failed with {} error(s). Fix your .env and retry.",
+            errors.len()
+        );
+    }
+
     logging::init(&config.log_level, &config.log_format);
     config.log_startup();
 
@@ -72,13 +83,28 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Paper mode startup guard (Phase 0.3)
+    // Paper mode startup guard (Phase 0.3 + Phase 16: ceremony gate)
     if !config.paper_mode {
-        tracing::warn!("LIVE TRADING MODE — PAPER_MODE=false");
+        tracing::warn!("========================================");
+        tracing::warn!("  LIVE TRADING MODE — PAPER_MODE=false  ");
+        tracing::warn!("========================================");
         tracing::warn!(
             kalshi_base_url = %config.kalshi_base_url,
             "Orders will be submitted with real money"
         );
+        // Send Discord alert for live mode activation (if configured)
+        if let Some(ref webhook_url) = config.discord_webhook_url {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .ok();
+            if let Some(client) = client {
+                let msg = serde_json::json!({
+                    "content": "🚨 **LIVE TRADING MODE ACTIVATED** — PAPER_MODE=false, real money orders enabled"
+                });
+                let _ = client.post(webhook_url).json(&msg).send().await;
+            }
+        }
     } else {
         tracing::info!("Paper trading mode active — no real orders will be submitted");
     }

@@ -45,6 +45,22 @@ jobs:
       - name: Run tests
         run: cargo test
 
+  security-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run security audit
+        run: cargo audit
+
   python-tests:
     name: Python Tests
     runs-on: ubuntu-latest

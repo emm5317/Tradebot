@@ -80,3 +80,140 @@ impl std::fmt::Debug for KalshiAuth {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsa::pkcs8::EncodePrivateKey;
+    use std::io::Write;
+
+    /// Generate a test RSA keypair and write the PEM to a temp file.
+    fn write_test_key_pkcs8() -> (tempfile::NamedTempFile, RsaPrivateKey) {
+        let mut rng = rsa::rand_core::OsRng;
+        let key = RsaPrivateKey::new(&mut rng, 2048).expect("keygen failed");
+        let pem = key
+            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("pem encode failed");
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile failed");
+        f.write_all(pem.as_bytes()).expect("write failed");
+        f.flush().expect("flush failed");
+        (f, key)
+    }
+
+    /// Generate a PKCS#1 PEM file (BEGIN RSA PRIVATE KEY).
+    fn write_test_key_pkcs1() -> tempfile::NamedTempFile {
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        let mut rng = rsa::rand_core::OsRng;
+        let key = RsaPrivateKey::new(&mut rng, 2048).expect("keygen failed");
+        let pem = key
+            .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("pem encode failed");
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile failed");
+        f.write_all(pem.as_bytes()).expect("write failed");
+        f.flush().expect("flush failed");
+        f
+    }
+
+    #[test]
+    fn load_pkcs8_key() {
+        let (f, _) = write_test_key_pkcs8();
+        let auth = KalshiAuth::new("my-api-key".into(), f.path().to_str().unwrap());
+        assert!(auth.is_ok());
+        assert_eq!(auth.unwrap().api_key(), "my-api-key");
+    }
+
+    #[test]
+    fn load_pkcs1_key() {
+        let f = write_test_key_pkcs1();
+        let auth = KalshiAuth::new("my-api-key".into(), f.path().to_str().unwrap());
+        assert!(auth.is_ok());
+    }
+
+    #[test]
+    fn invalid_key_path_returns_error() {
+        let result = KalshiAuth::new("key".into(), "/nonexistent/path.pem");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, KalshiError::SigningError(_)));
+    }
+
+    #[test]
+    fn invalid_pem_content_returns_error() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"not a real PEM file").unwrap();
+        f.flush().unwrap();
+        let result = KalshiAuth::new("key".into(), f.path().to_str().unwrap());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sign_request_produces_valid_output() {
+        let (f, _) = write_test_key_pkcs8();
+        let auth = KalshiAuth::new("test-key".into(), f.path().to_str().unwrap()).unwrap();
+
+        let headers = auth.sign_request("GET", "/trade-api/v2/markets").unwrap();
+
+        // API key is echoed back
+        assert_eq!(headers.api_key, "test-key");
+
+        // Timestamp is a valid integer (milliseconds since epoch)
+        let ts: i64 = headers.timestamp.parse().expect("timestamp should be numeric");
+        assert!(ts > 1_700_000_000_000); // after ~Nov 2023
+
+        // Signature is valid base64
+        let decoded = BASE64.decode(&headers.signature);
+        assert!(decoded.is_ok(), "signature must be valid base64");
+        assert!(!decoded.unwrap().is_empty(), "signature must not be empty");
+    }
+
+    #[test]
+    fn sign_request_different_methods_produce_different_signatures() {
+        let (f, _) = write_test_key_pkcs8();
+        let auth = KalshiAuth::new("key".into(), f.path().to_str().unwrap()).unwrap();
+
+        let h1 = auth.sign_request("GET", "/path").unwrap();
+        let h2 = auth.sign_request("POST", "/path").unwrap();
+
+        // Different methods should produce different signatures (with overwhelming probability)
+        assert_ne!(h1.signature, h2.signature);
+    }
+
+    #[test]
+    fn sign_request_different_paths_produce_different_signatures() {
+        let (f, _) = write_test_key_pkcs8();
+        let auth = KalshiAuth::new("key".into(), f.path().to_str().unwrap()).unwrap();
+
+        let h1 = auth.sign_request("GET", "/path1").unwrap();
+        let h2 = auth.sign_request("GET", "/path2").unwrap();
+
+        assert_ne!(h1.signature, h2.signature);
+    }
+
+    #[test]
+    fn sign_request_verifies_with_public_key() {
+        use rsa::pss::VerifyingKey;
+        use rsa::signature::Verifier;
+
+        let (f, private_key) = write_test_key_pkcs8();
+        let auth = KalshiAuth::new("key".into(), f.path().to_str().unwrap()).unwrap();
+
+        let headers = auth.sign_request("GET", "/test").unwrap();
+
+        // Reconstruct message as the code does
+        let message = format!("{}GET/test", headers.timestamp);
+        let sig_bytes = BASE64.decode(&headers.signature).unwrap();
+        let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+
+        let verifying_key = VerifyingKey::<Sha256>::new(private_key.to_public_key());
+        assert!(verifying_key.verify(message.as_bytes(), &signature).is_ok());
+    }
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let (f, _) = write_test_key_pkcs8();
+        let auth = KalshiAuth::new("super-secret-key".into(), f.path().to_str().unwrap()).unwrap();
+        let debug = format!("{:?}", auth);
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("super-secret-key"));
+    }
+}

@@ -66,3 +66,6 @@ metrics-exporter-prometheus = "0.18"
 # Error handling
 anyhow = "1"
 thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

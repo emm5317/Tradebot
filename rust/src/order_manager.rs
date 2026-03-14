@@ -1814,6 +1814,7 @@ mod tests {
             enable_binance_spot: false,
             enable_deribit: false,
             paper_mode: true,
+            confirm_live_trading: String::new(),
             max_trade_size_cents: 2500,
             max_daily_loss_cents: 10000,
             max_positions: 5,
