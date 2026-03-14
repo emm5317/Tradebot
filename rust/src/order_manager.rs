@@ -71,6 +71,20 @@ impl fmt::Display for OrderState {
 }
 
 impl OrderState {
+    /// Map the 10-state lifecycle to the 5 legacy status values that the
+    /// `orders.status` CHECK constraint allows: pending, filled, cancelled, failed, unknown.
+    pub fn to_legacy_status(&self) -> &'static str {
+        match self {
+            Self::Pending | Self::Submitting | Self::Acknowledged | Self::Replacing => "pending",
+            Self::PartialFill | Self::Filled => "filled",
+            Self::CancelPending | Self::Cancelled => "cancelled",
+            Self::Rejected => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl OrderState {
     /// Validate a state transition. Returns Err with reason if invalid.
     pub fn validate_transition(self, to: OrderState) -> std::result::Result<(), &'static str> {
         // Any state can transition to Unknown (connection loss)
@@ -1289,8 +1303,8 @@ async fn persist_order(pool: &sqlx::PgPool, order: &ManagedOrder, signal: &Signa
     .bind(order.requested_qty as i32) // requested_qty
     .bind(order.filled_qty as i32) // filled_qty
     .bind(order.entry_price.map(|p| p as f32)) // fill_price
-    .bind(order.state.to_string()) // status
-    .bind(order.state.to_string()) // order_state
+    .bind(order.state.to_legacy_status()) // status (5-value CHECK constraint)
+    .bind(order.state.to_string()) // order_state (full 10-state lifecycle)
     .bind(order.latency_ms.unwrap_or(0) as i32) // latency_ms
     .bind(&signal.signal_type)
     .bind(signal.model_prob as f32)
@@ -1534,6 +1548,25 @@ mod tests {
         assert!(!OrderState::Pending.has_fill());
         assert!(!OrderState::Acknowledged.has_fill());
         assert!(!OrderState::Cancelled.has_fill());
+    }
+
+    #[test]
+    fn test_to_legacy_status() {
+        // Pending-family → "pending"
+        assert_eq!(OrderState::Pending.to_legacy_status(), "pending");
+        assert_eq!(OrderState::Submitting.to_legacy_status(), "pending");
+        assert_eq!(OrderState::Acknowledged.to_legacy_status(), "pending");
+        assert_eq!(OrderState::Replacing.to_legacy_status(), "pending");
+        // Fill-family → "filled"
+        assert_eq!(OrderState::Filled.to_legacy_status(), "filled");
+        assert_eq!(OrderState::PartialFill.to_legacy_status(), "filled");
+        // Cancel-family → "cancelled"
+        assert_eq!(OrderState::CancelPending.to_legacy_status(), "cancelled");
+        assert_eq!(OrderState::Cancelled.to_legacy_status(), "cancelled");
+        // Rejected → "failed"
+        assert_eq!(OrderState::Rejected.to_legacy_status(), "failed");
+        // Unknown → "unknown"
+        assert_eq!(OrderState::Unknown.to_legacy_status(), "unknown");
     }
 
     #[test]

@@ -337,19 +337,30 @@ async def system_status():
     try:
         if pool:
             async with pool.acquire() as conn:
-                # Daily P&L (sum of today's realized)
+                # Daily P&L: try strategy_performance first, fall back to orders
                 row = await conn.fetchrow("""
                     SELECT COALESCE(SUM(realized_pnl_cents), 0) as pnl
                     FROM strategy_performance
                     WHERE date = CURRENT_DATE
                 """)
-                if row:
+                if row and row["pnl"]:
                     result["daily_pnl_cents"] = row["pnl"]
+                else:
+                    # Fall back to summing settled order P&L directly
+                    row2 = await conn.fetchrow("""
+                        SELECT COALESCE(SUM(pnl_cents), 0) as pnl
+                        FROM orders
+                        WHERE outcome IN ('win', 'loss')
+                          AND settled_at >= CURRENT_DATE
+                    """)
+                    if row2:
+                        result["daily_pnl_cents"] = row2["pnl"]
 
-                # Open positions count
+                # Open positions count (use order_state for granularity)
                 count = await conn.fetchval("""
                     SELECT COUNT(*) FROM orders
                     WHERE status IN ('filled', 'pending')
+                      AND outcome = 'pending'
                 """)
                 result["positions_count"] = count or 0
 
@@ -469,10 +480,11 @@ async def risk_summary():
                 # Positions with model context
                 pos_rows = await conn.fetch("""
                     SELECT o.ticker, o.direction, o.size_cents, o.fill_price,
-                           o.status, s.model_prob, s.market_price
+                           o.status, o.order_state, s.model_prob, s.market_price
                     FROM orders o
                     LEFT JOIN signals s ON o.signal_id = s.id
                     WHERE o.status IN ('filled', 'pending')
+                      AND o.outcome = 'pending'
                     ORDER BY o.created_at DESC
                     LIMIT 20
                 """)
@@ -561,7 +573,7 @@ async def orders_list(limit: int = 50, offset: int = 0, hours: int | None = None
 
     query = """
         SELECT id, ticker, direction, order_type, size_cents, fill_price,
-               status, outcome, pnl_cents, latency_ms, created_at, filled_at
+               status, order_state, outcome, pnl_cents, latency_ms, created_at, filled_at
         FROM orders
         WHERE ($1::int IS NULL OR created_at >= NOW() - make_interval(hours => $1))
         ORDER BY created_at DESC
@@ -584,10 +596,10 @@ async def execution_stats(hours: int = 24):
             """
             SELECT
                 COUNT(*) as total,
-                COUNT(*) FILTER (WHERE status = 'filled') as filled,
-                COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled,
-                COUNT(*) FILTER (WHERE status = 'failed') as failed,
-                COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                COUNT(*) FILTER (WHERE order_state IN ('filled', 'partial_fill')) as filled,
+                COUNT(*) FILTER (WHERE order_state IN ('cancelled', 'cancel_pending')) as cancelled,
+                COUNT(*) FILTER (WHERE order_state = 'rejected') as failed,
+                COUNT(*) FILTER (WHERE order_state IN ('pending', 'submitting', 'acknowledged')) as pending,
                 AVG(latency_ms) FILTER (WHERE latency_ms IS NOT NULL) as avg_latency,
                 PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms)
                     FILTER (WHERE latency_ms IS NOT NULL) as p50_latency,
@@ -595,7 +607,7 @@ async def execution_stats(hours: int = 24):
                     FILTER (WHERE latency_ms IS NOT NULL) as p95_latency,
                 PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)
                     FILTER (WHERE latency_ms IS NOT NULL) as p99_latency,
-                AVG(fill_price - s.market_price) FILTER (WHERE o.status = 'filled')
+                AVG(fill_price - s.market_price) FILTER (WHERE order_state IN ('filled', 'partial_fill'))
                     as avg_slippage
             FROM orders o
             LEFT JOIN signals s ON o.signal_id = s.id
