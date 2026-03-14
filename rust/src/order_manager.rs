@@ -305,7 +305,7 @@ impl OrderManager {
 
     /// Generate a deterministic client order ID for a signal.
     /// Format: `tb-{hash12}-{seq}` where hash is based on signal parameters.
-    fn generate_client_order_id(&mut self, signal: &Signal) -> String {
+    pub fn generate_client_order_id(&mut self, signal: &Signal) -> String {
         self.sequence += 1;
 
         // Deterministic hash of signal parameters
@@ -341,10 +341,24 @@ impl OrderManager {
             .insert(ticker.to_string(), Instant::now());
     }
 
-    /// Public wrapper for tests to record cooldowns.
-    #[cfg(test)]
+    /// Public wrapper to record cooldowns (used by execution engine split-lock pattern).
     pub fn record_signal_cooldown_pub(&mut self, ticker: &str) {
         self.record_signal_cooldown(ticker);
+    }
+
+    /// Public wrapper to record order submission for rate limiting.
+    pub fn record_order_submission_pub(&mut self, ticker: &str) {
+        self.record_order_submission(ticker);
+    }
+
+    /// Mutable access to positions map (for split-lock execution pattern).
+    pub fn positions_mut(&mut self) -> &mut HashMap<String, String> {
+        &mut self.positions
+    }
+
+    /// Mutable access to orders map (for split-lock execution pattern).
+    pub fn orders_mut(&mut self) -> &mut HashMap<String, ManagedOrder> {
+        &mut self.orders
     }
 
     /// Check global order rate limit (max 10 orders/min).
@@ -1227,7 +1241,7 @@ pub struct ReconciliationEntry {
 // ---------------------------------------------------------------------------
 
 /// Compute order size from Kelly fraction, scaled by confidence, capped by config.
-fn compute_order_size(config: &Config, signal: &Signal) -> i64 {
+pub fn compute_order_size(config: &Config, signal: &Signal) -> i64 {
     let kelly_adjusted = signal.kelly_fraction * config.kelly_fraction_multiplier;
     let confidence_scale = signal.confidence.clamp(0.3, 1.0);
     let size = (kelly_adjusted * confidence_scale * 10000.0) as i64; // Convert to cents
@@ -1246,7 +1260,7 @@ fn cooldown_for_signal_type(signal_type: &str, config: Option<&Config>) -> std::
 }
 
 /// Persist order to database.
-async fn persist_order(pool: &sqlx::PgPool, order: &ManagedOrder, signal: &Signal) -> Result<()> {
+pub async fn persist_order(pool: &sqlx::PgPool, order: &ManagedOrder, signal: &Signal) -> Result<()> {
     let transitions_json =
         serde_json::to_string(&order.transitions.iter().map(|(s, _)| s).collect::<Vec<_>>())
             .unwrap_or_else(|_| "[]".to_string());
@@ -1361,7 +1375,7 @@ pub async fn settle_order_outcomes(pool: &sqlx::PgPool) -> Result<u64> {
 }
 
 /// Record a paper trade with full signal parameters.
-async fn record_paper_trade(pool: &sqlx::PgPool, signal: &Signal, size_cents: i64) -> Result<()> {
+pub async fn record_paper_trade(pool: &sqlx::PgPool, signal: &Signal, size_cents: i64) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO paper_trades (
