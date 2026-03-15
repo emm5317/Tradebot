@@ -237,6 +237,8 @@ mod tests {
             crypto_kelly_fill_min: 0.02,
             crypto_compress_factor: 0.20,
             crypto_max_signals_per_hour: 20,
+            crypto_market_price_floor: 0.30,
+            crypto_market_price_ceiling: 0.70,
             enable_crypto_btc: true,
             enable_crypto_eth: false,
             enable_crypto_sol: false,

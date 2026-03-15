@@ -674,7 +674,34 @@ async fn evaluate_entry(
         return;
     }
 
-    // 4b. Guard: market disagreement — model shouldn't disagree with market by >N% (per-asset)
+    // 4b. Guard: market price band — only trade contracts priced 30-70c (near-ATM)
+    //     Deep OTM (<30c) and deep ITM (>70c) have ~0% model accuracy.
+    if mid_price < config.crypto_market_price_floor || mid_price > config.crypto_market_price_ceiling {
+        debug!(
+            ticker = %contract.ticker,
+            market_price = %format!("{:.4}", mid_price),
+            floor = %format!("{:.2}", config.crypto_market_price_floor),
+            ceiling = %format!("{:.2}", config.crypto_market_price_ceiling),
+            "crypto eval: market price outside tradeable band"
+        );
+        decision_writer.send(DecisionEntry {
+            ticker: contract.ticker.clone(),
+            signal_type: "crypto".into(),
+            outcome: "rejected".into(),
+            rejection_reason: Some("market_price_out_of_band".into()),
+            model_prob: Some(fv.probability),
+            market_price: Some(mid_price),
+            edge: Some(raw_edge),
+            direction: Some(direction.to_string()),
+            minutes_remaining: Some(minutes_remaining),
+            confidence: Some(fv.confidence),
+            eval_latency_ms: Some(eval_start.elapsed().as_secs_f64() * 1000.0),
+            ..Default::default()
+        });
+        return;
+    }
+
+    // 4c. Guard: market disagreement — model shouldn't disagree with market by >N% (per-asset)
     if raw_edge > asset_config.max_market_disagreement {
         debug!(
             ticker = %contract.ticker,

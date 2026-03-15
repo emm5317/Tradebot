@@ -97,6 +97,12 @@ pub struct Config {
     #[serde(default = "default_crypto_kelly_fill_min")]
     pub crypto_kelly_fill_min: f64,
 
+    // Phase 15.1: Market price band filter — only trade near-ATM contracts
+    #[serde(default = "default_crypto_market_price_floor")]
+    pub crypto_market_price_floor: f64,
+    #[serde(default = "default_crypto_market_price_ceiling")]
+    pub crypto_market_price_ceiling: f64,
+
     // Phase 14: Tail compression and rate limiting
     #[serde(default = "default_crypto_compress_factor")]
     pub crypto_compress_factor: f64,
@@ -200,6 +206,14 @@ fn default_crypto_max_signals_per_hour() -> u32 {
     20
 }
 
+fn default_crypto_market_price_floor() -> f64 {
+    0.30
+}
+
+fn default_crypto_market_price_ceiling() -> f64 {
+    0.70
+}
+
 fn default_rti_stale_threshold_secs() -> u64 {
     5
 }
@@ -252,6 +266,7 @@ impl Config {
             crypto_kelly_fill_min = self.crypto_kelly_fill_min,
             crypto_compress_factor = self.crypto_compress_factor,
             crypto_max_signals_per_hour = self.crypto_max_signals_per_hour,
+            crypto_market_price_band = %format!("{}-{}", self.crypto_market_price_floor, self.crypto_market_price_ceiling),
             crypto_cooldown_secs = self.crypto_cooldown_secs,
             weather_cooldown_secs = self.weather_cooldown_secs,
             database_pool_size = self.database_pool_size,
