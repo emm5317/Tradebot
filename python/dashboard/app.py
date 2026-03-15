@@ -189,14 +189,44 @@ async def positions():
 
 @app.get("/api/daily-summary")
 async def daily_summary():
-    """Fetch today's trading summary."""
+    """Fetch recent daily trading summary, computed from orders + signals."""
     assert pool is not None
 
     query = """
-        SELECT date, total_signals, total_orders, wins, losses,
-               net_pnl_cents, avg_edge
-        FROM daily_summary
-        ORDER BY date DESC
+        SELECT
+            d.date,
+            COALESCE(sig.total_signals, 0) AS total_signals,
+            COALESCE(d.total_orders, 0) AS total_orders,
+            COALESCE(d.wins, 0) AS wins,
+            COALESCE(d.losses, 0) AS losses,
+            COALESCE(d.net_pnl_cents, 0) AS net_pnl_cents,
+            COALESCE(sp.avg_edge, d.avg_edge) AS avg_edge
+        FROM (
+            SELECT
+                DATE(created_at) AS date,
+                COUNT(*) AS total_orders,
+                COUNT(*) FILTER (WHERE outcome = 'win') AS wins,
+                COUNT(*) FILTER (WHERE outcome = 'loss') AS losses,
+                COALESCE(SUM(pnl_cents), 0) AS net_pnl_cents,
+                AVG(CASE WHEN model_prob IS NOT NULL AND market_price_at_order IS NOT NULL
+                    THEN ABS(model_prob - market_price_at_order) END) AS avg_edge
+            FROM orders
+            WHERE created_at >= CURRENT_DATE - 7
+            GROUP BY DATE(created_at)
+        ) d
+        LEFT JOIN (
+            SELECT DATE(created_at) AS date, COUNT(*) AS total_signals
+            FROM signals
+            WHERE created_at >= CURRENT_DATE - 7
+            GROUP BY DATE(created_at)
+        ) sig ON sig.date = d.date
+        LEFT JOIN (
+            SELECT date, AVG(avg_edge) AS avg_edge
+            FROM strategy_performance
+            WHERE date >= CURRENT_DATE - 7
+            GROUP BY date
+        ) sp ON sp.date = d.date
+        ORDER BY d.date DESC
         LIMIT 7
     """
     async with pool.acquire() as conn:

@@ -15,7 +15,7 @@ import asyncio
 
 import structlog
 
-from data.kalshi_history import pull_active_contracts, pull_settlement_history
+from data.kalshi_history import pull_active_contracts, pull_settlement_history, settle_stale_contracts
 
 logger = structlog.get_logger()
 
@@ -39,6 +39,11 @@ async def main() -> None:
         if args.settled or pull_both:
             n = await pull_settlement_history(months=args.months)
             print(f"Synced {n} settled contracts")
+
+        # Always settle stale contracts (orders past settlement with no result)
+        n = await settle_stale_contracts()
+        if n > 0:
+            print(f"Settled {n} stale contracts + updated order outcomes")
 
         if args.loop <= 0:
             break

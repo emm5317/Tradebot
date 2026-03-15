@@ -234,6 +234,149 @@ async def _upsert_contracts(pool: asyncpg.Pool, markets: list[dict]) -> None:
             )
 
 
+async def settle_stale_contracts(
+    settings: Settings | None = None,
+) -> int:
+    """Fetch settlement results for contracts that have pending orders past settlement time.
+
+    Queries Kalshi API for individual market status and updates contracts.settled_yes
+    so that settle_order_outcomes() can compute P&L.
+    Returns the number of contracts updated with settlement results.
+    """
+    if settings is None:
+        settings = get_settings()
+
+    pool = await asyncpg.create_pool(
+        settings.database_url, min_size=1, max_size=3,
+        ssl=get_db_ssl_mode(settings.database_url),
+    )
+    settled = 0
+
+    try:
+        # Find tickers with pending orders on contracts past settlement time
+        async with pool.acquire() as conn:
+            stale_tickers = await conn.fetch(
+                """
+                SELECT DISTINCT o.ticker
+                FROM orders o
+                JOIN contracts c ON o.ticker = c.ticker
+                WHERE o.outcome = 'pending'
+                  AND o.status = 'filled'
+                  AND c.settled_yes IS NULL
+                  AND c.settlement_time < NOW()
+                """
+            )
+
+        if not stale_tickers:
+            logger.info("settle_stale_none_pending")
+            return 0
+
+        logger.info("settle_stale_checking", count=len(stale_tickers))
+
+        transport = httpx.AsyncHTTPTransport(retries=2)
+        async with httpx.AsyncClient(
+            transport=transport,
+            timeout=httpx.Timeout(30.0),
+            base_url=settings.kalshi_base_url,
+        ) as client:
+            for row in stale_tickers:
+                ticker = row["ticker"]
+                await asyncio.sleep(_REQUEST_INTERVAL)
+
+                try:
+                    resp = await client.get(f"/trade-api/v2/markets/{ticker}")
+                except httpx.HTTPError as exc:
+                    logger.warning("settle_stale_fetch_error", ticker=ticker, error=str(exc))
+                    continue
+
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("Retry-After", "5"))
+                    logger.warning("settle_stale_rate_limited", retry_after=retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
+
+                if resp.status_code != 200:
+                    logger.debug("settle_stale_fetch_failed", ticker=ticker, status=resp.status_code)
+                    continue
+
+                data = resp.json()
+                market = data.get("market", data)
+
+                result_str = market.get("result")
+                status = market.get("status", "")
+                close_price = market.get("last_price")
+
+                settled_yes: bool | None = None
+                if result_str == "yes":
+                    settled_yes = True
+                elif result_str == "no":
+                    settled_yes = False
+
+                if settled_yes is None and status not in ("settled", "determined", "finalized"):
+                    # Contract hasn't actually settled on Kalshi yet
+                    continue
+
+                if close_price is not None:
+                    close_price = float(close_price) / 100.0
+
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE contracts SET
+                            status = $2,
+                            settled_yes = $3,
+                            close_price = $4,
+                            updated_at = now()
+                        WHERE ticker = $1
+                        """,
+                        ticker, status, settled_yes, close_price,
+                    )
+                settled += 1
+                logger.debug("settle_stale_updated", ticker=ticker, settled_yes=settled_yes)
+
+        # Now settle order outcomes
+        if settled > 0:
+            async with pool.acquire() as conn:
+                result = await conn.execute(
+                    """
+                    UPDATE orders SET
+                        outcome = CASE
+                            WHEN (direction = 'yes' AND c.settled_yes = true)
+                              OR (direction = 'no' AND c.settled_yes = false)
+                            THEN 'win'
+                            ELSE 'loss'
+                        END,
+                        pnl_cents = CASE
+                            WHEN (direction = 'yes' AND c.settled_yes = true)
+                              OR (direction = 'no' AND c.settled_yes = false)
+                            THEN (100 - ROUND(fill_price * 100)::integer)
+                            ELSE (-ROUND(fill_price * 100)::integer)
+                        END,
+                        settled_at = now()
+                    FROM contracts c
+                    WHERE orders.ticker = c.ticker
+                      AND c.settled_yes IS NOT NULL
+                      AND orders.outcome = 'pending'
+                    """
+                )
+                orders_settled = _parse_update_count(result)
+                logger.info("settle_stale_orders_settled", contracts=settled, orders=orders_settled)
+
+    finally:
+        await pool.close()
+
+    logger.info("settle_stale_complete", contracts_settled=settled)
+    return settled
+
+
+def _parse_update_count(result: str) -> int:
+    """Parse asyncpg UPDATE result string like 'UPDATE 42' into row count."""
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 async def pull_active_contracts(
     settings: Settings | None = None,
     categories: list[str] | None = None,
